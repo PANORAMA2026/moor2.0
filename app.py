@@ -270,7 +270,7 @@ def calculate_wind_operability_envelope(
     max_wind_test=70,
     step_deg=10,
 ):
-  """Simula la velocita massima del vento sostenibile prima che un cavo superi il 50% MBL."""
+  """Simula la velocità massima del vento sostenibile prima che un cavo superi il 50% MBL."""
   angles = np.arange(0, 360, step_deg)
   max_safe_winds = []
 
@@ -460,39 +460,221 @@ DEFAULT_LINES = pd.DataFrame([
     },
 ])
 
+# ELENCO PORTI AGGIORNATO
 DEFAULT_BOLLARDS = pd.DataFrame([
+    # Ensenada Pier #2
     {
-        "port_name": "Cabo San Lucas",
+        "port_name": "Ensenada (pier #2)",
         "bollard_id": "B1",
-        "bollard_x_m": 175.0,
-        "bollard_y_m": 35.0,
-        "bollard_z_m": 2.5,
+        "bollard_x_m": 170.0,
+        "bollard_y_m": 25.0,
+        "bollard_z_m": 3.0,
     },
     {
-        "port_name": "Cabo San Lucas",
+        "port_name": "Ensenada (pier #2)",
         "bollard_id": "B2",
-        "bollard_x_m": 145.0,
-        "bollard_y_m": 40.0,
-        "bollard_z_m": 2.5,
+        "bollard_x_m": 140.0,
+        "bollard_y_m": 25.0,
+        "bollard_z_m": 3.0,
     },
     {
-        "port_name": "Cabo San Lucas",
+        "port_name": "Ensenada (pier #2)",
         "bollard_id": "B3",
         "bollard_x_m": 80.0,
         "bollard_y_m": 25.0,
+        "bollard_z_m": 3.0,
+    },
+    {
+        "port_name": "Ensenada (pier #2)",
+        "bollard_id": "B4",
+        "bollard_x_m": -80.0,
+        "bollard_y_m": 25.0,
+        "bollard_z_m": 3.0,
+    },
+    {
+        "port_name": "Ensenada (pier #2)",
+        "bollard_id": "B5",
+        "bollard_x_m": -160.0,
+        "bollard_y_m": 25.0,
+        "bollard_z_m": 3.0,
+    },
+    # Long Beach Cruise Terminal
+    {
+        "port_name": "Long Beach (cruise terminal)",
+        "bollard_id": "B1",
+        "bollard_x_m": 175.0,
+        "bollard_y_m": 30.0,
         "bollard_z_m": 2.5,
     },
     {
-        "port_name": "Cabo San Lucas",
-        "bollard_id": "B4",
-        "bollard_x_m": -80.0,
+        "port_name": "Long Beach (cruise terminal)",
+        "bollard_id": "B2",
+        "bollard_x_m": 145.0,
+        "bollard_y_m": 30.0,
+        "bollard_z_m": 2.5,
+    },
+    {
+        "port_name": "Long Beach (cruise terminal)",
+        "bollard_id": "B3",
+        "bollard_x_m": 85.0,
         "bollard_y_m": 25.0,
         "bollard_z_m": 2.5,
     },
     {
-        "port_name": "Cabo San Lucas",
+        "port_name": "Long Beach (cruise terminal)",
+        "bollard_id": "B4",
+        "bollard_x_m": -85.0,
+        "bollard_y_m": 25.0,
+        "bollard_z_m": 2.5,
+    },
+    {
+        "port_name": "Long Beach (cruise terminal)",
         "bollard_id": "B5",
         "bollard_x_m": -170.0,
+        "bollard_y_m": 30.0,
+        "bollard_z_m": 2.5,
+    },
+    # Mazatlan
+    {
+        "port_name": "Mazatlan",
+        "bollard_id": "B1",
+        "bollard_x_m": 165.0,
+        "bollard_y_m": 28.0,
+        "bollard_z_m": 2.0,
+    },
+    {
+        "port_name": "Mazatlan",
+        "bollard_id": "B2",
+        "bollard_x_m": 135.0,
+        "bollard_y_m": 28.0,
+        "bollard_z_m": 2.0,
+    },
+    {
+        "port_name": "Mazatlan",
+        "bollard_id": "B3",
+        "bollard_x_m": 75.0,
+        "bollard_y_m": 24.0,
+        "bollard_z_m": 2.0,
+    },
+    {
+        "port_name": "Mazatlan",
+        "bollard_id": "B4",
+        "bollard_x_m": -75.0,
+        "bollard_y_m": 24.0,
+        "bollard_z_m": 2.0,
+    },
+    {
+        "port_name": "Mazatlan",
+        "bollard_id": "B5",
+        "bollard_x_m": -165.0,
+        "bollard_y_m": 28.0,
+        "bollard_z_m": 2.0,
+    },
+    # La Paz
+    {
+        "port_name": "La Paz",
+        "bollard_id": "B1",
+        "bollard_x_m": 160.0,
+        "bollard_y_m": 26.0,
+        "bollard_z_m": 2.0,
+    },
+    {
+        "port_name": "La Paz",
+        "bollard_id": "B2",
+        "bollard_x_m": 130.0,
+        "bollard_y_m": 26.0,
+        "bollard_z_m": 2.0,
+    },
+    {
+        "port_name": "La Paz",
+        "bollard_id": "B3",
+        "bollard_x_m": 70.0,
+        "bollard_y_m": 22.0,
+        "bollard_z_m": 2.0,
+    },
+    {
+        "port_name": "La Paz",
+        "bollard_id": "B4",
+        "bollard_x_m": -70.0,
+        "bollard_y_m": 22.0,
+        "bollard_z_m": 2.0,
+    },
+    {
+        "port_name": "La Paz",
+        "bollard_id": "B5",
+        "bollard_x_m": -160.0,
+        "bollard_y_m": 26.0,
+        "bollard_z_m": 2.0,
+    },
+    # Puerto Vallarta Pier #1
+    {
+        "port_name": "Puerto Vallarta (pier #1)",
+        "bollard_id": "B1",
+        "bollard_x_m": 170.0,
+        "bollard_y_m": 32.0,
+        "bollard_z_m": 2.5,
+    },
+    {
+        "port_name": "Puerto Vallarta (pier #1)",
+        "bollard_id": "B2",
+        "bollard_x_m": 140.0,
+        "bollard_y_m": 32.0,
+        "bollard_z_m": 2.5,
+    },
+    {
+        "port_name": "Puerto Vallarta (pier #1)",
+        "bollard_id": "B3",
+        "bollard_x_m": 80.0,
+        "bollard_y_m": 26.0,
+        "bollard_z_m": 2.5,
+    },
+    {
+        "port_name": "Puerto Vallarta (pier #1)",
+        "bollard_id": "B4",
+        "bollard_x_m": -80.0,
+        "bollard_y_m": 26.0,
+        "bollard_z_m": 2.5,
+    },
+    {
+        "port_name": "Puerto Vallarta (pier #1)",
+        "bollard_id": "B5",
+        "bollard_x_m": -170.0,
+        "bollard_y_m": 32.0,
+        "bollard_z_m": 2.5,
+    },
+    # Puerto Vallarta Pier #3
+    {
+        "port_name": "Puerto Vallarta (pier #3)",
+        "bollard_id": "B1",
+        "bollard_x_m": 172.0,
+        "bollard_y_m": 30.0,
+        "bollard_z_m": 2.5,
+    },
+    {
+        "port_name": "Puerto Vallarta (pier #3)",
+        "bollard_id": "B2",
+        "bollard_x_m": 142.0,
+        "bollard_y_m": 30.0,
+        "bollard_z_m": 2.5,
+    },
+    {
+        "port_name": "Puerto Vallarta (pier #3)",
+        "bollard_id": "B3",
+        "bollard_x_m": 82.0,
+        "bollard_y_m": 25.0,
+        "bollard_z_m": 2.5,
+    },
+    {
+        "port_name": "Puerto Vallarta (pier #3)",
+        "bollard_id": "B4",
+        "bollard_x_m": -82.0,
+        "bollard_y_m": 25.0,
+        "bollard_z_m": 2.5,
+    },
+    {
+        "port_name": "Puerto Vallarta (pier #3)",
+        "bollard_id": "B5",
+        "bollard_x_m": -172.0,
         "bollard_y_m": 30.0,
         "bollard_z_m": 2.5,
     },
@@ -590,7 +772,7 @@ with tab_app2:
   )
   results_df = solve_line_tensions_3d(geom_df, forces)
 
-  st.subheader(f"Layout & Tenzioni ad Ormeggio: **{selected_port}**")
+  st.subheader(f"Layout & Tensioni ad Ormeggio: **{selected_port}**")
 
   col1, col2, col3 = st.columns(3)
   col1.metric("Forza Longitudinale (Fx)", f"{forces['Fx_total']:.1f} kN")
@@ -637,7 +819,7 @@ with tab_app2:
 with tab_app3:
   st.subheader("Inviluppo Polare dei Limiti Operativi del Vento (0-360°)")
   st.write(
-      "Visualizza la velocita massima del vento sostenibile prima che una linea"
+      "Visualizza la velocità massima del vento sostenibile prima che una linea"
       " superi il **50% MBL**."
   )
 
