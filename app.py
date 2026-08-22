@@ -6,14 +6,16 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
+st.set_page_config(page_title="OpenMooring MEG4 Pro", layout="wide")
+
 # =============================================================================
-# 1. DATABASE & MANUTENZIONE PREDITTIVA (MOORING DB)
+# 1. DATABASE & MANUTENZIONE PREDITTIVA (SQLite)
 # =============================================================================
 DB_NAME = "mooring_history.db"
 
 
 def init_db(lines_df=None):
-  """Inizializza il database SQLite locale e registra i cavi se non presenti."""
+  """Inizializza il database SQLite locale e registra i cavi."""
   conn = sqlite3.connect(DB_NAME)
   cursor = conn.cursor()
   cursor.execute("""
@@ -54,7 +56,7 @@ def init_db(lines_df=None):
 
 
 def log_mooring_session(results_df, port_name, duration_hours=6.0):
-  """Registra l'ormeggio e aggiorna l'indice di fatica e usura dei cavi."""
+  """Registra l'ormeggio e aggiorna l'indice di usura dei cavi."""
   conn = sqlite3.connect(DB_NAME)
   cursor = conn.cursor()
   now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -129,7 +131,7 @@ def get_lines_health_status():
 
 
 # =============================================================================
-# 2. MOTORE FISICO, GEOMETRICO E CALCOLO POLARE (MOORING MATH)
+# 2. MOTORE FISICO & GEOMETRICO
 # =============================================================================
 def calculate_environmental_forces(
     v_wind_knots,
@@ -141,8 +143,7 @@ def calculate_environmental_forces(
     alc,
     loa,
 ):
-  """Calcola forze (Fx, Fy) e momento (Mz) da vento e corrente (Formule OCIMF)."""
-  v_wind = float(v_wind_knots) * 0.514444  # knots -> m/s
+  v_wind = float(v_wind_knots) * 0.514444
   v_curr = float(v_curr_knots) * 0.514444
   rho_air = 1.225
   rho_water = 1025.0
@@ -174,7 +175,6 @@ def calculate_environmental_forces(
 
 
 def calculate_line_geometry(lines_df, bollards_df):
-  """Calcola lunghezza 3D, azimut e inclinazione convertendo preventivamente le chiavi in stringhe."""
   l_df = lines_df.copy()
   b_df = bollards_df.copy()
 
@@ -186,37 +186,31 @@ def calculate_line_geometry(lines_df, bollards_df):
   )
 
   if merged.empty:
-    st.error(
-        "⚠️ Attenzione: Nessuna corrispondenza trovata tra i bollard_id dei"
-        " cavi e della banchina selezionata! Controlla i CSV."
-    )
     return merged
 
-  dx = (
-      merged["bollard_x_m"].astype(float) - merged["chock_x_m"].astype(float)
-  )
-  dy = (
-      merged["bollard_y_m"].astype(float) - merged["chock_y_m"].astype(float)
-  )
-  dz = (
-      merged["bollard_z_m"].astype(float) - merged["chock_z_m"].astype(float)
-  )
+  # Mappatura tollerante per colonne X, Y, Z
+  x_col = "bollard_x_m" if "bollard_x_m" in merged.columns else "X_Coordinata_m"
+  y_col = "bollard_y_m" if "bollard_y_m" in merged.columns else "Y_Coordinata_m"
+  z_col = "bollard_z_m" if "bollard_z_m" in merged.columns else "Z_Altezza_m"
+
+  dx = merged[x_col].astype(float) - merged["chock_x_m"].astype(float)
+  dy = merged[y_col].astype(float) - merged["chock_y_m"].astype(float)
+  dz = merged[z_col].astype(float) - merged["chock_z_m"].astype(float)
 
   length_3d = np.sqrt(dx**2 + dy**2 + dz**2)
   length_2d = np.sqrt(dx**2 + dy**2)
 
-  azimuth_deg = np.degrees(np.arctan2(dy, dx)) % 360
-  incline_deg = np.degrees(np.arctan2(np.abs(dz), length_2d))
-
   merged["length_m"] = length_3d
-  merged["azimuth_deg"] = azimuth_deg
-  merged["incline_deg"] = incline_deg
+  merged["azimuth_deg"] = np.degrees(np.arctan2(dy, dx)) % 360
+  merged["incline_deg"] = np.degrees(np.arctan2(np.abs(dz), length_2d))
+  merged["bollard_x_rendered"] = merged[x_col]
+  merged["bollard_y_rendered"] = merged[y_col]
+  merged["bollard_z_rendered"] = merged[z_col]
 
   return merged
 
 
 def calculate_composite_stiffness(line):
-  """Calcola la rigidezza equivalente in serie (Cavo + Coda sintetica)."""
   length_tail = float(line.get("tail_length_m", 0.0))
   length_main = max(0.1, float(line["length_m"]) - length_tail)
   area_main = np.pi * ((float(line["diameter_mm"]) / 1000.0) ** 2) / 4.0
@@ -239,7 +233,6 @@ def calculate_composite_stiffness(line):
 
 
 def solve_line_tensions_3d(lines_geom_df, forces):
-  """Risolve il sistema matriciale delle forze ed estrae il carico sui cavi (% MBL)."""
   if lines_geom_df.empty:
     return lines_geom_df
 
@@ -271,14 +264,11 @@ def solve_line_tensions_3d(lines_geom_df, forces):
   except np.linalg.LinAlgError:
     displacements = np.zeros(3)
 
-  tensions = []
-  utilizations = []
-
+  tensions, utilizations = [], []
   for item in line_data:
-    t = item["k"] * np.dot(item["b"], displacements)
-    t_pos = max(0.0, t)
-    tensions.append(t_pos)
-    utilizations.append((t_pos / item["mbl"]) * 100.0)
+    t = max(0.0, item["k"] * np.dot(item["b"], displacements))
+    tensions.append(t)
+    utilizations.append((t / item["mbl"]) * 100.0)
 
   lines_geom_df["Tension_kN"] = tensions
   lines_geom_df["Util_Percent"] = utilizations
@@ -296,7 +286,6 @@ def calculate_wind_operability_envelope(
     max_wind_test=70,
     step_deg=10,
 ):
-  """Simula la velocità massima del vento sostenibile prima che un cavo superi il 50% MBL."""
   angles = np.arange(0, 360, step_deg)
   max_safe_winds = []
 
@@ -318,529 +307,555 @@ def calculate_wind_operability_envelope(
   return list(angles), max_safe_winds
 
 
-def create_mooring_3d_plot(results_df, bollards_df, loa=323.0, beam=37.2):
-  """Crea la rappresentazione grafica 3D del layout d'ormeggio con Plotly."""
-  fig = go.Figure()
-
-  ship_x = [-loa / 2, loa / 2 - 30, loa / 2, loa / 2 - 30, -loa / 2, -loa / 2]
-  ship_y = [-beam / 2, -beam / 2, 0, beam / 2, beam / 2, -beam / 2]
-  ship_z = [10.0] * len(ship_x)
-
-  fig.add_trace(
-      go.Scatter3d(
-          x=ship_x,
-          y=ship_y,
-          z=ship_z,
-          mode="lines",
-          line=dict(color="navy", width=5),
-          name="Nave",
-      )
-  )
-
-  fig.add_trace(
-      go.Scatter3d(
-          x=bollards_df["bollard_x_m"],
-          y=bollards_df["bollard_y_m"],
-          z=bollards_df["bollard_z_m"],
-          mode="markers+text",
-          marker=dict(size=6, color="black"),
-          text=bollards_df["bollard_id"],
-          name="Bittoni",
-      )
-  )
-
-  for _, line in results_df.iterrows():
-    util = line["Util_Percent"]
-    color = "red" if util > 50.0 else ("orange" if util > 35.0 else "green")
-
-    fig.add_trace(
-        go.Scatter3d(
-            x=[line["chock_x_m"], line["bollard_x_m"]],
-            y=[line["chock_y_m"], line["bollard_y_m"]],
-            z=[line["chock_z_m"], line["bollard_z_m"]],
-            mode="lines+markers",
-            line=dict(color=color, width=4),
-            name=f"{line['line_name']} ({util:.1f}%)",
-        )
-    )
-
-  fig.update_layout(
-      scene=dict(aspectmode="data"), margin=dict(l=0, r=0, b=0, t=30)
-  )
-  return fig
-
-
 # =============================================================================
-# 3. INTERFACCIA STREAMLIT MAIN APP
+# 3. Dati DI DEFAULT PER SESSION_STATE
 # =============================================================================
-st.set_page_config(page_title="OpenMooring MEG4 Pro", layout="wide")
-st.title("⚓ OpenMooring - Analysis & Line Lifetime Management")
-
 DEFAULT_SHIP = {
-    "LOA": 323.0,
+    "LOA": 323.6,
     "Beam": 37.2,
-    "Draft_Fwd": 8.2,
-    "Draft_Aft": 8.4,
-    "AFW": 1100.0,
-    "ALW": 5200.0,
+    "Draft": 8.2,
+    "AFW": 1250.0,
+    "ALW": 6120.0,
     "ALC": 1200.0,
 }
 
-DEFAULT_LINES = pd.DataFrame([
-    {
-        "line_id": "1",
-        "line_name": "Head Line 1",
-        "chock_x_m": 150.0,
-        "chock_y_m": 2.0,
-        "chock_z_m": 12.0,
-        "material": "HMPE",
-        "diameter_mm": 64,
-        "E_modulus_GPa": 120,
-        "mbl_kN": 950,
-        "tail_length_m": 11.0,
-        "tail_diameter_mm": 72,
-        "tail_E_modulus_GPa": 6,
-        "tail_mbl_kN": 900,
-        "bollard_id": "B1",
-    },
-    {
-        "line_id": "2",
-        "line_name": "Head Line 2",
-        "chock_x_m": 150.0,
-        "chock_y_m": -2.0,
-        "chock_z_m": 12.0,
-        "material": "HMPE",
-        "diameter_mm": 64,
-        "E_modulus_GPa": 120,
-        "mbl_kN": 950,
-        "tail_length_m": 11.0,
-        "tail_diameter_mm": 72,
-        "tail_E_modulus_GPa": 6,
-        "tail_mbl_kN": 900,
-        "bollard_id": "B1",
-    },
-    {
-        "line_id": "3",
-        "line_name": "Fwd Breast 1",
-        "chock_x_m": 138.0,
-        "chock_y_m": 18.0,
-        "chock_z_m": 10.0,
-        "material": "HMPE",
-        "diameter_mm": 64,
-        "E_modulus_GPa": 120,
-        "mbl_kN": 950,
-        "tail_length_m": 11.0,
-        "tail_diameter_mm": 72,
-        "tail_E_modulus_GPa": 6,
-        "tail_mbl_kN": 900,
-        "bollard_id": "B2",
-    },
-    {
-        "line_id": "4",
-        "line_name": "Fwd Spring 1",
-        "chock_x_m": 110.0,
-        "chock_y_m": 18.0,
-        "chock_z_m": 8.0,
-        "material": "HMPE",
-        "diameter_mm": 64,
-        "E_modulus_GPa": 120,
-        "mbl_kN": 950,
-        "tail_length_m": 0.0,
-        "tail_diameter_mm": 0,
-        "tail_E_modulus_GPa": 0,
-        "tail_mbl_kN": 0,
-        "bollard_id": "B3",
-    },
-    {
-        "line_id": "5",
-        "line_name": "Aft Spring 1",
-        "chock_x_m": -110.0,
-        "chock_y_m": 18.0,
-        "chock_z_m": 8.0,
-        "material": "HMPE",
-        "diameter_mm": 64,
-        "E_modulus_GPa": 120,
-        "mbl_kN": 950,
-        "tail_length_m": 0.0,
-        "tail_diameter_mm": 0,
-        "tail_E_modulus_GPa": 0,
-        "tail_mbl_kN": 0,
-        "bollard_id": "B4",
-    },
-    {
-        "line_id": "6",
-        "line_name": "Stern Line 1",
-        "chock_x_m": -150.0,
-        "chock_y_m": 0.0,
-        "chock_z_m": 12.0,
-        "material": "HMPE",
-        "diameter_mm": 64,
-        "E_modulus_GPa": 120,
-        "mbl_kN": 950,
-        "tail_length_m": 11.0,
-        "tail_diameter_mm": 72,
-        "tail_E_modulus_GPa": 6,
-        "tail_mbl_kN": 900,
-        "bollard_id": "B5",
-    },
-])
+if "lines_inventory" not in st.session_state:
+  st.session_state.lines_inventory = pd.DataFrame([
+      {
+          "line_id": "1",
+          "line_name": "Head Line 1",
+          "chock_x_m": 150.0,
+          "chock_y_m": 2.0,
+          "chock_z_m": 12.0,
+          "material": "HMPE",
+          "diameter_mm": 64,
+          "E_modulus_GPa": 120,
+          "mbl_kN": 1030,
+          "tail_length_m": 11.0,
+          "tail_diameter_mm": 72,
+          "tail_E_modulus_GPa": 6,
+          "tail_mbl_kN": 980,
+          "bollard_id": "B1",
+      },
+      {
+          "line_id": "2",
+          "line_name": "Head Line 2",
+          "chock_x_m": 150.0,
+          "chock_y_m": -2.0,
+          "chock_z_m": 12.0,
+          "material": "HMPE",
+          "diameter_mm": 64,
+          "E_modulus_GPa": 120,
+          "mbl_kN": 1030,
+          "tail_length_m": 11.0,
+          "tail_diameter_mm": 72,
+          "tail_E_modulus_GPa": 6,
+          "tail_mbl_kN": 980,
+          "bollard_id": "B1",
+      },
+      {
+          "line_id": "3",
+          "line_name": "Fwd Breast 1",
+          "chock_x_m": 138.0,
+          "chock_y_m": 18.0,
+          "chock_z_m": 10.0,
+          "material": "HMPE",
+          "diameter_mm": 64,
+          "E_modulus_GPa": 120,
+          "mbl_kN": 1030,
+          "tail_length_m": 11.0,
+          "tail_diameter_mm": 72,
+          "tail_E_modulus_GPa": 6,
+          "tail_mbl_kN": 980,
+          "bollard_id": "B2",
+      },
+      {
+          "line_id": "4",
+          "line_name": "Fwd Spring 1",
+          "chock_x_m": 110.0,
+          "chock_y_m": 18.0,
+          "chock_z_m": 8.0,
+          "material": "HMPE",
+          "diameter_mm": 64,
+          "E_modulus_GPa": 120,
+          "mbl_kN": 1030,
+          "tail_length_m": 0.0,
+          "tail_diameter_mm": 0,
+          "tail_E_modulus_GPa": 0,
+          "tail_mbl_kN": 0,
+          "bollard_id": "B3",
+      },
+      {
+          "line_id": "5",
+          "line_name": "Aft Spring 1",
+          "chock_x_m": -110.0,
+          "chock_y_m": 18.0,
+          "chock_z_m": 8.0,
+          "material": "HMPE",
+          "diameter_mm": 64,
+          "E_modulus_GPa": 120,
+          "mbl_kN": 1030,
+          "tail_length_m": 0.0,
+          "tail_diameter_mm": 0,
+          "tail_E_modulus_GPa": 0,
+          "tail_mbl_kN": 0,
+          "bollard_id": "B4",
+      },
+      {
+          "line_id": "6",
+          "line_name": "Stern Line 1",
+          "chock_x_m": -150.0,
+          "chock_y_m": 0.0,
+          "chock_z_m": 12.0,
+          "material": "HMPE",
+          "diameter_mm": 64,
+          "E_modulus_GPa": 120,
+          "mbl_kN": 1030,
+          "tail_length_m": 11.0,
+          "tail_diameter_mm": 72,
+          "tail_E_modulus_GPa": 6,
+          "tail_mbl_kN": 980,
+          "bollard_id": "B5",
+      },
+  ])
 
-DEFAULT_BOLLARDS = pd.DataFrame([
-    {
-        "port_name": "Ensenada (pier #2)",
-        "bollard_id": "B1",
-        "bollard_x_m": 170.0,
-        "bollard_y_m": 25.0,
-        "bollard_z_m": 3.0,
-    },
-    {
-        "port_name": "Ensenada (pier #2)",
-        "bollard_id": "B2",
-        "bollard_x_m": 140.0,
-        "bollard_y_m": 25.0,
-        "bollard_z_m": 3.0,
-    },
-    {
-        "port_name": "Ensenada (pier #2)",
-        "bollard_id": "B3",
-        "bollard_x_m": 80.0,
-        "bollard_y_m": 25.0,
-        "bollard_z_m": 3.0,
-    },
-    {
-        "port_name": "Ensenada (pier #2)",
-        "bollard_id": "B4",
-        "bollard_x_m": -80.0,
-        "bollard_y_m": 25.0,
-        "bollard_z_m": 3.0,
-    },
-    {
-        "port_name": "Ensenada (pier #2)",
-        "bollard_id": "B5",
-        "bollard_x_m": -160.0,
-        "bollard_y_m": 25.0,
-        "bollard_z_m": 3.0,
-    },
-    {
-        "port_name": "Long Beach (cruise terminal)",
-        "bollard_id": "B1",
-        "bollard_x_m": 175.0,
-        "bollard_y_m": 30.0,
-        "bollard_z_m": 2.5,
-    },
-    {
-        "port_name": "Long Beach (cruise terminal)",
-        "bollard_id": "B2",
-        "bollard_x_m": 145.0,
-        "bollard_y_m": 30.0,
-        "bollard_z_m": 2.5,
-    },
-    {
-        "port_name": "Long Beach (cruise terminal)",
-        "bollard_id": "B3",
-        "bollard_x_m": 85.0,
-        "bollard_y_m": 25.0,
-        "bollard_z_m": 2.5,
-    },
-    {
-        "port_name": "Long Beach (cruise terminal)",
-        "bollard_id": "B4",
-        "bollard_x_m": -85.0,
-        "bollard_y_m": 25.0,
-        "bollard_z_m": 2.5,
-    },
-    {
-        "port_name": "Long Beach (cruise terminal)",
-        "bollard_id": "B5",
-        "bollard_x_m": -170.0,
-        "bollard_y_m": 30.0,
-        "bollard_z_m": 2.5,
-    },
-    {
-        "port_name": "Mazatlan",
-        "bollard_id": "B1",
-        "bollard_x_m": 165.0,
-        "bollard_y_m": 28.0,
-        "bollard_z_m": 2.0,
-    },
-    {
-        "port_name": "Mazatlan",
-        "bollard_id": "B2",
-        "bollard_x_m": 135.0,
-        "bollard_y_m": 28.0,
-        "bollard_z_m": 2.0,
-    },
-    {
-        "port_name": "Mazatlan",
-        "bollard_id": "B3",
-        "bollard_x_m": 75.0,
-        "bollard_y_m": 24.0,
-        "bollard_z_m": 2.0,
-    },
-    {
-        "port_name": "Mazatlan",
-        "bollard_id": "B4",
-        "bollard_x_m": -75.0,
-        "bollard_y_m": 24.0,
-        "bollard_z_m": 2.0,
-    },
-    {
-        "port_name": "Mazatlan",
-        "bollard_id": "B5",
-        "bollard_x_m": -165.0,
-        "bollard_y_m": 28.0,
-        "bollard_z_m": 2.0,
-    },
-    {
-        "port_name": "La Paz",
-        "bollard_id": "B1",
-        "bollard_x_m": 160.0,
-        "bollard_y_m": 26.0,
-        "bollard_z_m": 2.0,
-    },
-    {
-        "port_name": "La Paz",
-        "bollard_id": "B2",
-        "bollard_x_m": 130.0,
-        "bollard_y_m": 26.0,
-        "bollard_z_m": 2.0,
-    },
-    {
-        "port_name": "La Paz",
-        "bollard_id": "B3",
-        "bollard_x_m": 70.0,
-        "bollard_y_m": 22.0,
-        "bollard_z_m": 2.0,
-    },
-    {
-        "port_name": "La Paz",
-        "bollard_id": "B4",
-        "bollard_x_m": -70.0,
-        "bollard_y_m": 22.0,
-        "bollard_z_m": 2.0,
-    },
-    {
-        "port_name": "La Paz",
-        "bollard_id": "B5",
-        "bollard_x_m": -160.0,
-        "bollard_y_m": 26.0,
-        "bollard_z_m": 2.0,
-    },
-    {
-        "port_name": "Puerto Vallarta (pier #1)",
-        "bollard_id": "B1",
-        "bollard_x_m": 170.0,
-        "bollard_y_m": 32.0,
-        "bollard_z_m": 2.5,
-    },
-    {
-        "port_name": "Puerto Vallarta (pier #1)",
-        "bollard_id": "B2",
-        "bollard_x_m": 140.0,
-        "bollard_y_m": 32.0,
-        "bollard_z_m": 2.5,
-    },
-    {
-        "port_name": "Puerto Vallarta (pier #1)",
-        "bollard_id": "B3",
-        "bollard_x_m": 80.0,
-        "bollard_y_m": 26.0,
-        "bollard_z_m": 2.5,
-    },
-    {
-        "port_name": "Puerto Vallarta (pier #1)",
-        "bollard_id": "B4",
-        "bollard_x_m": -80.0,
-        "bollard_y_m": 26.0,
-        "bollard_z_m": 2.5,
-    },
-    {
-        "port_name": "Puerto Vallarta (pier #1)",
-        "bollard_id": "B5",
-        "bollard_x_m": -170.0,
-        "bollard_y_m": 32.0,
-        "bollard_z_m": 2.5,
-    },
-    {
-        "port_name": "Puerto Vallarta (pier #3)",
-        "bollard_id": "B1",
-        "bollard_x_m": 172.0,
-        "bollard_y_m": 30.0,
-        "bollard_z_m": 2.5,
-    },
-    {
-        "port_name": "Puerto Vallarta (pier #3)",
-        "bollard_id": "B2",
-        "bollard_x_m": 142.0,
-        "bollard_y_m": 30.0,
-        "bollard_z_m": 2.5,
-    },
-    {
-        "port_name": "Puerto Vallarta (pier #3)",
-        "bollard_id": "B3",
-        "bollard_x_m": 82.0,
-        "bollard_y_m": 25.0,
-        "bollard_z_m": 2.5,
-    },
-    {
-        "port_name": "Puerto Vallarta (pier #3)",
-        "bollard_id": "B4",
-        "bollard_x_m": -82.0,
-        "bollard_y_m": 25.0,
-        "bollard_z_m": 2.5,
-    },
-    {
-        "port_name": "Puerto Vallarta (pier #3)",
-        "bollard_id": "B5",
-        "bollard_x_m": -172.0,
-        "bollard_y_m": 30.0,
-        "bollard_z_m": 2.5,
-    },
-])
+if "ports_bollards" not in st.session_state:
+  st.session_state.ports_bollards = {
+      "Ensenada (pier #2)": pd.DataFrame([
+          {
+              "bollard_id": "B1",
+              "X_Coordinata_m": 170.0,
+              "Y_Coordinata_m": 25.0,
+              "Z_Altezza_m": 3.0,
+              "SWL_Bitta_t": 150,
+              "Stato": "Attivo",
+          },
+          {
+              "bollard_id": "B2",
+              "X_Coordinata_m": 140.0,
+              "Y_Coordinata_m": 25.0,
+              "Z_Altezza_m": 3.0,
+              "SWL_Bitta_t": 150,
+              "Stato": "Attivo",
+          },
+          {
+              "bollard_id": "B3",
+              "X_Coordinata_m": 80.0,
+              "Y_Coordinata_m": 25.0,
+              "Z_Altezza_m": 3.0,
+              "SWL_Bitta_t": 100,
+              "Stato": "Attivo",
+          },
+          {
+              "bollard_id": "B4",
+              "X_Coordinata_m": -80.0,
+              "Y_Coordinata_m": 25.0,
+              "Z_Altezza_m": 3.0,
+              "SWL_Bitta_t": 100,
+              "Stato": "Attivo",
+          },
+          {
+              "bollard_id": "B5",
+              "X_Coordinata_m": -160.0,
+              "Y_Coordinata_m": 25.0,
+              "Z_Altezza_m": 3.0,
+              "SWL_Bitta_t": 150,
+              "Stato": "Attivo",
+          },
+      ]),
+      "Cabo San Lucas (Tender Pier)": pd.DataFrame([
+          {
+              "bollard_id": "B1",
+              "X_Coordinata_m": 120.0,
+              "Y_Coordinata_m": 20.0,
+              "Z_Altezza_m": 2.0,
+              "SWL_Bitta_t": 80,
+              "Stato": "Attivo",
+          },
+          {
+              "bollard_id": "B2",
+              "X_Coordinata_m": 60.0,
+              "Y_Coordinata_m": 20.0,
+              "Z_Altezza_m": 2.0,
+              "SWL_Bitta_t": 80,
+              "Stato": "Attivo",
+          },
+          {
+              "bollard_id": "B3",
+              "X_Coordinata_m": -60.0,
+              "Y_Coordinata_m": 20.0,
+              "Z_Altezza_m": 2.0,
+              "SWL_Bitta_t": 80,
+              "Stato": "Attivo",
+          },
+          {
+              "bollard_id": "B4",
+              "X_Coordinata_m": -120.0,
+              "Y_Coordinata_m": 20.0,
+              "Z_Altezza_m": 2.0,
+              "SWL_Bitta_t": 80,
+              "Stato": "Attivo",
+          },
+      ]),
+      "Puerto Vallarta (pier #1)": pd.DataFrame([
+          {
+              "bollard_id": "B1",
+              "X_Coordinata_m": 170.0,
+              "Y_Coordinata_m": 32.0,
+              "Z_Altezza_m": 2.5,
+              "SWL_Bitta_t": 150,
+              "Stato": "Attivo",
+          },
+          {
+              "bollard_id": "B2",
+              "X_Coordinata_m": 140.0,
+              "Y_Coordinata_m": 32.0,
+              "Z_Altezza_m": 2.5,
+              "SWL_Bitta_t": 150,
+              "Stato": "Attivo",
+          },
+          {
+              "bollard_id": "B3",
+              "X_Coordinata_m": 80.0,
+              "Y_Coordinata_m": 26.0,
+              "Z_Altezza_m": 2.5,
+              "SWL_Bitta_t": 120,
+              "Stato": "Attivo",
+          },
+          {
+              "bollard_id": "B4",
+              "X_Coordinata_m": -80.0,
+              "Y_Coordinata_m": 26.0,
+              "Z_Altezza_m": 2.5,
+              "SWL_Bitta_t": 120,
+              "Stato": "Attivo",
+          },
+          {
+              "bollard_id": "B5",
+              "X_Coordinata_m": -170.0,
+              "Y_Coordinata_m": 32.0,
+              "Z_Altezza_m": 2.5,
+              "SWL_Bitta_t": 150,
+              "Stato": "Attivo",
+          },
+      ]),
+  }
 
-tab_app1, tab_app2, tab_app3, tab_app4 = st.tabs([
-    "📂 1. Caricamento CSV",
-    "🌐 2. Analisi Ormeggio & Vista 3D",
-    "🌀 3. Inviluppo Polare Vento",
-    "📈 4. Storico Usura & Manutenzione",
+init_db(st.session_state.lines_inventory)
+
+# =============================================================================
+# 4. INTERFACCIA UTENTE (TABS)
+# =============================================================================
+st.title("⚓ OpenMooring - Live Setup & MEG4 Analysis")
+
+tab_setup, tab_3d_editor, tab_sim, tab_polar, tab_maint = st.tabs([
+    "🚢 1. Dati Nave & Cavi",
+    "🗺️ 2. Editor 3D Layout Banchina",
+    "📊 3. Simulazione Tensioni",
+    "🌀 4. Inviluppo Polare",
+    "📈 5. Storico & Usura Cavi",
 ])
 
 # -----------------------------------------------------------------------------
-# TAB 1: CARICAMENTO CSV
+# TAB 1: DATI NAVE E CAVI (SENZA BISOGNO DI FILE)
 # -----------------------------------------------------------------------------
-with tab_app1:
-  st.header("📂 Caricamento File CSV per Nave, Cavi e Banchine")
-  col_a, col_b, col_c = st.columns(3)
+with tab_setup:
+  st.header("🚢 Particulars Nave e Inventario Cavi")
 
-  with col_a:
-    st.subheader("1. Particulars Nave")
-    file_ship = st.file_uploader(
-        "Carica `ship_particulars.csv`", type=["csv"], key="ship"
+  col_n1, col_n2, col_n3 = st.columns(3)
+  with col_n1:
+    ship_name = st.text_input("Nome Nave", "Carnival Panorama")
+    loa = st.number_input("LOA (m)", value=DEFAULT_SHIP["LOA"], step=0.1)
+  with col_n2:
+    beam = st.number_input(
+        "Larghezza / Beam (m)", value=DEFAULT_SHIP["Beam"], step=0.1
     )
-    if file_ship:
-      df_ship_raw = pd.read_csv(file_ship)
-      ship_dict = dict(zip(df_ship_raw["parameter"], df_ship_raw["value"]))
-      st.success("CSV Nave caricato!")
-    else:
-      ship_dict = DEFAULT_SHIP
-      st.info("Utilizzo dati nave di default.")
+    draft = st.number_input(
+        "Pescaggio (m)", value=DEFAULT_SHIP["Draft"], step=0.1
+    )
+  with col_n3:
+    alw = st.number_input(
+        "Area Vento Laterale ALW (m²)", value=DEFAULT_SHIP["ALW"], step=10.0
+    )
+    afw = st.number_input(
+        "Area Vento Frontale AFW (m²)", value=DEFAULT_SHIP["AFW"], step=10.0
+    )
 
-  with col_b:
-    st.subheader("2. Inventario Cavi")
-    file_lines = st.file_uploader(
-        "Carica `lines_inventory.csv`", type=["csv"], key="lines"
-    )
-    if file_lines:
-      lines_df = pd.read_csv(file_lines)
-      st.success("CSV Cavi caricato!")
-    else:
-      lines_df = DEFAULT_LINES
-      st.info("Utilizzo cavi di default.")
+  ship_dict = {
+      "LOA": loa,
+      "Beam": beam,
+      "Draft": draft,
+      "ALW": alw,
+      "AFW": afw,
+      "ALC": DEFAULT_SHIP["ALC"],
+  }
 
-  with col_c:
-    st.subheader("3. Banchine Porti")
-    file_ports = st.file_uploader(
-        "Carica `ports_database.csv`", type=["csv"], key="ports"
-    )
-    if file_ports:
-      ports_df = pd.read_csv(file_ports)
-      st.success("CSV Porti caricato!")
-    else:
-      ports_df = DEFAULT_BOLLARDS
-      st.info("Utilizzo banchine di default.")
+  st.subheader("📋 Gestione Cavi e Collegamento Bitte")
+  st.caption(
+      "Puoi modificare le caratteristiche dei cavi e il bollard_id a cui sono"
+      " associati."
+  )
+
+  edited_lines = st.data_editor(
+      st.session_state.lines_inventory,
+      num_rows="dynamic",
+      use_container_width=True,
+      key="lines_editor",
+  )
+  st.session_state.lines_inventory = edited_lines
+
+# -----------------------------------------------------------------------------
+# TAB 2: EDITOR GRAFICO 3D BANCHINA & BITTE PER PORTO
+# -----------------------------------------------------------------------------
+with tab_3d_editor:
+  st.header("🗺️ Editor Grafico 3D & Tabellare delle Bitte di Banchina")
+  st.markdown(
+      "Seleziona un porto, modifica le coordinate X, Y, Z ed il carico SWL delle"
+      " bitte con **riscontro grafico visivo in tempo reale**."
+  )
 
   selected_port = st.selectbox(
-      "Seleziona Porto per l'Analisi", ports_df["port_name"].unique()
+      "📌 Seleziona Porto da Gestire",
+      list(st.session_state.ports_bollards.keys()),
   )
-  bollards_df = ports_df[ports_df["port_name"] == selected_port]
+  df_bollards = st.session_state.ports_bollards[selected_port]
 
-  init_db(lines_df)
+  col_ed_left, col_ed_right = st.columns([1, 1])
 
-  st.divider()
-  st.subheader("Anteprima Dati Attivi")
-  st.json(ship_dict)
-  st.dataframe(
-      lines_df[
-          ["line_name", "material", "diameter_mm", "mbl_kN", "bollard_id"]
-      ]
-  )
+  with col_ed_left:
+    st.subheader("⚙️ Regolazione Rapida Bitta")
+
+    b_id_list = df_bollards["bollard_id"].tolist()
+    b_id = st.selectbox("Bitta da modificare:", b_id_list)
+    idx = df_bollards[df_bollards["bollard_id"] == b_id].index[0]
+
+    c1, c2, c3, c4 = st.columns(4)
+    x_val = c1.number_input(
+        "X (m)",
+        value=float(df_bollards.loc[idx, "X_Coordinata_m"]),
+        step=1.0,
+        key="x_in",
+    )
+    y_val = c2.number_input(
+        "Y (m)",
+        value=float(df_bollards.loc[idx, "Y_Coordinata_m"]),
+        step=1.0,
+        key="y_in",
+    )
+    z_val = c3.number_input(
+        "Z (m)",
+        value=float(df_bollards.loc[idx, "Z_Altezza_m"]),
+        step=0.5,
+        key="z_in",
+    )
+    swl_val = c4.number_input(
+        "SWL (t)",
+        value=int(df_bollards.loc[idx, "SWL_Bitta_t"]),
+        step=10,
+        key="swl_in",
+    )
+
+    df_bollards.loc[idx, "X_Coordinata_m"] = x_val
+    df_bollards.loc[idx, "Y_Coordinata_m"] = y_val
+    df_bollards.loc[idx, "Z_Altezza_m"] = z_val
+    df_bollards.loc[idx, "SWL_Bitta_t"] = swl_val
+
+    st.subheader("📋 Tabella Completa Bitte Porto")
+    edited_bollards = st.data_editor(
+        df_bollards,
+        num_rows="dynamic",
+        use_container_width=True,
+        key=f"editor_{selected_port}",
+    )
+    st.session_state.ports_bollards[selected_port] = edited_bollards
+
+  with col_ed_right:
+    st.subheader("🌐 Visualizzazione Layout 3D")
+
+    fig_setup = go.Figure()
+
+    # Disegna Scafo
+    s_x = [-loa / 2, loa / 2 - 30, loa / 2, loa / 2 - 30, -loa / 2, -loa / 2]
+    s_y = [-beam / 2, -beam / 2, 0, beam / 2, beam / 2, -beam / 2]
+    s_z = [10.0] * len(s_x)
+    fig_setup.add_trace(
+        go.Scatter3d(
+            x=s_x,
+            y=s_y,
+            z=s_z,
+            mode="lines",
+            line=dict(color="navy", width=5),
+            name=f"Scafo ({ship_name})",
+        )
+    )
+
+    # Disegna Banchina
+    fig_setup.add_trace(
+        go.Mesh3d(
+            x=[-200, 200, 200, -200],
+            y=[18, 18, 45, 45],
+            z=[0, 0, 0, 0],
+            color="lightgrey",
+            opacity=0.5,
+            name="Banchina",
+        )
+    )
+
+    # Disegna Bitte
+    act_b = edited_bollards[edited_bollards["Stato"] == "Attivo"]
+    fig_setup.add_trace(
+        go.Scatter3d(
+            x=act_b["X_Coordinata_m"],
+            y=act_b["Y_Coordinata_m"],
+            z=act_b["Z_Altezza_m"],
+            mode="markers+text",
+            marker=dict(
+                size=9,
+                color=act_b["SWL_Bitta_t"],
+                colorscale="Viridis",
+                colorbar=dict(title="SWL (t)"),
+                showscale=True,
+            ),
+            text=[
+                f"{r['bollard_id']} ({r['SWL_Bitta_t']}t)"
+                for _, r in act_b.iterrows()
+            ],
+            textposition="top center",
+            name="Bitte",
+        )
+    )
+
+    fig_setup.update_layout(
+        scene=dict(
+            aspectmode="data",
+            xaxis_title="X (m)",
+            yaxis_title="Y (m)",
+            zaxis_title="Z (m)",
+        ),
+        margin=dict(l=0, r=0, b=0, t=30),
+        height=520,
+    )
+    st.plotly_chart(fig_setup, use_container_width=True)
+
+# Prepara la geometria aggiornata
+active_bollards_df = st.session_state.ports_bollards[selected_port]
+geom_df = calculate_line_geometry(
+    st.session_state.lines_inventory, active_bollards_df
+)
 
 # -----------------------------------------------------------------------------
-# TAB 2: ANALISI ORMEGGIO & VISTA 3D
+# TAB 3: SIMULAZIONE TENSIONI & METEO
 # -----------------------------------------------------------------------------
-with tab_app2:
+with tab_sim:
   st.sidebar.header("Condizioni Meteo-Marine")
   v_wind = st.sidebar.slider("Vento (knots)", 0, 70, 30)
   dir_wind = st.sidebar.slider("Direzione Vento (deg)", 0, 360, 45)
   v_curr = st.sidebar.slider("Corrente (knots)", 0.0, 4.0, 0.5)
   dir_curr = st.sidebar.slider("Direzione Corrente (deg)", 0, 360, 0)
 
-  geom_df = calculate_line_geometry(lines_df, bollards_df)
-  forces = calculate_environmental_forces(
-      v_wind,
-      dir_wind,
-      v_curr,
-      dir_curr,
-      ship_dict["AFW"],
-      ship_dict["ALW"],
-      ship_dict["ALC"],
-      ship_dict["LOA"],
-  )
-  results_df = solve_line_tensions_3d(geom_df, forces)
+  if geom_df.empty:
+    st.error(
+        "⚠️ Nessuna corrispondenza trovata tra i `bollard_id` dei cavi e quelli"
+        " della banchina! Verificare nel Tab 1 e Tab 2."
+    )
+  else:
+    forces = calculate_environmental_forces(
+        v_wind,
+        dir_wind,
+        v_curr,
+        dir_curr,
+        ship_dict["AFW"],
+        ship_dict["ALW"],
+        ship_dict["ALC"],
+        ship_dict["LOA"],
+    )
+    results_df = solve_line_tensions_3d(geom_df, forces)
 
-  st.subheader(f"Layout & Tensioni ad Ormeggio: **{selected_port}**")
+    st.subheader(f"Analisi Tensione Cavi: **{selected_port}**")
 
-  col1, col2, col3 = st.columns(3)
-  col1.metric("Forza Longitudinale (Fx)", f"{forces['Fx_total']:.1f} kN")
-  col2.metric("Forza Trasversale (Fy)", f"{forces['Fy_total']:.1f} kN")
-  col3.metric("Momento Imbardata (Mz)", f"{forces['Mz_total']:.1f} kNm")
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Forza Longitudinale (Fx)", f"{forces['Fx_total']:.1f} kN")
+    m2.metric("Forza Trasversale (Fy)", f"{forces['Fy_total']:.1f} kN")
+    m3.metric("Momento Imbardata (Mz)", f"{forces['Mz_total']:.1f} kNm")
 
-  fig_3d = create_mooring_3d_plot(
-      results_df, bollards_df, loa=ship_dict["LOA"], beam=ship_dict["Beam"]
-  )
-  st.plotly_chart(fig_3d, use_container_width=True)
+    # Render 3D con Cavi Attivi
+    fig_sim = go.Figure()
+    s_x = [-loa / 2, loa / 2 - 30, loa / 2, loa / 2 - 30, -loa / 2, -loa / 2]
+    s_y = [-beam / 2, -beam / 2, 0, beam / 2, beam / 2, -beam / 2]
+    fig_sim.add_trace(
+        go.Scatter3d(
+            x=s_x,
+            y=s_y,
+            z=[10.0] * len(s_x),
+            mode="lines",
+            line=dict(color="navy", width=5),
+            name="Nave",
+        )
+    )
 
-  st.subheader("Carico Sulle Linee d'Ormeggio (% MBL)")
-  fig_bar = px.bar(
-      results_df,
-      x="line_name",
-      y="Util_Percent",
-      color="Util_Percent",
-      color_continuous_scale=["green", "yellow", "red"],
-      range_color=[0, 100],
-  )
-  fig_bar.add_hline(
-      y=50,
-      line_dash="dash",
-      line_color="red",
-      annotation_text="Limite MEG4 (50%)",
-  )
-  st.plotly_chart(fig_bar, use_container_width=True)
+    for _, line in results_df.iterrows():
+      util = line["Util_Percent"]
+      col_line = (
+          "red" if util > 50.0 else ("orange" if util > 35.0 else "green")
+      )
 
-  st.dataframe(
-      results_df[[
-          "line_name",
-          "bollard_id",
-          "length_m",
-          "azimuth_deg",
-          "incline_deg",
-          "Tension_kN",
-          "Util_Percent",
-      ]]
-  )
+      fig_sim.add_trace(
+          go.Scatter3d(
+              x=[line["chock_x_m"], line["bollard_x_rendered"]],
+              y=[line["chock_y_m"], line["bollard_y_rendered"]],
+              z=[line["chock_z_m"], line["bollard_z_rendered"]],
+              mode="lines+markers",
+              line=dict(color=col_line, width=5),
+              name=f"{line['line_name']} ({util:.1f}%)",
+          )
+      )
+
+    fig_sim.update_layout(
+        scene=dict(aspectmode="data"), margin=dict(l=0, r=0, b=0, t=20)
+    )
+    st.plotly_chart(fig_sim, use_container_width=True)
+
+    st.subheader("Carico Sulle Linee d'Ormeggio (% MBL)")
+    fig_bar = px.bar(
+        results_df,
+        x="line_name",
+        y="Util_Percent",
+        color="Util_Percent",
+        color_continuous_scale=["green", "yellow", "red"],
+        range_color=[0, 100],
+    )
+    fig_bar.add_hline(
+        y=50,
+        line_dash="dash",
+        line_color="red",
+        annotation_text="Limite MEG4 (50%)",
+    )
+    st.plotly_chart(fig_bar, use_container_width=True)
+
+    st.dataframe(
+        results_df[[
+            "line_name",
+            "bollard_id",
+            "length_m",
+            "azimuth_deg",
+            "incline_deg",
+            "Tension_kN",
+            "Util_Percent",
+        ]]
+    )
 
 # -----------------------------------------------------------------------------
-# TAB 3: INVILUPPO POLARE
+# TAB 4: INVILUPPO POLARE
 # -----------------------------------------------------------------------------
-with tab_app3:
+with tab_polar:
   st.subheader("Inviluppo Polare dei Limiti Operativi del Vento (0-360°)")
   st.write(
-      "Visualizza la velocità massima del vento sostenibile prima che una linea"
-      " superi il **50% MBL**."
+      "Calcola la velocità massima del vento tollerabile prima che una linea"
+      " superi la soglia di sicurezza del **50% MBL**."
   )
 
-  if st.button("Esegui Simulazione Polare"):
-    with st.spinner("Calcolo simulazione polare in corso..."):
+  if st.button("Esegui Simulazione Polare") and not geom_df.empty:
+    with st.spinner("Calcolo dinamico in corso..."):
       angles, max_winds = calculate_wind_operability_envelope(
           geom_df,
           ship_dict["AFW"],
@@ -866,11 +881,7 @@ with tab_app3:
 
       fig_polar.update_layout(
           polar=dict(
-              radialaxis=dict(
-                  visible=True,
-                  range=[0, max_r],
-                  ticksuffix=" kts",
-              ),
+              radialaxis=dict(visible=True, range=[0, max_r], ticksuffix=" kts"),
               angularaxis=dict(direction="clockwise", rotation=90),
           ),
           margin=dict(l=40, r=40, t=20, b=20),
@@ -878,24 +889,29 @@ with tab_app3:
       st.plotly_chart(fig_polar, use_container_width=True)
 
 # -----------------------------------------------------------------------------
-# TAB 4: STORICO USURA & MANUTENZIONE
+# TAB 5: STORICO & USURA CAVI
 # -----------------------------------------------------------------------------
-with tab_app4:
+with tab_maint:
   st.subheader("📈 Registro Storico Usura & Suggerimento Sostituzione Cavi")
 
-  col_log1, col_log2 = st.columns([1, 2])
+  c_m1, c_m2 = st.columns([1, 2])
 
-  with col_log1:
-    st.write("### Registra Ormeggio Attuale")
+  with c_m1:
+    st.write("### Registra Sessione Ormeggio")
     duration_h = st.number_input(
         "Durata Ormeggio (Ore)", min_value=1.0, max_value=72.0, value=12.0
     )
-    if st.button("Salva Sessione e Aggiorna Storico Cavi"):
-      log_mooring_session(results_df, selected_port, duration_hours=duration_h)
-      st.success("Sessione salvata con successo nel database dello storico!")
+    if st.button("Salva e Aggiorna Database Cavi"):
+      if "results_df" in locals():
+        log_mooring_session(
+            results_df, selected_port, duration_hours=duration_h
+        )
+        st.success("Sessione salvata nello storico SQLite!")
+      else:
+        st.warning("Esegui prima la simulazione nel Tab 3.")
 
-  with col_log2:
-    st.write("### Stato Salute Cavi e Raccomandazioni Sostituzione")
+  with c_m2:
+    st.write("### Stato Salute Cavi e Raccomandazioni")
     health_df = get_lines_health_status()
     if not health_df.empty:
       fig_health = px.bar(
