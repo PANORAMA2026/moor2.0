@@ -1,5 +1,5 @@
-import sqlite3
 from datetime import datetime
+import sqlite3
 import numpy as np
 import pandas as pd
 import plotly.express as px
@@ -15,65 +15,75 @@ st.set_page_config(
 KN_TO_TONS = 0.10197162129779
 
 # =============================================================================
-# 1. DATABASE & MANUTENZIONE PREDITTIVA (SQLite)
+# 1. DATABASE & MANUTENZIONE PREDITTIVA (SQLite In-Memory / Safe Connection)
 # =============================================================================
-DB_NAME = "mooring_history.db"
+if "db_conn" not in st.session_state:
+  st.session_state.db_conn = sqlite3.connect(":memory:", check_same_thread=False)
+  st.session_state.db_conn.row_factory = sqlite3.Row
 
 
 def init_db(lines_df=None):
-  with sqlite3.connect(DB_NAME, timeout=10) as conn:
-    cursor = conn.cursor()
-    cursor.execute("""
-            CREATE TABLE IF NOT EXISTS line_history (
-                line_id TEXT PRIMARY KEY,
-                line_name TEXT,
-                mbl_tons REAL,
-                max_design_hours REAL DEFAULT 2000.0,
-                accumulated_hours REAL DEFAULT 0.0,
-                high_load_hours REAL DEFAULT 0.0,
-                fatigue_index REAL DEFAULT 0.0
-            )
-        """)
-    cursor.execute("""
-            CREATE TABLE IF NOT EXISTS mooring_logs (
-                log_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp TEXT,
-                port_name TEXT,
-                line_id TEXT,
-                tension_tons REAL,
-                util_percent REAL,
-                duration_hours REAL
-            )
-        """)
+  conn = st.session_state.db_conn
+  cursor = conn.cursor()
 
-    if lines_df is not None:
-      for _, row in lines_df.iterrows():
-        # Controllo che i dati essenziali non siano vuoti/None
-        if pd.notna(row.get("line_id")) and pd.notna(row.get("mbl_tons")):
-          try:
-            line_id = str(row["line_id"]).strip()
-            line_name = str(row.get("line_name", f"Line {line_id}")).strip()
-            mbl_tons = float(row["mbl_tons"])
+  cursor.execute("""
+        CREATE TABLE IF NOT EXISTS line_history (
+            line_id TEXT PRIMARY KEY,
+            line_name TEXT,
+            mbl_tons REAL,
+            max_design_hours REAL DEFAULT 2000.0,
+            accumulated_hours REAL DEFAULT 0.0,
+            high_load_hours REAL DEFAULT 0.0,
+            fatigue_index REAL DEFAULT 0.0
+        )
+    """)
+  cursor.execute("""
+        CREATE TABLE IF NOT EXISTS mooring_logs (
+            log_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT,
+            port_name TEXT,
+            line_id TEXT,
+            tension_tons REAL,
+            util_percent REAL,
+            duration_hours REAL
+        )
+    """)
 
-            if line_id:
-              cursor.execute(
-                  """
-                                INSERT OR IGNORE INTO line_history (line_id, line_name, mbl_tons)
-                                VALUES (?, ?, ?)
-                            """,
-                  (line_id, line_name, mbl_tons),
-              )
-          except (ValueError, TypeError):
-            continue
-    conn.commit()
+  if lines_df is not None:
+    for _, row in lines_df.iterrows():
+      try:
+        line_id_val = row.get("line_id")
+        mbl_val = row.get("mbl_tons")
+
+        if pd.isna(line_id_val) or pd.isna(mbl_val):
+          continue
+
+        line_id = str(line_id_val).strip()
+        if not line_id:
+          continue
+
+        line_name = str(row.get("line_name", f"Line {line_id}")).strip()
+        mbl_tons = float(mbl_val)
+
+        cursor.execute(
+            """
+                    INSERT OR REPLACE INTO line_history (line_id, line_name, mbl_tons)
+                    VALUES (?, ?, ?)
+                """,
+            (line_id, line_name, mbl_tons),
+        )
+      except (ValueError, TypeError):
+        continue
+  conn.commit()
 
 
 def log_mooring_session(results_df, port_name, duration_hours=6.0):
-  with sqlite3.connect(DB_NAME, timeout=10) as conn:
-    cursor = conn.cursor()
-    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+  conn = st.session_state.db_conn
+  cursor = conn.cursor()
+  now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    for _, row in results_df.iterrows():
+  for _, row in results_df.iterrows():
+    try:
       line_id = str(row["line_id"])
       tension = float(row["Tension_tons"])
       util = float(row["Util_Percent"])
@@ -99,12 +109,14 @@ def log_mooring_session(results_df, port_name, duration_hours=6.0):
             """,
           (duration_hours, high_load_inc, fatigue_increment, line_id),
       )
-    conn.commit()
+    except Exception:
+      continue
+  conn.commit()
 
 
 def get_lines_health_status():
-  with sqlite3.connect(DB_NAME, timeout=10) as conn:
-    df = pd.read_sql_query("SELECT * FROM line_history", conn)
+  conn = st.session_state.db_conn
+  df = pd.read_sql_query("SELECT * FROM line_history", conn)
 
   if df.empty:
     return df
@@ -113,9 +125,8 @@ def get_lines_health_status():
   recommendations = []
 
   for _, row in df.iterrows():
-    hours_used_pct = (
-        row["accumulated_hours"] / row["max_design_hours"]
-    ) * 100.0
+    max_h = row["max_design_hours"] if row["max_design_hours"] > 0 else 2000.0
+    hours_used_pct = (row["accumulated_hours"] / max_h) * 100.0
     fatigue_pct = (row["fatigue_index"] / 300.0) * 100.0
     wear_pct = max(hours_used_pct, fatigue_pct)
     remaining_health = max(0.0, 100.0 - wear_pct)
@@ -522,7 +533,7 @@ if "ports_bollards" not in st.session_state:
       "Puerto Vallarta Pier #3": pd.DataFrame(def_bollards),
   }
 
-# Inizializza il DB in modo sicuro
+# Inizializzazione DB in-memory
 init_db(st.session_state.lines_inventory)
 
 # =============================================================================
@@ -742,7 +753,7 @@ with tab_3d_editor:
     )
     st.plotly_chart(fig_setup, use_container_width=True)
 
-# Calcolo geometria aggiornata
+# Calcolo della geometria
 active_bollards_df = st.session_state.ports_bollards[selected_port]
 geom_df = calculate_line_geometry(
     st.session_state.lines_inventory, active_bollards_df
