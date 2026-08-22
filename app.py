@@ -21,85 +21,90 @@ DB_NAME = "mooring_history.db"
 
 
 def init_db(lines_df=None):
-  conn = sqlite3.connect(DB_NAME)
-  cursor = conn.cursor()
-  cursor.execute("""
-        CREATE TABLE IF NOT EXISTS line_history (
-            line_id TEXT PRIMARY KEY,
-            line_name TEXT,
-            mbl_tons REAL,
-            max_design_hours REAL DEFAULT 2000.0,
-            accumulated_hours REAL DEFAULT 0.0,
-            high_load_hours REAL DEFAULT 0.0,
-            fatigue_index REAL DEFAULT 0.0
-        )
-    """)
-  cursor.execute("""
-        CREATE TABLE IF NOT EXISTS mooring_logs (
-            log_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp TEXT,
-            port_name TEXT,
-            line_id TEXT,
-            tension_tons REAL,
-            util_percent REAL,
-            duration_hours REAL
-        )
-    """)
+  with sqlite3.connect(DB_NAME, timeout=10) as conn:
+    cursor = conn.cursor()
+    cursor.execute("""
+            CREATE TABLE IF NOT EXISTS line_history (
+                line_id TEXT PRIMARY KEY,
+                line_name TEXT,
+                mbl_tons REAL,
+                max_design_hours REAL DEFAULT 2000.0,
+                accumulated_hours REAL DEFAULT 0.0,
+                high_load_hours REAL DEFAULT 0.0,
+                fatigue_index REAL DEFAULT 0.0
+            )
+        """)
+    cursor.execute("""
+            CREATE TABLE IF NOT EXISTS mooring_logs (
+                log_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT,
+                port_name TEXT,
+                line_id TEXT,
+                tension_tons REAL,
+                util_percent REAL,
+                duration_hours REAL
+            )
+        """)
 
-  if lines_df is not None:
-    for _, row in lines_df.iterrows():
-      cursor.execute(
-          """
-                INSERT OR IGNORE INTO line_history (line_id, line_name, mbl_tons)
-                VALUES (?, ?, ?)
-            """,
-          (str(row["line_id"]), str(row["line_name"]), float(row["mbl_tons"])),
-      )
+    if lines_df is not None:
+      for _, row in lines_df.iterrows():
+        # Controllo che i dati essenziali non siano vuoti/None
+        if pd.notna(row.get("line_id")) and pd.notna(row.get("mbl_tons")):
+          try:
+            line_id = str(row["line_id"]).strip()
+            line_name = str(row.get("line_name", f"Line {line_id}")).strip()
+            mbl_tons = float(row["mbl_tons"])
 
-  conn.commit()
-  conn.close()
+            if line_id:
+              cursor.execute(
+                  """
+                                INSERT OR IGNORE INTO line_history (line_id, line_name, mbl_tons)
+                                VALUES (?, ?, ?)
+                            """,
+                  (line_id, line_name, mbl_tons),
+              )
+          except (ValueError, TypeError):
+            continue
+    conn.commit()
 
 
 def log_mooring_session(results_df, port_name, duration_hours=6.0):
-  conn = sqlite3.connect(DB_NAME)
-  cursor = conn.cursor()
-  now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+  with sqlite3.connect(DB_NAME, timeout=10) as conn:
+    cursor = conn.cursor()
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-  for _, row in results_df.iterrows():
-    line_id = str(row["line_id"])
-    tension = float(row["Tension_tons"])
-    util = float(row["Util_Percent"])
+    for _, row in results_df.iterrows():
+      line_id = str(row["line_id"])
+      tension = float(row["Tension_tons"])
+      util = float(row["Util_Percent"])
 
-    cursor.execute(
-        """
-            INSERT INTO mooring_logs (timestamp, port_name, line_id, tension_tons, util_percent, duration_hours)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """,
-        (now_str, port_name, line_id, tension, util, duration_hours),
-    )
+      cursor.execute(
+          """
+                INSERT INTO mooring_logs (timestamp, port_name, line_id, tension_tons, util_percent, duration_hours)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """,
+          (now_str, port_name, line_id, tension, util, duration_hours),
+      )
 
-    fatigue_increment = ((util / 100.0) ** 3) * duration_hours
-    high_load_inc = duration_hours if util > 35.0 else 0.0
+      fatigue_increment = ((util / 100.0) ** 3) * duration_hours
+      high_load_inc = duration_hours if util > 35.0 else 0.0
 
-    cursor.execute(
-        """
-            UPDATE line_history
-            SET accumulated_hours = accumulated_hours + ?,
-                high_load_hours = high_load_hours + ?,
-                fatigue_index = fatigue_index + ?
-            WHERE line_id = ?
-        """,
-        (duration_hours, high_load_inc, fatigue_increment, line_id),
-    )
-
-  conn.commit()
-  conn.close()
+      cursor.execute(
+          """
+                UPDATE line_history
+                SET accumulated_hours = accumulated_hours + ?,
+                    high_load_hours = high_load_hours + ?,
+                    fatigue_index = fatigue_index + ?
+                WHERE line_id = ?
+            """,
+          (duration_hours, high_load_inc, fatigue_increment, line_id),
+      )
+    conn.commit()
 
 
 def get_lines_health_status():
-  conn = sqlite3.connect(DB_NAME)
-  df = pd.read_sql_query("SELECT * FROM line_history", conn)
-  conn.close()
+  with sqlite3.connect(DB_NAME, timeout=10) as conn:
+    df = pd.read_sql_query("SELECT * FROM line_history", conn)
 
   if df.empty:
     return df
@@ -162,7 +167,7 @@ def fetch_live_weather(lat, lon):
 
 
 # =============================================================================
-# 3. MOTORE FISICO & GEOMETRICO (RISULTATI IN TONNELLATE)
+# 3. MOTORE FISICO & GEOMETRICO
 # =============================================================================
 def calculate_environmental_forces(
     v_wind_knots,
@@ -312,7 +317,7 @@ def solve_line_tensions_3d(lines_geom_df, forces):
   for item in line_data:
     t = max(0.0, item["k"] * np.dot(item["b"], displacements))
     tensions.append(t)
-    utilizations.append((t / item["mbl"]) * 100.0)
+    utilizations.append((t / item["mbl"]) * 100.0 if item["mbl"] > 0 else 0.0)
 
   lines_geom_df["Tension_tons"] = tensions
   lines_geom_df["Util_Percent"] = utilizations
@@ -352,7 +357,7 @@ def calculate_wind_operability_envelope(
 
 
 # =============================================================================
-# 4. SESSION STATE & RIPRISTINO PORTI RICHIESTI
+# 4. SESSION STATE & INIZIALIZZAZIONE
 # =============================================================================
 DEFAULT_SHIP = {
     "LOA": 323.6,
@@ -463,7 +468,6 @@ if "lines_inventory" not in st.session_state:
       },
   ])
 
-# RIPRISTINO COMPLETO DEI PORTI RICHIESTI
 def_bollards = [
     {
         "bollard_id": "B1",
@@ -518,6 +522,7 @@ if "ports_bollards" not in st.session_state:
       "Puerto Vallarta Pier #3": pd.DataFrame(def_bollards),
   }
 
+# Inizializza il DB in modo sicuro
 init_db(st.session_state.lines_inventory)
 
 # =============================================================================
