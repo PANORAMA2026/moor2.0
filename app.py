@@ -301,7 +301,7 @@ def calculate_wind_operability_envelope(
   max_safe_winds = []
 
   if lines_geom_df.empty:
-    return angles, [0] * len(angles)
+    return list(angles), [0] * len(angles)
 
   for angle in angles:
     safe_wind = 0
@@ -315,7 +315,7 @@ def calculate_wind_operability_envelope(
       safe_wind = v_w
     max_safe_winds.append(safe_wind)
 
-  return angles, max_safe_winds
+  return list(angles), max_safe_winds
 
 
 def create_mooring_3d_plot(results_df, bollards_df, loa=323.0, beam=37.2):
@@ -862,12 +862,16 @@ with tab_app3:
           )
       )
 
+      max_r = max(max_winds) + 10 if max_winds and len(max_winds) > 0 else 80
+
       fig_polar.update_layout(
           polar=dict(
               radialaxis=dict(
-                  visible=True, range=[0, max(max_winds) + 10], suffix=" kts"
+                  visible=True,
+                  range=[0, max_r],
+                  ticksuffix=" kts",
               ),
-              angularaxis=dict(direction="clockwise"),
+              angularaxis=dict(direction="clockwise", rotation=90),
           ),
           margin=dict(l=40, r=40, t=20, b=20),
       )
