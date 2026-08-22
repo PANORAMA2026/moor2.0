@@ -517,7 +517,6 @@ if "lines_inventory" not in st.session_state:
       },
   ])
 
-# Note: X_Coordinata_m è convertita in X assoluta rispetto al centro nave
 def_bollards = [
     {
         "bollard_id": "B1",
@@ -1003,13 +1002,15 @@ with tab_actual:
       " ormeggio:"
   )
 
-  col_cfg1, col_cfg2, col_cfg3, col_cfg4, col_cfg5 = st.columns(5)
+  # MODIFICA: Ora diviso in 6 colonne per includere i Brest di Poppa
+  col_cfg1, col_cfg2, col_cfg3, col_cfg4, col_cfg5, col_cfg6 = st.columns(6)
 
   n_head = col_cfg1.number_input("Cavi di Testa (Head Lines)", 0, 6, 2)
   n_fwd_breast = col_cfg2.number_input("Traversi Prua (Fwd Breast)", 0, 6, 1)
   n_fwd_spring = col_cfg3.number_input("Traversini Prua (Fwd Spring)", 0, 6, 1)
   n_aft_spring = col_cfg4.number_input("Traversini Poppa (Aft Spring)", 0, 6, 1)
-  n_stern = col_cfg5.number_input("Cavi di Poppa / Traversi (Stern)", 0, 6, 2)
+  n_aft_breast = col_cfg5.number_input("Traversi Poppa (Aft Breast)", 0, 6, 1)
+  n_stern = col_cfg6.number_input("Cavi di Poppa (Stern Lines)", 0, 6, 2)
 
   # Selezione cavi attivi in base al conteggio
   lines_inv = st.session_state.lines_inventory.copy()
@@ -1020,13 +1021,17 @@ with tab_actual:
       "Fwd Breast": n_fwd_breast,
       "Fwd Spring": n_fwd_spring,
       "Aft Spring": n_aft_spring,
+      "Aft Breast": n_aft_breast,
       "Stern": n_stern,
   }
 
   for line_type, count in counts.items():
-    sub_df = lines_inv[
-        lines_inv.get("line_type", lines_inv["line_name"]) == line_type
-    ]
+    # Verifica sia sulla colonna 'line_type' che sul nome
+    if "line_type" in lines_inv.columns:
+      sub_df = lines_inv[lines_inv["line_type"] == line_type]
+    else:
+      sub_df = lines_inv[lines_inv["line_name"].str.contains(line_type, case=False, na=False)]
+      
     if len(sub_df) >= count:
       active_indices.extend(sub_df.iloc[:count].index.tolist())
     else:
