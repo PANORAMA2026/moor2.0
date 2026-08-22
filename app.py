@@ -343,7 +343,7 @@ def calculate_wind_operability_envelope(
     loa,
     v_curr=0.0,
     dir_curr=0,
-    max_wind_test=70,
+    max_wind_test=80,
     step_deg=10,
 ):
   angles = np.arange(0, 360, step_deg)
@@ -359,7 +359,22 @@ def calculate_wind_operability_envelope(
           v_w, angle, v_curr, dir_curr, afw, alw, alc, loa
       )
       results = solve_line_tensions_3d(lines_geom_df.copy(), forces)
-      if (results["Util_Percent"] > 50.0).any():
+
+      # Controllo Cavi: <= 50% MBL
+      line_overload = (results["Util_Percent"] > 50.0).any()
+
+      # Controllo Bitte: Carico totale sulla bitta <= SWL bitta
+      bollard_loads = results.groupby("bollard_id")["Tension_tons"].sum()
+      bollard_overload = False
+      for b_id, load in bollard_loads.items():
+        swl_rows = results[results["bollard_id"] == b_id]["SWL_Bitta_t"]
+        if not swl_rows.empty:
+          swl = float(swl_rows.iloc[0])
+          if load > swl:
+            bollard_overload = True
+            break
+
+      if line_overload or bollard_overload:
         break
       safe_wind = v_w
     max_safe_winds.append(safe_wind)
@@ -384,6 +399,7 @@ if "lines_inventory" not in st.session_state:
       {
           "line_id": "1",
           "line_name": "Head Line 1",
+          "line_type": "Head",
           "chock_x_m": 150.0,
           "chock_y_m": 2.0,
           "chock_z_m": 12.0,
@@ -400,6 +416,7 @@ if "lines_inventory" not in st.session_state:
       {
           "line_id": "2",
           "line_name": "Head Line 2",
+          "line_type": "Head",
           "chock_x_m": 150.0,
           "chock_y_m": -2.0,
           "chock_z_m": 12.0,
@@ -416,6 +433,7 @@ if "lines_inventory" not in st.session_state:
       {
           "line_id": "3",
           "line_name": "Fwd Breast 1",
+          "line_type": "Fwd Breast",
           "chock_x_m": 138.0,
           "chock_y_m": 18.0,
           "chock_z_m": 10.0,
@@ -432,6 +450,7 @@ if "lines_inventory" not in st.session_state:
       {
           "line_id": "4",
           "line_name": "Fwd Spring 1",
+          "line_type": "Fwd Spring",
           "chock_x_m": 110.0,
           "chock_y_m": 18.0,
           "chock_z_m": 8.0,
@@ -448,6 +467,7 @@ if "lines_inventory" not in st.session_state:
       {
           "line_id": "5",
           "line_name": "Aft Spring 1",
+          "line_type": "Aft Spring",
           "chock_x_m": -110.0,
           "chock_y_m": 18.0,
           "chock_z_m": 8.0,
@@ -463,7 +483,25 @@ if "lines_inventory" not in st.session_state:
       },
       {
           "line_id": "6",
+          "line_name": "Aft Breast 1",
+          "line_type": "Aft Breast",
+          "chock_x_m": -138.0,
+          "chock_y_m": 18.0,
+          "chock_z_m": 10.0,
+          "material": "HMPE",
+          "diameter_mm": 64,
+          "E_modulus_GPa": 120,
+          "mbl_tons": 105.0,
+          "tail_length_m": 11.0,
+          "tail_diameter_mm": 72,
+          "tail_E_modulus_GPa": 6,
+          "tail_mbl_tons": 100.0,
+          "bollard_id": "B5",
+      },
+      {
+          "line_id": "7",
           "line_name": "Stern Line 1",
+          "line_type": "Stern",
           "chock_x_m": -150.0,
           "chock_y_m": 0.0,
           "chock_z_m": 12.0,
@@ -479,10 +517,13 @@ if "lines_inventory" not in st.session_state:
       },
   ])
 
+# Note: X_Coordinata_m è convertita in X assoluta rispetto al centro nave
 def_bollards = [
     {
         "bollard_id": "B1",
-        "X_Coordinata_m": 170.0,
+        "Posizione": "Prua",
+        "Dist_Estrema_m": 8.2,
+        "X_Coordinata_m": 153.6,
         "Y_Coordinata_m": 25.0,
         "Z_Altezza_m": -3.0,
         "SWL_Bitta_t": 150,
@@ -490,6 +531,8 @@ def_bollards = [
     },
     {
         "bollard_id": "B2",
+        "Posizione": "Prua",
+        "Dist_Estrema_m": 21.8,
         "X_Coordinata_m": 140.0,
         "Y_Coordinata_m": 25.0,
         "Z_Altezza_m": -3.0,
@@ -498,6 +541,8 @@ def_bollards = [
     },
     {
         "bollard_id": "B3",
+        "Posizione": "Prua",
+        "Dist_Estrema_m": 81.8,
         "X_Coordinata_m": 80.0,
         "Y_Coordinata_m": 25.0,
         "Z_Altezza_m": -3.0,
@@ -506,6 +551,8 @@ def_bollards = [
     },
     {
         "bollard_id": "B4",
+        "Posizione": "Poppa",
+        "Dist_Estrema_m": 81.8,
         "X_Coordinata_m": -80.0,
         "Y_Coordinata_m": 25.0,
         "Z_Altezza_m": -3.0,
@@ -514,6 +561,8 @@ def_bollards = [
     },
     {
         "bollard_id": "B5",
+        "Posizione": "Poppa",
+        "Dist_Estrema_m": 1.8,
         "X_Coordinata_m": -160.0,
         "Y_Coordinata_m": 25.0,
         "Z_Altezza_m": -3.0,
@@ -562,10 +611,10 @@ if meteo_mode == "Live API (Windy / Open-Meteo)":
     dir_wind = live_w_dir
   else:
     st.sidebar.error("Impossibile contattare il server meteo. Uso manuale.")
-    v_wind = st.sidebar.slider("Vento (knots)", 0, 70, 30)
+    v_wind = st.sidebar.slider("Vento (knots)", 0, 80, 30)
     dir_wind = st.sidebar.slider("Direzione Vento (deg)", 0, 360, 45)
 else:
-  v_wind = st.sidebar.slider("Vento (knots)", 0, 70, 30)
+  v_wind = st.sidebar.slider("Vento (knots)", 0, 80, 30)
   dir_wind = st.sidebar.slider("Direzione Vento (deg)", 0, 360, 45)
 
 v_curr = st.sidebar.slider("Corrente (knots)", 0.0, 4.0, 0.5)
@@ -576,12 +625,13 @@ dir_curr = st.sidebar.slider("Direzione Corrente (deg)", 0, 360, 0)
 # =============================================================================
 st.title("⚓ OpenMooring - Live Setup & MEG4 Analysis")
 
-tab_setup, tab_3d_editor, tab_sim, tab_polar, tab_maint = st.tabs([
+tab_setup, tab_3d_editor, tab_sim, tab_polar, tab_maint, tab_actual = st.tabs([
     "🚢 1. Dati Nave & Cavi",
-    "🗺️ 2. Editor 3D Layout Banchina",
-    "📊 3. Simulazione Tensioni (in t)",
+    "🗺️ 2. Layout Bitte (Rangefinder)",
+    "📊 3. Simulazione Tensioni",
     "🌀 4. Inviluppo Polare",
     "📈 5. Storico & Usura Cavi",
+    "📝 6. Ormeggio Reale & Limite Vento",
 ])
 
 # -----------------------------------------------------------------------------
@@ -628,60 +678,84 @@ with tab_setup:
   st.session_state.lines_inventory = edited_lines
 
 # -----------------------------------------------------------------------------
-# TAB 2: EDITOR GRAFICO 3D BANCHINA
+# TAB 2: EDITOR BITTE CON MISURE RANGEFINDER (PRUA / POPPA)
 # -----------------------------------------------------------------------------
 with tab_3d_editor:
   st.header(f"🗺️ Layout Banchina & Bitte: {selected_port}")
   st.info(
-      "ℹ️ **Coordinata Z Bitta:** indica la quota verticale relativa"
-      " rispetto alla Mooring Station della nave."
+      "📏 **Misurazione Banchina (Rangefinder):** Le coordinate X sono inserite"
+      " come **distanza dall'estrema prua** (per bitte a prua) o **dall'estrema"
+      " poppa** (per bitte a poppa). L'app calcola automaticamente la posizione"
+      " assoluta rispetto al centro nave."
   )
 
   df_bollards = st.session_state.ports_bollards[selected_port]
 
+  # Aggiunta Nuova Bitta
+  st.subheader("➕ Aggiungi Bitta alla Banchina")
+  c_add1, c_add2, c_add3, c_add4, c_add5, c_add6 = st.columns(6)
+
+  new_b_id = c_add1.text_input("ID Bitta", f"B{len(df_bollards) + 1}")
+  new_pos = c_add2.selectbox("Zona Bitta", ["Prua", "Poppa"])
+  new_dist = c_add3.number_input("Dist. Estrema (m)", min_value=0.0, value=15.0)
+  new_y = c_add4.number_input("Dist. Banchina Y (m)", value=25.0)
+  new_z = c_add5.number_input("Altezza Z (m)", value=-3.0)
+  new_swl = c_add6.number_input("SWL Bitta (t)", value=150)
+
+  col_btn1, col_btn2 = st.columns(2)
+
+  if col_btn1.button("➕ Aggiungi Bitta a Prua"):
+    x_abs = (loa / 2.0) - new_dist
+    new_row = {
+        "bollard_id": new_b_id,
+        "Posizione": "Prua",
+        "Dist_Estrema_m": new_dist,
+        "X_Coordinata_m": x_abs,
+        "Y_Coordinata_m": new_y,
+        "Z_Altezza_m": new_z,
+        "SWL_Bitta_t": new_swl,
+        "Stato": "Attivo",
+    }
+    st.session_state.ports_bollards[selected_port] = pd.concat(
+        [df_bollards, pd.DataFrame([new_row])], ignore_index=True
+    )
+    st.rerun()
+
+  if col_btn2.button("➕ Aggiungi Bitta a Poppa"):
+    x_abs = -(loa / 2.0) + new_dist
+    new_row = {
+        "bollard_id": new_b_id,
+        "Posizione": "Poppa",
+        "Dist_Estrema_m": new_dist,
+        "X_Coordinata_m": x_abs,
+        "Y_Coordinata_m": new_y,
+        "Z_Altezza_m": new_z,
+        "SWL_Bitta_t": new_swl,
+        "Stato": "Attivo",
+    }
+    st.session_state.ports_bollards[selected_port] = pd.concat(
+        [df_bollards, pd.DataFrame([new_row])], ignore_index=True
+    )
+    st.rerun()
+
+  st.divider()
+
+  # Ricalcolo automatico coordinata X assoluta prima della visualizzazione
+  df_curr = st.session_state.ports_bollards[selected_port].copy()
+  calc_x = []
+  for _, r in df_curr.iterrows():
+    if r.get("Posizione") == "Prua":
+      calc_x.append((loa / 2.0) - float(r.get("Dist_Estrema_m", 0)))
+    else:
+      calc_x.append(-(loa / 2.0) + float(r.get("Dist_Estrema_m", 0)))
+  df_curr["X_Coordinata_m"] = calc_x
+
   col_ed_left, col_ed_right = st.columns([1, 1])
 
   with col_ed_left:
-    st.subheader("⚙️ Regolazione Bitta")
-
-    b_id_list = df_bollards["bollard_id"].tolist()
-    b_id = st.selectbox("Bitta da modificare:", b_id_list)
-    idx = df_bollards[df_bollards["bollard_id"] == b_id].index[0]
-
-    c1, c2, c3, c4 = st.columns(4)
-    x_val = c1.number_input(
-        "X (m)",
-        value=float(df_bollards.loc[idx, "X_Coordinata_m"]),
-        step=1.0,
-        key="x_in",
-    )
-    y_val = c2.number_input(
-        "Y (m)",
-        value=float(df_bollards.loc[idx, "Y_Coordinata_m"]),
-        step=1.0,
-        key="y_in",
-    )
-    z_val = c3.number_input(
-        "Z risp. Mooring St. (m)",
-        value=float(df_bollards.loc[idx, "Z_Altezza_m"]),
-        step=0.5,
-        key="z_in",
-    )
-    swl_val = c4.number_input(
-        "SWL (t)",
-        value=int(df_bollards.loc[idx, "SWL_Bitta_t"]),
-        step=10,
-        key="swl_in",
-    )
-
-    df_bollards.loc[idx, "X_Coordinata_m"] = x_val
-    df_bollards.loc[idx, "Y_Coordinata_m"] = y_val
-    df_bollards.loc[idx, "Z_Altezza_m"] = z_val
-    df_bollards.loc[idx, "SWL_Bitta_t"] = swl_val
-
-    st.subheader("📋 Tabella Bitte")
+    st.subheader("📋 Tabella Bitte Banchina")
     edited_bollards = st.data_editor(
-        df_bollards,
+        df_curr,
         num_rows="dynamic",
         use_container_width=True,
         key=f"editor_{selected_port}",
@@ -692,7 +766,6 @@ with tab_3d_editor:
     st.subheader("🌐 Visualizzazione Layout 3D")
 
     fig_setup = go.Figure()
-
     s_x = [-loa / 2, loa / 2 - 30, loa / 2, loa / 2 - 30, -loa / 2, -loa / 2]
     s_y = [-beam / 2, -beam / 2, 0, beam / 2, beam / 2, -beam / 2]
     s_z = [10.0] * len(s_x)
@@ -707,17 +780,6 @@ with tab_3d_editor:
         )
     )
 
-    fig_setup.add_trace(
-        go.Mesh3d(
-            x=[-200, 200, 200, -200],
-            y=[18, 18, 45, 45],
-            z=[0, 0, 0, 0],
-            color="lightgrey",
-            opacity=0.5,
-            name="Banchina",
-        )
-    )
-
     act_b = edited_bollards[edited_bollards["Stato"] == "Attivo"]
     fig_setup.add_trace(
         go.Scatter3d(
@@ -729,11 +791,11 @@ with tab_3d_editor:
                 size=9,
                 color=act_b["SWL_Bitta_t"],
                 colorscale="Viridis",
-                colorbar=dict(title="SWL (t)"),
                 showscale=True,
             ),
             text=[
-                f"{r['bollard_id']} ({r['SWL_Bitta_t']}t)"
+                f"{r['bollard_id']} ({r['Posizione']}: {r['Dist_Estrema_m']}m,"
+                f" SWL:{r['SWL_Bitta_t']}t)"
                 for _, r in act_b.iterrows()
             ],
             textposition="top center",
@@ -902,48 +964,167 @@ with tab_polar:
 with tab_maint:
   st.subheader("📈 Registro Storico Usura & Suggerimento Sostituzione Cavi")
 
-  c_m1, c_m2 = st.columns([1, 2])
-
-  with c_m1:
-    st.write("### Registra Sessione Ormeggio")
-    duration_h = st.number_input(
-        "Durata Ormeggio (Ore)", min_value=1.0, max_value=72.0, value=12.0
+  health_df = get_lines_health_status()
+  if not health_df.empty:
+    fig_health = px.bar(
+        health_df,
+        x="line_name",
+        y="Health_Percent",
+        color="Health_Percent",
+        color_continuous_scale=["red", "yellow", "green"],
+        range_color=[0, 100],
     )
-    if st.button("Salva e Aggiorna Database Cavi"):
-      if "results_df" in locals():
-        log_mooring_session(
-            results_df, selected_port, duration_hours=duration_h
+    fig_health.add_hline(
+        y=20,
+        line_dash="dash",
+        line_color="red",
+        annotation_text="Soglia Sostituzione (20%)",
+    )
+    st.plotly_chart(fig_health, use_container_width=True)
+
+    st.dataframe(
+        health_df[[
+            "line_name",
+            "accumulated_hours",
+            "high_load_hours",
+            "Health_Percent",
+            "Recommendation",
+        ]]
+    )
+
+# -----------------------------------------------------------------------------
+# TAB 6: CONFIGURAZIONE REALE & LIMITI OPERATIVI VENTO
+# -----------------------------------------------------------------------------
+with tab_actual:
+  st.header("📝 Configurazione Effettiva Ormeggio & Limiti Operativi")
+
+  st.write(
+      "Seleziona la configurazione reale dei cavi inviati a terra per questo"
+      " ormeggio:"
+  )
+
+  col_cfg1, col_cfg2, col_cfg3, col_cfg4, col_cfg5 = st.columns(5)
+
+  n_head = col_cfg1.number_input("Cavi di Testa (Head Lines)", 0, 6, 2)
+  n_fwd_breast = col_cfg2.number_input("Traversi Prua (Fwd Breast)", 0, 6, 1)
+  n_fwd_spring = col_cfg3.number_input("Traversini Prua (Fwd Spring)", 0, 6, 1)
+  n_aft_spring = col_cfg4.number_input("Traversini Poppa (Aft Spring)", 0, 6, 1)
+  n_stern = col_cfg5.number_input("Cavi di Poppa / Traversi (Stern)", 0, 6, 2)
+
+  # Selezione cavi attivi in base al conteggio
+  lines_inv = st.session_state.lines_inventory.copy()
+  active_indices = []
+
+  counts = {
+      "Head": n_head,
+      "Fwd Breast": n_fwd_breast,
+      "Fwd Spring": n_fwd_spring,
+      "Aft Spring": n_aft_spring,
+      "Stern": n_stern,
+  }
+
+  for line_type, count in counts.items():
+    sub_df = lines_inv[
+        lines_inv.get("line_type", lines_inv["line_name"]) == line_type
+    ]
+    if len(sub_df) >= count:
+      active_indices.extend(sub_df.iloc[:count].index.tolist())
+    else:
+      active_indices.extend(sub_df.index.tolist())
+
+  active_lines_df = lines_inv.loc[active_indices].copy()
+
+  st.subheader("📋 Cavi Attivi per l'Ormeggio Corrente")
+  st.dataframe(
+      active_lines_df[["line_id", "line_name", "mbl_tons", "bollard_id"]]
+  )
+
+  actual_geom_df = calculate_line_geometry(active_lines_df, active_bollards_df)
+
+  st.divider()
+  st.subheader("🌪️ Analisi Limite Vento Sostenibile (SWL Bitte & 50% MBL Cavi)")
+
+  calc_col1, calc_col2 = st.columns([1, 2])
+
+  with calc_col1:
+    test_angle = st.slider("Direzione Vento da Testare (°)", 0, 360, 90)
+    dur_h = st.number_input("Durata Ormeggio Prevista (Ore)", 1.0, 72.0, 12.0)
+
+  with calc_col2:
+    if not actual_geom_df.empty:
+      max_sust_wind = 0
+      crit_cause = ""
+
+      for w_speed in range(1, 100):
+        f = calculate_environmental_forces(
+            w_speed,
+            test_angle,
+            v_curr,
+            dir_curr,
+            ship_dict["AFW"],
+            ship_dict["ALW"],
+            ship_dict["ALC"],
+            ship_dict["LOA"],
         )
-        st.success("Sessione salvata nello storico SQLite!")
+        res = solve_line_tensions_3d(actual_geom_df.copy(), f)
+
+        # 1. Verifica Limite 50% MBL Cavi
+        over_mbl = res[res["Util_Percent"] > 50.0]
+
+        # 2. Verifica Limite SWL Bitte
+        b_loads = res.groupby("bollard_id")["Tension_tons"].sum()
+        over_swl_bitta = False
+        b_over_name = ""
+
+        for b_id, load in b_loads.items():
+          swl_val = float(
+              res[res["bollard_id"] == b_id]["SWL_Bitta_t"].iloc[0]
+          )
+          if load > swl_val:
+            over_swl_bitta = True
+            b_over_name = b_id
+            break
+
+        if not over_mbl.empty:
+          crit_cause = (
+              f"Cavo '{over_mbl.iloc[0]['line_name']}' ha superato il 50% MBL"
+              f" ({over_mbl.iloc[0]['Util_Percent']:.1f}%)"
+          )
+          break
+        elif over_swl_bitta:
+          crit_cause = (
+              f"Bitta '{b_over_name}' ha superato il proprio SWL di targa"
+          )
+          break
+
+        max_sust_wind = w_speed
+
+      st.metric(
+          "Velocità Massima Vento Sostenibile",
+          f"{max_sust_wind} knots",
+          f"Direzione {test_angle}°",
+      )
+      if crit_cause:
+        st.warning(f"⚠️ Limite raggiunto a {max_sust_wind + 1} kts: {crit_cause}")
       else:
-        st.warning("Esegui prima la simulazione nel Tab 3.")
+        st.success("✅ La struttura e i cavi supportano venti oltre 100 knots.")
 
-  with c_m2:
-    st.write("### Stato Salute Cavi e Raccomandazioni")
-    health_df = get_lines_health_status()
-    if not health_df.empty:
-      fig_health = px.bar(
-          health_df,
-          x="line_name",
-          y="Health_Percent",
-          color="Health_Percent",
-          color_continuous_scale=["red", "yellow", "green"],
-          range_color=[0, 100],
-      )
-      fig_health.add_hline(
-          y=20,
-          line_dash="dash",
-          line_color="red",
-          annotation_text="Soglia Sostituzione (20%)",
-      )
-      st.plotly_chart(fig_health, use_container_width=True)
+  st.divider()
 
-      st.dataframe(
-          health_df[[
-              "line_name",
-              "accumulated_hours",
-              "high_load_hours",
-              "Health_Percent",
-              "Recommendation",
-          ]]
+  if st.button("💾 Registra Questo Ormeggio nello Storico Cavi"):
+    if not actual_geom_df.empty:
+      f_current = calculate_environmental_forces(
+          v_wind,
+          dir_wind,
+          v_curr,
+          dir_curr,
+          ship_dict["AFW"],
+          ship_dict["ALW"],
+          ship_dict["ALC"],
+          ship_dict["LOA"],
       )
+      res_current = solve_line_tensions_3d(actual_geom_df, f_current)
+      log_mooring_session(
+          res_current, selected_port, duration_hours=dur_h
+      )
+      st.success(f"Sessione salvata con successo per {selected_port}!")
