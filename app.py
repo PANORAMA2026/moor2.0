@@ -142,13 +142,13 @@ def calculate_environmental_forces(
     loa,
 ):
   """Calcola forze (Fx, Fy) e momento (Mz) da vento e corrente (Formule OCIMF)."""
-  v_wind = v_wind_knots * 0.514444  # knots -> m/s
-  v_curr = v_curr_knots * 0.514444
+  v_wind = float(v_wind_knots) * 0.514444  # knots -> m/s
+  v_curr = float(v_curr_knots) * 0.514444
   rho_air = 1.225
   rho_water = 1025.0
 
-  rad_wind = np.radians(dir_wind_deg)
-  rad_curr = np.radians(dir_curr_deg)
+  rad_wind = np.radians(float(dir_wind_deg))
+  rad_curr = np.radians(float(dir_curr_deg))
 
   cx_w = -np.cos(rad_wind)
   cy_w = np.sin(rad_wind)
@@ -158,13 +158,13 @@ def calculate_environmental_forces(
   cy_c = np.sin(rad_curr)
   cmz_c = 0.1 * np.sin(2 * rad_curr)
 
-  fx_w = 0.5 * rho_air * (v_wind**2) * afw * cx_w / 1000.0
-  fy_w = 0.5 * rho_air * (v_wind**2) * alw * cy_w / 1000.0
-  mz_w = 0.5 * rho_air * (v_wind**2) * alw * loa * cmz_w / 1000.0
+  fx_w = 0.5 * rho_air * (v_wind**2) * float(afw) * cx_w / 1000.0
+  fy_w = 0.5 * rho_air * (v_wind**2) * float(alw) * cy_w / 1000.0
+  mz_w = 0.5 * rho_air * (v_wind**2) * float(alw) * float(loa) * cmz_w / 1000.0
 
-  fx_c = 0.5 * rho_water * (v_curr**2) * afw * 0.1 * cx_c / 1000.0
-  fy_c = 0.5 * rho_water * (v_curr**2) * alc * cy_c / 1000.0
-  mz_c = 0.5 * rho_water * (v_curr**2) * alc * loa * cmz_c / 1000.0
+  fx_c = 0.5 * rho_water * (v_curr**2) * float(afw) * 0.1 * cx_c / 1000.0
+  fy_c = 0.5 * rho_water * (v_curr**2) * float(alc) * cy_c / 1000.0
+  mz_c = 0.5 * rho_water * (v_curr**2) * float(alc) * float(loa) * cmz_c / 1000.0
 
   return {
       "Fx_total": fx_w + fx_c,
@@ -174,14 +174,33 @@ def calculate_environmental_forces(
 
 
 def calculate_line_geometry(lines_df, bollards_df):
-  """Calcola lunghezza 3D, azimut e inclinazione per ciascuna linea d'ormeggio."""
+  """Calcola lunghezza 3D, azimut e inclinazione convertendo preventivamente le chiavi in stringhe."""
+  l_df = lines_df.copy()
+  b_df = bollards_df.copy()
+
+  l_df["bollard_id"] = l_df["bollard_id"].astype(str).str.strip()
+  b_df["bollard_id"] = b_df["bollard_id"].astype(str).str.strip()
+
   merged = pd.merge(
-      lines_df, bollards_df, on="bollard_id", suffixes=("_chock", "_bollard")
+      l_df, b_df, on="bollard_id", suffixes=("_chock", "_bollard")
   )
 
-  dx = merged["bollard_x_m"] - merged["chock_x_m"]
-  dy = merged["bollard_y_m"] - merged["chock_y_m"]
-  dz = merged["bollard_z_m"] - merged["chock_z_m"]
+  if merged.empty:
+    st.error(
+        "⚠️ Attenzione: Nessuna corrispondenza trovata tra i bollard_id dei"
+        " cavi e della banchina selezionata! Controlla i CSV."
+    )
+    return merged
+
+  dx = (
+      merged["bollard_x_m"].astype(float) - merged["chock_x_m"].astype(float)
+  )
+  dy = (
+      merged["bollard_y_m"].astype(float) - merged["chock_y_m"].astype(float)
+  )
+  dz = (
+      merged["bollard_z_m"].astype(float) - merged["chock_z_m"].astype(float)
+  )
 
   length_3d = np.sqrt(dx**2 + dy**2 + dz**2)
   length_2d = np.sqrt(dx**2 + dy**2)
@@ -198,25 +217,32 @@ def calculate_line_geometry(lines_df, bollards_df):
 
 def calculate_composite_stiffness(line):
   """Calcola la rigidezza equivalente in serie (Cavo + Coda sintetica)."""
-  length_tail = line.get("tail_length_m", 0.0)
-  length_main = max(0.1, line["length_m"] - length_tail)
-  area_main = np.pi * ((line["diameter_mm"] / 1000.0) ** 2) / 4.0
-  k_main = (line["E_modulus_GPa"] * 1e6 * area_main) / length_main
+  length_tail = float(line.get("tail_length_m", 0.0))
+  length_main = max(0.1, float(line["length_m"]) - length_tail)
+  area_main = np.pi * ((float(line["diameter_mm"]) / 1000.0) ** 2) / 4.0
+  k_main = (float(line["E_modulus_GPa"]) * 1e6 * area_main) / length_main
 
-  if length_tail <= 0 or line.get("tail_diameter_mm", 0) <= 0:
-    return k_main, line["mbl_kN"]
+  if length_tail <= 0 or float(line.get("tail_diameter_mm", 0)) <= 0:
+    return k_main, float(line["mbl_kN"])
 
-  area_tail = np.pi * ((line["tail_diameter_mm"] / 1000.0) ** 2) / 4.0
-  k_tail = (line["tail_E_modulus_GPa"] * 1e6 * area_tail) / length_tail
+  area_tail = (
+      np.pi * ((float(line["tail_diameter_mm"]) / 1000.0) ** 2) / 4.0
+  )
+  k_tail = (float(line["tail_E_modulus_GPa"]) * 1e6 * area_tail) / length_tail
 
   k_eq = (k_main * k_tail) / (k_main + k_tail)
-  effective_mbl = min(line["mbl_kN"], line.get("tail_mbl_kN", line["mbl_kN"]))
+  effective_mbl = min(
+      float(line["mbl_kN"]), float(line.get("tail_mbl_kN", line["mbl_kN"]))
+  )
 
   return k_eq, effective_mbl
 
 
 def solve_line_tensions_3d(lines_geom_df, forces):
   """Risolve il sistema matriciale delle forze ed estrae il carico sui cavi (% MBL)."""
+  if lines_geom_df.empty:
+    return lines_geom_df
+
   K_global = np.zeros((3, 3))
   F_ext = np.array(
       [forces["Fx_total"], forces["Fy_total"], forces["Mz_total"]]
@@ -224,15 +250,15 @@ def solve_line_tensions_3d(lines_geom_df, forces):
   line_data = []
 
   for _, line in lines_geom_df.iterrows():
-    rad_az = np.radians(line["azimuth_deg"])
-    rad_inc = np.radians(line["incline_deg"])
+    rad_az = np.radians(float(line["azimuth_deg"]))
+    rad_inc = np.radians(float(line["incline_deg"]))
 
     dx = np.cos(rad_inc) * np.cos(rad_az)
     dy = np.cos(rad_inc) * np.sin(rad_az)
 
     k_eq, effective_mbl = calculate_composite_stiffness(line)
 
-    rx, ry = line["chock_x_m"], line["chock_y_m"]
+    rx, ry = float(line["chock_x_m"]), float(line["chock_y_m"])
     m_z = rx * dy - ry * dx
 
     b = np.array([dx, dy, m_z])
@@ -274,6 +300,9 @@ def calculate_wind_operability_envelope(
   angles = np.arange(0, 360, step_deg)
   max_safe_winds = []
 
+  if lines_geom_df.empty:
+    return angles, [0] * len(angles)
+
   for angle in angles:
     safe_wind = 0
     for v_w in range(1, max_wind_test + 1):
@@ -293,7 +322,6 @@ def create_mooring_3d_plot(results_df, bollards_df, loa=323.0, beam=37.2):
   """Crea la rappresentazione grafica 3D del layout d'ormeggio con Plotly."""
   fig = go.Figure()
 
-  # Sagoma Schematica Nave
   ship_x = [-loa / 2, loa / 2 - 30, loa / 2, loa / 2 - 30, -loa / 2, -loa / 2]
   ship_y = [-beam / 2, -beam / 2, 0, beam / 2, beam / 2, -beam / 2]
   ship_z = [10.0] * len(ship_x)
@@ -309,7 +337,6 @@ def create_mooring_3d_plot(results_df, bollards_df, loa=323.0, beam=37.2):
       )
   )
 
-  # Bittoni
   fig.add_trace(
       go.Scatter3d(
           x=bollards_df["bollard_x_m"],
@@ -322,7 +349,6 @@ def create_mooring_3d_plot(results_df, bollards_df, loa=323.0, beam=37.2):
       )
   )
 
-  # Cavi d'ormeggio
   for _, line in results_df.iterrows():
     util = line["Util_Percent"]
     color = "red" if util > 50.0 else ("orange" if util > 35.0 else "green")
@@ -350,7 +376,6 @@ def create_mooring_3d_plot(results_df, bollards_df, loa=323.0, beam=37.2):
 st.set_page_config(page_title="OpenMooring MEG4 Pro", layout="wide")
 st.title("⚓ OpenMooring - Analysis & Line Lifetime Management")
 
-# DATI DI DEFAULT FALLBACK
 DEFAULT_SHIP = {
     "LOA": 323.0,
     "Beam": 37.2,
@@ -460,9 +485,7 @@ DEFAULT_LINES = pd.DataFrame([
     },
 ])
 
-# ELENCO PORTI AGGIORNATO
 DEFAULT_BOLLARDS = pd.DataFrame([
-    # Ensenada Pier #2
     {
         "port_name": "Ensenada (pier #2)",
         "bollard_id": "B1",
@@ -498,7 +521,6 @@ DEFAULT_BOLLARDS = pd.DataFrame([
         "bollard_y_m": 25.0,
         "bollard_z_m": 3.0,
     },
-    # Long Beach Cruise Terminal
     {
         "port_name": "Long Beach (cruise terminal)",
         "bollard_id": "B1",
@@ -534,7 +556,6 @@ DEFAULT_BOLLARDS = pd.DataFrame([
         "bollard_y_m": 30.0,
         "bollard_z_m": 2.5,
     },
-    # Mazatlan
     {
         "port_name": "Mazatlan",
         "bollard_id": "B1",
@@ -570,7 +591,6 @@ DEFAULT_BOLLARDS = pd.DataFrame([
         "bollard_y_m": 28.0,
         "bollard_z_m": 2.0,
     },
-    # La Paz
     {
         "port_name": "La Paz",
         "bollard_id": "B1",
@@ -606,7 +626,6 @@ DEFAULT_BOLLARDS = pd.DataFrame([
         "bollard_y_m": 26.0,
         "bollard_z_m": 2.0,
     },
-    # Puerto Vallarta Pier #1
     {
         "port_name": "Puerto Vallarta (pier #1)",
         "bollard_id": "B1",
@@ -642,7 +661,6 @@ DEFAULT_BOLLARDS = pd.DataFrame([
         "bollard_y_m": 32.0,
         "bollard_z_m": 2.5,
     },
-    # Puerto Vallarta Pier #3
     {
         "port_name": "Puerto Vallarta (pier #3)",
         "bollard_id": "B1",
@@ -680,7 +698,6 @@ DEFAULT_BOLLARDS = pd.DataFrame([
     },
 ])
 
-# SCHEDE DELL'APPLICAZIONE
 tab_app1, tab_app2, tab_app3, tab_app4 = st.tabs([
     "📂 1. Caricamento CSV",
     "🌐 2. Analisi Ormeggio & Vista 3D",
@@ -737,7 +754,6 @@ with tab_app1:
   )
   bollards_df = ports_df[ports_df["port_name"] == selected_port]
 
-  # Inizializza il DB con i dati dei cavi attivi
   init_db(lines_df)
 
   st.divider()
@@ -845,13 +861,15 @@ with tab_app3:
               line=dict(color="green", width=2),
           )
       )
+
       fig_polar.update_layout(
           polar=dict(
               radialaxis=dict(
                   visible=True, range=[0, max(max_winds) + 10], suffix=" kts"
               ),
-              angularaxis=dict(direction="clockwise", rotation=90),
-          )
+              angularaxis=dict(direction="clockwise"),
+          ),
+          margin=dict(l=40, r=40, t=20, b=20),
       )
       st.plotly_chart(fig_polar, use_container_width=True)
 
