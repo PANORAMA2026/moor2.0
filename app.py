@@ -1,12 +1,22 @@
 from datetime import datetime
+import io
 import re
 import sqlite3
 import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+from pypdf import PdfReader
 import requests
 import streamlit as st
+
+# Tenta l'importazione del modulo canvas interattivo
+try:
+  from streamlit_drawable_canvas import st_canvas
+
+  HAS_CANVAS = True
+except ImportError:
+  HAS_CANVAS = False
 
 st.set_page_config(
     page_title="OpenMooring MEG4 Pro - Multi-Port & Certificate Manager",
@@ -158,8 +168,23 @@ def get_lines_health_status():
 
 
 # =============================================================================
-# 2. INTEGRATORE CERTIFICATI CAVI & PARSER TESTUALE/REGEX
+# 2. INTEGRATORE CERTIFICATI CAVI (PDF READ + PARSER REGEX)
 # =============================================================================
+def extract_text_from_pdf(pdf_file):
+  """Estrae il testo da un file PDF scaricato o caricato via drag and drop."""
+  try:
+    reader = PdfReader(pdf_file)
+    extracted_text = ""
+    for page in reader.pages:
+      text = page.extract_text()
+      if text:
+        extracted_text += text + "\n"
+    return extracted_text
+  except Exception as e:
+    st.error(f"Errore nella lettura del PDF: {e}")
+    return ""
+
+
 def parse_certificate_text(text):
   """Esegue il parsing automatico del testo/OCR del certificato cavo."""
   data = {
@@ -448,10 +473,8 @@ def calculate_wind_operability_envelope(
       )
       results = solve_line_tensions_3d(lines_geom_df.copy(), forces)
 
-      # Controllo Cavi: <= 50% MBL
       line_overload = (results["Util_Percent"] > 50.0).any()
 
-      # Controllo Bitte: Carico totale sulla bitta <= SWL bitta
       bollard_loads = results.groupby("bollard_id")["Tension_tons"].sum()
       bollard_overload = False
       for b_id, load in bollard_loads.items():
@@ -482,7 +505,6 @@ DEFAULT_SHIP = {
     "ALC": 1200.0,
 }
 
-# Inizializzazione Registro Certificati
 if "certificates_db" not in st.session_state:
   st.session_state.certificates_db = pd.DataFrame([
       {
@@ -514,7 +536,6 @@ if "certificates_db" not in st.session_state:
       },
   ])
 
-# Inizializzazione Mooring Stations Layout
 if "mooring_stations" not in st.session_state:
   st.session_state.mooring_stations = {
       "Forward Station (Prua)": pd.DataFrame([
@@ -586,7 +607,6 @@ if "mooring_stations" not in st.session_state:
       ]),
   }
 
-# Inventario Linee
 if "lines_inventory" not in st.session_state:
   st.session_state.lines_inventory = pd.DataFrame([
       {
@@ -806,7 +826,6 @@ if "port_headings" not in st.session_state:
       "Puerto Vallarta Pier #3": 0.0,
   }
 
-# Inizializzazione DB in-memory
 init_db(st.session_state.lines_inventory)
 
 # =============================================================================
@@ -868,8 +887,8 @@ st.title("⚓ OpenMooring - MEG4 Pro Suite")
     tab_maint,
 ) = st.tabs([
     "🚢 1. Dati Nave & Inventario",
-    "📜 2. Certificati Cavi (OCR/Regex)",
-    "🏗️ 3. Mooring Stations & Verricelli",
+    "📜 2. Certificati Cavi (PDF Drag & Drop)",
+    "🏗️ 3. Pianetti Mooring Stations",
     "🗺️ 4. Layout Banchina & Bitte",
     "📊 5. Simulazione Tensioni",
     "🌀 6. Inviluppo Polare",
@@ -920,62 +939,84 @@ with tab_setup:
   st.session_state.lines_inventory = edited_lines
 
 # -----------------------------------------------------------------------------
-# TAB 2: CERTIFICATI CAVI (PARSING REGEX / OCR & GESTIONE CERTIFICATI)
+# TAB 2: CERTIFICATI CAVI (DRAG & DROP PDF + PARSING AUTOMATICO)
 # -----------------------------------------------------------------------------
 with tab_certs:
-  st.header("📜 Modulo Certificati Cavi & Audit Compliance")
+  st.header("📜 Modulo Certificati Cavi & Drag and Drop PDF")
   st.info(
-      "Carica o incolla il testo del Certificato della Linea d'Ormeggio."
-      " L'algoritmo estrarrà MBL, Diametro, Materiale e ID Certificato per"
-      " aggiornare il DB MEG4."
+      "📁 **Drag & Drop Certificato:** Trascina direttamente il file PDF del"
+      " certificato del cavo. Il sistema estrarrà il testo, eseguirà il parsing"
+      " Regex di MBL, Diametro e Costruttore e lo salverà nel database."
   )
 
   c_col1, c_col2 = st.columns([1, 1])
 
   with c_col1:
-    st.subheader("📥 Immissione Testo / OCR Certificato")
-    cert_text_input = st.text_area(
-        "Incolla qui il testo estratto dal certificato (PDF/OCR)",
-        height=220,
-        placeholder=(
-            "Manufacturer: Samson Rope\nCertificate No: CERT-HMPE-2026-X\nMaterial:"
-            " HMPE Dyneema\nDiameter: 64 mm\nMBL: 1030 kN\nStandard: MEG4"
-            " DNV-GL"
-        ),
+    st.subheader("📤 Carica File PDF Certificato")
+    uploaded_pdf = st.file_uploader(
+        "Trascina qui il file PDF del Certificato",
+        type=["pdf"],
+        help="Carica il file PDF inviato dal produttore del cavo",
     )
 
+    cert_text_to_parse = ""
+
+    if uploaded_pdf is not None:
+      st.success(f"File caricato: {uploaded_pdf.name}")
+      cert_text_to_parse = extract_text_from_pdf(uploaded_pdf)
+      with st.expander("📄 Testo estratto dal PDF"):
+        st.text_area(
+            "Anteprima Testo", cert_text_to_parse, height=150, disabled=True
+        )
+
+    st.subheader("📝 Inserimento Manuale Alternate")
+    manual_text = st.text_area(
+        "Oppure incolla qui il testo del certificato",
+        height=100,
+        placeholder="Certificate No: CERT-2026-X ...",
+    )
+    if manual_text:
+      cert_text_to_parse = manual_text
+
     if st.button("🔍 Esegui Parsing Certificato"):
-      if cert_text_input:
-        parsed = parse_certificate_text(cert_text_input)
+      if cert_text_to_parse:
+        parsed = parse_certificate_text(cert_text_to_parse)
         st.success("Parsing completato!")
         st.json(parsed)
 
-        # Aggiunta al database certificati
-        if parsed["cert_id"]:
-          new_cert = {
-              "cert_id": parsed["cert_id"] or f"CERT-{len(st.session_state.certificates_db)+1}",
-              "manufacturer": parsed["manufacturer"] or "Unknown",
-              "material": parsed["material"] or "HMPE",
-              "diameter_mm": parsed["diameter_mm"] or 64,
-              "mbl_tons": parsed["mbl_tons"] or 105.0,
-              "standard": parsed["standard"] or "MEG4",
-              "issue_date": datetime.now().strftime("%Y-%m-%d"),
-          }
-          st.session_state.certificates_db = pd.concat(
-              [st.session_state.certificates_db, pd.DataFrame([new_cert])],
-              ignore_index=True,
-          ).drop_duplicates(subset=["cert_id"])
-          st.success(f"Certificato {parsed['cert_id']} salvato con successo!")
+        new_cert_id = (
+            parsed["cert_id"]
+            or f"CERT-{len(st.session_state.certificates_db)+1}"
+        )
+
+        new_cert = {
+            "cert_id": new_cert_id,
+            "manufacturer": parsed["manufacturer"] or "Unknown",
+            "material": parsed["material"] or "HMPE",
+            "diameter_mm": parsed["diameter_mm"] or 64,
+            "mbl_tons": parsed["mbl_tons"] or 105.0,
+            "standard": parsed["standard"] or "MEG4",
+            "issue_date": datetime.now().strftime("%Y-%m-%d"),
+        }
+
+        # Aggiornamento/Inserimento nel DB
+        st.session_state.certificates_db = pd.concat(
+            [st.session_state.certificates_db, pd.DataFrame([new_cert])],
+            ignore_index=True,
+        ).drop_duplicates(subset=["cert_id"], keep="last")
+
+        st.success(f"Certificato {new_cert_id} salvato nel database!")
+        st.rerun()
 
   with c_col2:
     st.subheader("📚 Database Certificati Registrati")
     st.dataframe(
         st.session_state.certificates_db,
         use_container_width=True,
-        height=300,
+        height=280,
     )
 
-    st.subheader("🔗 Associa Certificato a Linea")
+    st.subheader("🔗 Associa Certificato a Linea d'Ormeggio")
     col_sel1, col_sel2 = st.columns(2)
     selected_line = col_sel1.selectbox(
         "Seleziona Linea", st.session_state.lines_inventory["line_name"]
@@ -1004,24 +1045,24 @@ with tab_certs:
             "material"
         ]
         st.success(
-            f"Linea '{selected_line}' aggiornata con i dati MBL del certificato"
-            f" {selected_cert}!"
+            f"Linea '{selected_line}' aggiornata con MBL ({cert_row['mbl_tons']}t)"
+            f" dal certificato {selected_cert}!"
         )
         st.rerun()
 
 # -----------------------------------------------------------------------------
-# TAB 3: MOORING STATIONS & VERRICELLI
+# TAB 3: MOORING STATIONS, DOWNLOAD PIANETTI & ANNOTAZIONE INTERATTIVA
 # -----------------------------------------------------------------------------
 with tab_stations:
-  st.header("🏗️ Mappatura Stazioni d'Ormeggio & Verricelli (Winch Layout)")
+  st.header("🏗️ Mappatura Stazioni d'Ormeggio, Pianetti & Annotazione")
 
   station_sel = st.selectbox(
-      "Seleziona Stazione di Ormeggio",
+      "Seleziona Stazione d'Ormeggio",
       list(st.session_state.mooring_stations.keys()),
   )
   st_df = st.session_state.mooring_stations[station_sel]
 
-  st.subheader(f" Configurazione: {station_sel}")
+  st.subheader(f"⚙️ Configurazione Dati: {station_sel}")
   edited_st = st.data_editor(
       st_df,
       num_rows="dynamic",
@@ -1030,16 +1071,16 @@ with tab_stations:
   )
   st.session_state.mooring_stations[station_sel] = edited_st
 
-  # Rappresentazione Grafica della Stazione
+  # Generazione Figura Grafica Pianetto
   fig_st = go.Figure()
 
-  # Disegno dei guidacavi / chocks
+  # Disegno dei guidacavi / chocks / verricelli
   fig_st.add_trace(
       go.Scatter(
           x=edited_st["chock_x_m"],
           y=edited_st["chock_y_m"],
           mode="markers+text",
-          marker=dict(size=14, color="darkorange", symbol="square"),
+          marker=dict(size=18, color="darkorange", symbol="square"),
           text=edited_st["winch_id"] + " (" + edited_st["chock_id"] + ")",
           textposition="top center",
           name="Winch / Chock Position",
@@ -1047,12 +1088,59 @@ with tab_stations:
   )
 
   fig_st.update_layout(
-      title=f"Layout Bordo - {station_sel}",
+      title=f"Pianetto Grafico Vetrina - {station_sel}",
       xaxis_title="Coordinata X Longitudinale (m)",
       yaxis_title="Coordinata Y Trasversale (m)",
-      height=350,
+      height=380,
   )
-  st.plotly_chart(fig_st, use_container_width=True)
+
+  col_plan1, col_plan2 = st.columns([1, 1])
+
+  with col_plan1:
+    st.plotly_chart(fig_st, use_container_width=True)
+
+    # Export Pianetto in HTML / Formato Immagine
+    buffer = io.StringIO()
+    fig_st.write_html(buffer, include_plotlyjs="cdn")
+    html_bytes = buffer.getvalue().encode()
+
+    st.download_button(
+        label="💾 Scarica Pianetto (Interactive HTML)",
+        data=html_bytes,
+        file_name=f"pianetto_{station_sel.replace(' ', '_')}.html",
+        mime="text/html",
+    )
+
+  with col_plan2:
+    st.subheader("🖌️ Identificazione & Annotazione Manuale Pianetto")
+    st.write(
+        "Disegna o annota a mano sul canvas sottostante per identificare verricelli,"
+        " tamburi e numeri cavo:"
+    )
+
+    if HAS_CANVAS:
+      drawing_mode = st.selectbox(
+          "Strumento di Disegno:",
+          ["freedraw", "circle", "rect", "line", "transform"],
+      )
+      stroke_color = st.color_picker("Colore Penna", "#FF0000")
+      stroke_width = st.slider("Spessore Penna", 1, 10, 3)
+
+      canvas_result = st_canvas(
+          fill_color="rgba(255, 165, 0, 0.3)",
+          stroke_width=stroke_width,
+          stroke_color=stroke_color,
+          background_color="#f0f2f6",
+          height=300,
+          width=500,
+          drawing_mode=drawing_mode,
+          key=f"canvas_{station_sel}",
+      )
+    else:
+      st.warning(
+          "Modulo `streamlit-drawable-canvas` non installato. Per abilitare la"
+          " lavagna interattiva esegui: `pip install streamlit-drawable-canvas`"
+      )
 
 # -----------------------------------------------------------------------------
 # TAB 4: EDITOR BITTE CON MISURE RANGEFINDER (PRUA / POPPA) & ALLINEAMENTO BANCHINA
@@ -1062,8 +1150,7 @@ with tab_3d_editor:
   st.info(
       "📏 **Misurazione Banchina (Rangefinder):** Le coordinate X sono inserite"
       " come **distanza dall'estrema prua** (per bitte a prua) o **dall'estrema"
-      " poppa** (per bitte a poppa). L'app calcola automaticamente la posizione"
-      " assoluta rispetto al centro nave."
+      " poppa** (per bitte a poppa)."
   )
 
   st.subheader("📐 Orientamento e Allineamento Banchina")
@@ -1073,10 +1160,6 @@ with tab_3d_editor:
       max_value=360.0,
       value=float(st.session_state.port_headings.get(selected_port, 135.0)),
       step=1.0,
-      help=(
-          "Orientamento geografico della banchina espresso in gradi vero (0° ="
-          " Nord, 90° = Est)."
-      ),
       key=f"heading_input_{selected_port}",
   )
   st.session_state.port_headings[selected_port] = berth_heading
@@ -1085,7 +1168,6 @@ with tab_3d_editor:
 
   df_bollards = st.session_state.ports_bollards[selected_port]
 
-  # Aggiunta Nuova Bitta
   st.subheader("➕ Aggiungi Bitta alla Banchina")
   c_add1, c_add2, c_add3, c_add4, c_add5, c_add6 = st.columns(6)
 
@@ -1134,7 +1216,6 @@ with tab_3d_editor:
 
   st.divider()
 
-  # Ricalcolo automatico coordinata X assoluta prima della visualizzazione
   df_curr = st.session_state.ports_bollards[selected_port].copy()
   calc_x = []
   for _, r in df_curr.iterrows():
