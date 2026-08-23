@@ -1,4 +1,5 @@
 from datetime import datetime
+import re
 import sqlite3
 import numpy as np
 import pandas as pd
@@ -8,7 +9,8 @@ import requests
 import streamlit as st
 
 st.set_page_config(
-    page_title="OpenMooring MEG4 Pro - Multi-Port", layout="wide"
+    page_title="OpenMooring MEG4 Pro - Multi-Port & Certificate Manager",
+    layout="wide",
 )
 
 # Costante di conversione (kN in tonnellate metriche)
@@ -34,7 +36,10 @@ def init_db(lines_df=None):
             max_design_hours REAL DEFAULT 2000.0,
             accumulated_hours REAL DEFAULT 0.0,
             high_load_hours REAL DEFAULT 0.0,
-            fatigue_index REAL DEFAULT 0.0
+            fatigue_index REAL DEFAULT 0.0,
+            cert_id TEXT,
+            station_id TEXT,
+            winch_id TEXT
         )
     """)
   cursor.execute("""
@@ -64,13 +69,16 @@ def init_db(lines_df=None):
 
         line_name = str(row.get("line_name", f"Line {line_id}")).strip()
         mbl_tons = float(mbl_val)
+        cert_id = str(row.get("cert_id", "N/A"))
+        station_id = str(row.get("station_id", "N/A"))
+        winch_id = str(row.get("winch_id", "N/A"))
 
         cursor.execute(
             """
-                    INSERT OR REPLACE INTO line_history (line_id, line_name, mbl_tons)
-                    VALUES (?, ?, ?)
+                    INSERT OR REPLACE INTO line_history (line_id, line_name, mbl_tons, cert_id, station_id, winch_id)
+                    VALUES (?, ?, ?, ?, ?, ?)
                 """,
-            (line_id, line_name, mbl_tons),
+            (line_id, line_name, mbl_tons, cert_id, station_id, winch_id),
         )
       except (ValueError, TypeError):
         continue
@@ -150,7 +158,87 @@ def get_lines_health_status():
 
 
 # =============================================================================
-# 2. COORDINATE PORTO & METEO AUTOMATICO
+# 2. INTEGRATORE CERTIFICATI CAVI & PARSER TESTUALE/REGEX
+# =============================================================================
+def parse_certificate_text(text):
+  """Esegue il parsing automatico del testo/OCR del certificato cavo."""
+  data = {
+      "cert_id": None,
+      "manufacturer": None,
+      "material": None,
+      "diameter_mm": None,
+      "mbl_tons": None,
+      "length_m": None,
+      "standard": None,
+  }
+
+  # Cert ID Pattern
+  cert_match = re.search(
+      r"(?:Certificat[eo]|Cert\.?|Certificate No\.?)\s*[:#]?\s*([A-Za-z0-9\-/]+)",
+      text,
+      re.IGNORECASE,
+  )
+  if cert_match:
+    data["cert_id"] = cert_match.group(1).strip()
+
+  # Manufacturer
+  mfg_match = re.search(
+      r"(?:Manufacturer|Costruttore|Maker)\s*[:#]?\s*([A-Za-z0-9\s]+)",
+      text,
+      re.IGNORECASE,
+  )
+  if mfg_match:
+    data["manufacturer"] = mfg_match.group(1).strip()
+
+  # Material (HMPE, Polyester, Polypropylene, Wire, Nylon)
+  mat_match = re.search(
+      r"\b(HMPE|Dyneema|Polyester|Polypropylene|Nylon|Wire|Steel|Aramid)\b",
+      text,
+      re.IGNORECASE,
+  )
+  if mat_match:
+    data["material"] = mat_match.group(1).upper()
+
+  # Diameter (mm)
+  dia_match = re.search(
+      r"(?:Diameter|Diametro|Dia\.?)\s*[:#]?\s*(\d+(?:\.\d+)?)\s*mm",
+      text,
+      re.IGNORECASE,
+  )
+  if dia_match:
+    data["diameter_mm"] = float(dia_match.group(1))
+
+  # MBL (kN or Tons)
+  mbl_kn_match = re.search(
+      r"(?:MBL|Breaking Load|Carico di Rottura)\s*[:#]?\s*(\d+(?:\.\d+)?)\s*kN",
+      text,
+      re.IGNORECASE,
+  )
+  mbl_t_match = re.search(
+      r"(?:MBL|Breaking Load|Carico di Rottura)\s*[:#]?\s*(\d+(?:\.\d+)?)\s*(?:Tons|t|MT)",
+      text,
+      re.IGNORECASE,
+  )
+
+  if mbl_kn_match:
+    data["mbl_tons"] = round(float(mbl_kn_match.group(1)) * KN_TO_TONS, 2)
+  elif mbl_t_match:
+    data["mbl_tons"] = float(mbl_t_match.group(1))
+
+  # Standard / Certification body
+  std_match = re.search(
+      r"\b(MEG4|ISO\s*\d+|DNV|Lloyd'?s\s*Register|ABS|BV)\b",
+      text,
+      re.IGNORECASE,
+  )
+  if std_match:
+    data["standard"] = std_match.group(1)
+
+  return data
+
+
+# =============================================================================
+# 3. COORDINATE PORTO & METEO AUTOMATICO
 # =============================================================================
 PORT_COORDINATES = {
     "Long Beach Cruise Terminal": {"lat": 33.7513, "lon": -118.1888},
@@ -178,7 +266,7 @@ def fetch_live_weather(lat, lon):
 
 
 # =============================================================================
-# 3. MOTORE FISICO & GEOMETRICO
+# 4. MOTORE FISICO & GEOMETRICO
 # =============================================================================
 def calculate_environmental_forces(
     v_wind_knots,
@@ -383,7 +471,7 @@ def calculate_wind_operability_envelope(
 
 
 # =============================================================================
-# 4. SESSION STATE & INIZIALIZZAZIONE
+# 5. SESSION STATE & INIZIALIZZAZIONE DATI
 # =============================================================================
 DEFAULT_SHIP = {
     "LOA": 323.6,
@@ -394,12 +482,120 @@ DEFAULT_SHIP = {
     "ALC": 1200.0,
 }
 
+# Inizializzazione Registro Certificati
+if "certificates_db" not in st.session_state:
+  st.session_state.certificates_db = pd.DataFrame([
+      {
+          "cert_id": "CERT-HMPE-2025-01",
+          "manufacturer": "Samson Rope",
+          "material": "HMPE",
+          "diameter_mm": 64,
+          "mbl_tons": 105.0,
+          "standard": "MEG4 / DNV",
+          "issue_date": "2025-01-15",
+      },
+      {
+          "cert_id": "CERT-HMPE-2025-02",
+          "manufacturer": "Katradis",
+          "material": "HMPE",
+          "diameter_mm": 64,
+          "mbl_tons": 105.0,
+          "standard": "MEG4 / LRS",
+          "issue_date": "2025-02-10",
+      },
+      {
+          "cert_id": "CERT-TAIL-2025-A1",
+          "manufacturer": "Lankhorst",
+          "material": "Polyester",
+          "diameter_mm": 72,
+          "mbl_tons": 100.0,
+          "standard": "MEG4",
+          "issue_date": "2025-03-01",
+      },
+  ])
+
+# Inizializzazione Mooring Stations Layout
+if "mooring_stations" not in st.session_state:
+  st.session_state.mooring_stations = {
+      "Forward Station (Prua)": pd.DataFrame([
+          {
+              "winch_id": "W1",
+              "winch_type": "Split Drum",
+              "chock_id": "C1",
+              "chock_x_m": 150.0,
+              "chock_y_m": 2.0,
+              "chock_z_m": 12.0,
+              "brake_holding_tons": 84.0,
+          },
+          {
+              "winch_id": "W2",
+              "winch_type": "Split Drum",
+              "chock_id": "C2",
+              "chock_x_m": 150.0,
+              "chock_y_m": -2.0,
+              "chock_z_m": 12.0,
+              "brake_holding_tons": 84.0,
+          },
+          {
+              "winch_id": "W3",
+              "winch_type": "Single Drum",
+              "chock_id": "C3",
+              "chock_x_m": 138.0,
+              "chock_y_m": 18.0,
+              "chock_z_m": 10.0,
+              "brake_holding_tons": 84.0,
+          },
+          {
+              "winch_id": "W4",
+              "winch_type": "Single Drum",
+              "chock_id": "C4",
+              "chock_x_m": 110.0,
+              "chock_y_m": 18.0,
+              "chock_z_m": 8.0,
+              "brake_holding_tons": 84.0,
+          },
+      ]),
+      "Aft Station (Poppa)": pd.DataFrame([
+          {
+              "winch_id": "W5",
+              "winch_type": "Single Drum",
+              "chock_id": "C5",
+              "chock_x_m": -110.0,
+              "chock_y_m": 18.0,
+              "chock_z_m": 8.0,
+              "brake_holding_tons": 84.0,
+          },
+          {
+              "winch_id": "W6",
+              "winch_type": "Split Drum",
+              "chock_id": "C6",
+              "chock_x_m": -138.0,
+              "chock_y_m": 18.0,
+              "chock_z_m": 10.0,
+              "brake_holding_tons": 84.0,
+          },
+          {
+              "winch_id": "W7",
+              "winch_type": "Split Drum",
+              "chock_id": "C7",
+              "chock_x_m": -150.0,
+              "chock_y_m": 0.0,
+              "chock_z_m": 12.0,
+              "brake_holding_tons": 84.0,
+          },
+      ]),
+  }
+
+# Inventario Linee
 if "lines_inventory" not in st.session_state:
   st.session_state.lines_inventory = pd.DataFrame([
       {
           "line_id": "1",
           "line_name": "Head Line 1",
           "line_type": "Head",
+          "station_id": "Forward Station (Prua)",
+          "winch_id": "W1",
+          "cert_id": "CERT-HMPE-2025-01",
           "chock_x_m": 150.0,
           "chock_y_m": 2.0,
           "chock_z_m": 12.0,
@@ -417,6 +613,9 @@ if "lines_inventory" not in st.session_state:
           "line_id": "2",
           "line_name": "Head Line 2",
           "line_type": "Head",
+          "station_id": "Forward Station (Prua)",
+          "winch_id": "W2",
+          "cert_id": "CERT-HMPE-2025-01",
           "chock_x_m": 150.0,
           "chock_y_m": -2.0,
           "chock_z_m": 12.0,
@@ -434,6 +633,9 @@ if "lines_inventory" not in st.session_state:
           "line_id": "3",
           "line_name": "Fwd Breast 1",
           "line_type": "Fwd Breast",
+          "station_id": "Forward Station (Prua)",
+          "winch_id": "W3",
+          "cert_id": "CERT-HMPE-2025-02",
           "chock_x_m": 138.0,
           "chock_y_m": 18.0,
           "chock_z_m": 10.0,
@@ -451,6 +653,9 @@ if "lines_inventory" not in st.session_state:
           "line_id": "4",
           "line_name": "Fwd Spring 1",
           "line_type": "Fwd Spring",
+          "station_id": "Forward Station (Prua)",
+          "winch_id": "W4",
+          "cert_id": "CERT-HMPE-2025-02",
           "chock_x_m": 110.0,
           "chock_y_m": 18.0,
           "chock_z_m": 8.0,
@@ -468,6 +673,9 @@ if "lines_inventory" not in st.session_state:
           "line_id": "5",
           "line_name": "Aft Spring 1",
           "line_type": "Aft Spring",
+          "station_id": "Aft Station (Poppa)",
+          "winch_id": "W5",
+          "cert_id": "CERT-HMPE-2025-01",
           "chock_x_m": -110.0,
           "chock_y_m": 18.0,
           "chock_z_m": 8.0,
@@ -485,6 +693,9 @@ if "lines_inventory" not in st.session_state:
           "line_id": "6",
           "line_name": "Aft Breast 1",
           "line_type": "Aft Breast",
+          "station_id": "Aft Station (Poppa)",
+          "winch_id": "W6",
+          "cert_id": "CERT-HMPE-2025-02",
           "chock_x_m": -138.0,
           "chock_y_m": 18.0,
           "chock_z_m": 10.0,
@@ -502,6 +713,9 @@ if "lines_inventory" not in st.session_state:
           "line_id": "7",
           "line_name": "Stern Line 1",
           "line_type": "Stern",
+          "station_id": "Aft Station (Poppa)",
+          "winch_id": "W7",
+          "cert_id": "CERT-HMPE-2025-02",
           "chock_x_m": -150.0,
           "chock_y_m": 0.0,
           "chock_z_m": 12.0,
@@ -581,11 +795,22 @@ if "ports_bollards" not in st.session_state:
       "Puerto Vallarta Pier #3": pd.DataFrame(def_bollards),
   }
 
+if "port_headings" not in st.session_state:
+  st.session_state.port_headings = {
+      "Long Beach Cruise Terminal": 135.0,
+      "Mazatlan Pier 4/5": 315.0,
+      "Mazatlan Pier 2/3": 135.0,
+      "La Paz": 180.0,
+      "Ensenada Pier #2": 220.0,
+      "Puerto Vallarta Pier #1": 0.0,
+      "Puerto Vallarta Pier #3": 0.0,
+  }
+
 # Inizializzazione DB in-memory
 init_db(st.session_state.lines_inventory)
 
 # =============================================================================
-# 5. BARRA LATERALE METEO
+# 6. BARRA LATERALE METEO
 # =============================================================================
 st.sidebar.header("🌐 Condizioni Meteo-Marine")
 meteo_mode = st.sidebar.radio(
@@ -598,46 +823,64 @@ selected_port = st.sidebar.selectbox(
     "📌 Porto di Riferimento", list(st.session_state.ports_bollards.keys())
 )
 
+current_berth_heading = st.session_state.port_headings.get(selected_port, 0.0)
+
 if meteo_mode == "Live API (Windy / Open-Meteo)":
   coords = PORT_COORDINATES.get(selected_port, {"lat": 33.7513, "lon": -118.1888})
-  success, live_w_speed, live_w_dir = fetch_live_weather(
+  success, live_w_speed, live_w_dir_true = fetch_live_weather(
       coords["lat"], coords["lon"]
   )
 
   if success:
-    st.sidebar.success(f"Meteo Live: {live_w_speed} kts @ {live_w_dir}°")
+    relative_wind_dir = (live_w_dir_true - current_berth_heading) % 360
+    st.sidebar.success(
+        f"Meteo Live: {live_w_speed} kts @ {live_w_dir_true}° True"
+    )
+    st.sidebar.info(
+        f"🧭 Orientamento Banchina: {current_berth_heading:.0f}° True\n\n"
+        f"💨 Vento Relativo Banchina: **{relative_wind_dir:.0f}°**"
+    )
     v_wind = live_w_speed
-    dir_wind = live_w_dir
+    dir_wind = relative_wind_dir
   else:
     st.sidebar.error("Impossibile contattare il server meteo. Uso manuale.")
     v_wind = st.sidebar.slider("Vento (knots)", 0, 80, 30)
-    dir_wind = st.sidebar.slider("Direzione Vento (deg)", 0, 360, 45)
+    dir_wind = st.sidebar.slider("Direzione Vento Relativa (°)", 0, 360, 45)
 else:
   v_wind = st.sidebar.slider("Vento (knots)", 0, 80, 30)
-  dir_wind = st.sidebar.slider("Direzione Vento (deg)", 0, 360, 45)
+  dir_wind = st.sidebar.slider("Direzione Vento Relativa (°)", 0, 360, 45)
 
 v_curr = st.sidebar.slider("Corrente (knots)", 0.0, 4.0, 0.5)
 dir_curr = st.sidebar.slider("Direzione Corrente (deg)", 0, 360, 0)
 
 # =============================================================================
-# 6. INTERFACCIA TABS
+# 7. INTERFACCIA TABS
 # =============================================================================
-st.title("⚓ OpenMooring - Live Setup & MEG4 Analysis")
+st.title("⚓ OpenMooring - MEG4 Pro Suite")
 
-tab_setup, tab_3d_editor, tab_sim, tab_polar, tab_maint, tab_actual = st.tabs([
-    "🚢 1. Dati Nave & Cavi",
-    "🗺️ 2. Layout Bitte (Rangefinder)",
-    "📊 3. Simulazione Tensioni",
-    "🌀 4. Inviluppo Polare",
-    "📈 5. Storico & Usura Cavi",
-    "📝 6. Ormeggio Reale & Limite Vento",
+(
+    tab_setup,
+    tab_certs,
+    tab_stations,
+    tab_3d_editor,
+    tab_sim,
+    tab_polar,
+    tab_maint,
+) = st.tabs([
+    "🚢 1. Dati Nave & Inventario",
+    "📜 2. Certificati Cavi (OCR/Regex)",
+    "🏗️ 3. Mooring Stations & Verricelli",
+    "🗺️ 4. Layout Banchina & Bitte",
+    "📊 5. Simulazione Tensioni",
+    "🌀 6. Inviluppo Polare",
+    "📈 7. Storico & Usura Cavi",
 ])
 
 # -----------------------------------------------------------------------------
 # TAB 1: DATI NAVE E CAVI
 # -----------------------------------------------------------------------------
 with tab_setup:
-  st.header("🚢 Particulars Nave e Inventario Cavi")
+  st.header("🚢 Particulars Nave e Inventario Cavi Attivi")
 
   col_n1, col_n2, col_n3 = st.columns(3)
   with col_n1:
@@ -667,7 +910,7 @@ with tab_setup:
       "ALC": DEFAULT_SHIP["ALC"],
   }
 
-  st.subheader("📋 Gestione Cavi (Valori MBL in Tonnellate [t])")
+  st.subheader("📋 Inventario Cavi & Mappatura")
   edited_lines = st.data_editor(
       st.session_state.lines_inventory,
       num_rows="dynamic",
@@ -677,7 +920,142 @@ with tab_setup:
   st.session_state.lines_inventory = edited_lines
 
 # -----------------------------------------------------------------------------
-# TAB 2: EDITOR BITTE CON MISURE RANGEFINDER (PRUA / POPPA)
+# TAB 2: CERTIFICATI CAVI (PARSING REGEX / OCR & GESTIONE CERTIFICATI)
+# -----------------------------------------------------------------------------
+with tab_certs:
+  st.header("📜 Modulo Certificati Cavi & Audit Compliance")
+  st.info(
+      "Carica o incolla il testo del Certificato della Linea d'Ormeggio."
+      " L'algoritmo estrarrà MBL, Diametro, Materiale e ID Certificato per"
+      " aggiornare il DB MEG4."
+  )
+
+  c_col1, c_col2 = st.columns([1, 1])
+
+  with c_col1:
+    st.subheader("📥 Immissione Testo / OCR Certificato")
+    cert_text_input = st.text_area(
+        "Incolla qui il testo estratto dal certificato (PDF/OCR)",
+        height=220,
+        placeholder=(
+            "Manufacturer: Samson Rope\nCertificate No: CERT-HMPE-2026-X\nMaterial:"
+            " HMPE Dyneema\nDiameter: 64 mm\nMBL: 1030 kN\nStandard: MEG4"
+            " DNV-GL"
+        ),
+    )
+
+    if st.button("🔍 Esegui Parsing Certificato"):
+      if cert_text_input:
+        parsed = parse_certificate_text(cert_text_input)
+        st.success("Parsing completato!")
+        st.json(parsed)
+
+        # Aggiunta al database certificati
+        if parsed["cert_id"]:
+          new_cert = {
+              "cert_id": parsed["cert_id"] or f"CERT-{len(st.session_state.certificates_db)+1}",
+              "manufacturer": parsed["manufacturer"] or "Unknown",
+              "material": parsed["material"] or "HMPE",
+              "diameter_mm": parsed["diameter_mm"] or 64,
+              "mbl_tons": parsed["mbl_tons"] or 105.0,
+              "standard": parsed["standard"] or "MEG4",
+              "issue_date": datetime.now().strftime("%Y-%m-%d"),
+          }
+          st.session_state.certificates_db = pd.concat(
+              [st.session_state.certificates_db, pd.DataFrame([new_cert])],
+              ignore_index=True,
+          ).drop_duplicates(subset=["cert_id"])
+          st.success(f"Certificato {parsed['cert_id']} salvato con successo!")
+
+  with c_col2:
+    st.subheader("📚 Database Certificati Registrati")
+    st.dataframe(
+        st.session_state.certificates_db,
+        use_container_width=True,
+        height=300,
+    )
+
+    st.subheader("🔗 Associa Certificato a Linea")
+    col_sel1, col_sel2 = st.columns(2)
+    selected_line = col_sel1.selectbox(
+        "Seleziona Linea", st.session_state.lines_inventory["line_name"]
+    )
+    selected_cert = col_sel2.selectbox(
+        "Seleziona Certificato", st.session_state.certificates_db["cert_id"]
+    )
+
+    if st.button("🔗 Applica Certificato a Linea"):
+      cert_row = st.session_state.certificates_db[
+          st.session_state.certificates_db["cert_id"] == selected_cert
+      ].iloc[0]
+      idx = st.session_state.lines_inventory[
+          st.session_state.lines_inventory["line_name"] == selected_line
+      ].index
+
+      if not idx.empty:
+        st.session_state.lines_inventory.loc[idx[0], "cert_id"] = selected_cert
+        st.session_state.lines_inventory.loc[idx[0], "mbl_tons"] = cert_row[
+            "mbl_tons"
+        ]
+        st.session_state.lines_inventory.loc[idx[0], "diameter_mm"] = cert_row[
+            "diameter_mm"
+        ]
+        st.session_state.lines_inventory.loc[idx[0], "material"] = cert_row[
+            "material"
+        ]
+        st.success(
+            f"Linea '{selected_line}' aggiornata con i dati MBL del certificato"
+            f" {selected_cert}!"
+        )
+        st.rerun()
+
+# -----------------------------------------------------------------------------
+# TAB 3: MOORING STATIONS & VERRICELLI
+# -----------------------------------------------------------------------------
+with tab_stations:
+  st.header("🏗️ Mappatura Stazioni d'Ormeggio & Verricelli (Winch Layout)")
+
+  station_sel = st.selectbox(
+      "Seleziona Stazione di Ormeggio",
+      list(st.session_state.mooring_stations.keys()),
+  )
+  st_df = st.session_state.mooring_stations[station_sel]
+
+  st.subheader(f" Configurazione: {station_sel}")
+  edited_st = st.data_editor(
+      st_df,
+      num_rows="dynamic",
+      use_container_width=True,
+      key=f"edit_st_{station_sel}",
+  )
+  st.session_state.mooring_stations[station_sel] = edited_st
+
+  # Rappresentazione Grafica della Stazione
+  fig_st = go.Figure()
+
+  # Disegno dei guidacavi / chocks
+  fig_st.add_trace(
+      go.Scatter(
+          x=edited_st["chock_x_m"],
+          y=edited_st["chock_y_m"],
+          mode="markers+text",
+          marker=dict(size=14, color="darkorange", symbol="square"),
+          text=edited_st["winch_id"] + " (" + edited_st["chock_id"] + ")",
+          textposition="top center",
+          name="Winch / Chock Position",
+      )
+  )
+
+  fig_st.update_layout(
+      title=f"Layout Bordo - {station_sel}",
+      xaxis_title="Coordinata X Longitudinale (m)",
+      yaxis_title="Coordinata Y Trasversale (m)",
+      height=350,
+  )
+  st.plotly_chart(fig_st, use_container_width=True)
+
+# -----------------------------------------------------------------------------
+# TAB 4: EDITOR BITTE CON MISURE RANGEFINDER (PRUA / POPPA) & ALLINEAMENTO BANCHINA
 # -----------------------------------------------------------------------------
 with tab_3d_editor:
   st.header(f"🗺️ Layout Banchina & Bitte: {selected_port}")
@@ -687,6 +1065,23 @@ with tab_3d_editor:
       " poppa** (per bitte a poppa). L'app calcola automaticamente la posizione"
       " assoluta rispetto al centro nave."
   )
+
+  st.subheader("📐 Orientamento e Allineamento Banchina")
+  berth_heading = st.number_input(
+      "Orientamento Banchina / Berth True Heading (° True)",
+      min_value=0.0,
+      max_value=360.0,
+      value=float(st.session_state.port_headings.get(selected_port, 135.0)),
+      step=1.0,
+      help=(
+          "Orientamento geografico della banchina espresso in gradi vero (0° ="
+          " Nord, 90° = Est)."
+      ),
+      key=f"heading_input_{selected_port}",
+  )
+  st.session_state.port_headings[selected_port] = berth_heading
+
+  st.divider()
 
   df_bollards = st.session_state.ports_bollards[selected_port]
 
@@ -821,11 +1216,14 @@ geom_df = calculate_line_geometry(
 )
 
 # -----------------------------------------------------------------------------
-# TAB 3: SIMULAZIONE TENSIONI
+# TAB 5: SIMULAZIONE TENSIONI
 # -----------------------------------------------------------------------------
 with tab_sim:
   if geom_df.empty:
-    st.error("⚠️ Nessuna corrispondenza trovata tra le bitte dei cavi e della banchina.")
+    st.error(
+        "⚠️ Nessuna corrispondenza trovata tra le bitte dei cavi e della"
+        " banchina."
+    )
   else:
     forces = calculate_environmental_forces(
         v_wind,
@@ -906,6 +1304,7 @@ with tab_sim:
     st.dataframe(
         results_df[[
             "line_name",
+            "cert_id",
             "bollard_id",
             "length_m",
             "azimuth_deg",
@@ -915,8 +1314,12 @@ with tab_sim:
         ]]
     )
 
+    if st.button("💾 Registra Sessione d'Ormeggio nel DB"):
+      log_mooring_session(results_df, selected_port)
+      st.success("Sessione salvata con successo nello storico usura!")
+
 # -----------------------------------------------------------------------------
-# TAB 4: INVILUPPO POLARE
+# TAB 6: INVILUPPO POLARE
 # -----------------------------------------------------------------------------
 with tab_polar:
   st.subheader("Inviluppo Polare dei Limiti Operativi del Vento (0-360°)")
@@ -958,7 +1361,7 @@ with tab_polar:
       st.plotly_chart(fig_polar, use_container_width=True)
 
 # -----------------------------------------------------------------------------
-# TAB 5: STORICO & USURA CAVI
+# TAB 7: STORICO & USURA CAVI
 # -----------------------------------------------------------------------------
 with tab_maint:
   st.subheader("📈 Registro Storico Usura & Suggerimento Sostituzione Cavi")
@@ -983,153 +1386,12 @@ with tab_maint:
 
     st.dataframe(
         health_df[[
+            "line_id",
             "line_name",
+            "cert_id",
             "accumulated_hours",
             "high_load_hours",
             "Health_Percent",
             "Recommendation",
         ]]
     )
-
-# -----------------------------------------------------------------------------
-# TAB 6: CONFIGURAZIONE REALE & LIMITI OPERATIVI VENTO
-# -----------------------------------------------------------------------------
-with tab_actual:
-  st.header("📝 Configurazione Effettiva Ormeggio & Limiti Operativi")
-
-  st.write(
-      "Seleziona la configurazione reale dei cavi inviati a terra per questo"
-      " ormeggio:"
-  )
-
-  # MODIFICA: Ora diviso in 6 colonne per includere i Brest di Poppa
-  col_cfg1, col_cfg2, col_cfg3, col_cfg4, col_cfg5, col_cfg6 = st.columns(6)
-
-  n_head = col_cfg1.number_input("Cavi di Testa (Head Lines)", 0, 6, 2)
-  n_fwd_breast = col_cfg2.number_input("Traversi Prua (Fwd Breast)", 0, 6, 1)
-  n_fwd_spring = col_cfg3.number_input("Traversini Prua (Fwd Spring)", 0, 6, 1)
-  n_aft_spring = col_cfg4.number_input("Traversini Poppa (Aft Spring)", 0, 6, 1)
-  n_aft_breast = col_cfg5.number_input("Traversi Poppa (Aft Breast)", 0, 6, 1)
-  n_stern = col_cfg6.number_input("Cavi di Poppa (Stern Lines)", 0, 6, 2)
-
-  # Selezione cavi attivi in base al conteggio
-  lines_inv = st.session_state.lines_inventory.copy()
-  active_indices = []
-
-  counts = {
-      "Head": n_head,
-      "Fwd Breast": n_fwd_breast,
-      "Fwd Spring": n_fwd_spring,
-      "Aft Spring": n_aft_spring,
-      "Aft Breast": n_aft_breast,
-      "Stern": n_stern,
-  }
-
-  for line_type, count in counts.items():
-    # Verifica sia sulla colonna 'line_type' che sul nome
-    if "line_type" in lines_inv.columns:
-      sub_df = lines_inv[lines_inv["line_type"] == line_type]
-    else:
-      sub_df = lines_inv[lines_inv["line_name"].str.contains(line_type, case=False, na=False)]
-      
-    if len(sub_df) >= count:
-      active_indices.extend(sub_df.iloc[:count].index.tolist())
-    else:
-      active_indices.extend(sub_df.index.tolist())
-
-  active_lines_df = lines_inv.loc[active_indices].copy()
-
-  st.subheader("📋 Cavi Attivi per l'Ormeggio Corrente")
-  st.dataframe(
-      active_lines_df[["line_id", "line_name", "mbl_tons", "bollard_id"]]
-  )
-
-  actual_geom_df = calculate_line_geometry(active_lines_df, active_bollards_df)
-
-  st.divider()
-  st.subheader("🌪️ Analisi Limite Vento Sostenibile (SWL Bitte & 50% MBL Cavi)")
-
-  calc_col1, calc_col2 = st.columns([1, 2])
-
-  with calc_col1:
-    test_angle = st.slider("Direzione Vento da Testare (°)", 0, 360, 90)
-    dur_h = st.number_input("Durata Ormeggio Prevista (Ore)", 1.0, 72.0, 12.0)
-
-  with calc_col2:
-    if not actual_geom_df.empty:
-      max_sust_wind = 0
-      crit_cause = ""
-
-      for w_speed in range(1, 100):
-        f = calculate_environmental_forces(
-            w_speed,
-            test_angle,
-            v_curr,
-            dir_curr,
-            ship_dict["AFW"],
-            ship_dict["ALW"],
-            ship_dict["ALC"],
-            ship_dict["LOA"],
-        )
-        res = solve_line_tensions_3d(actual_geom_df.copy(), f)
-
-        # 1. Verifica Limite 50% MBL Cavi
-        over_mbl = res[res["Util_Percent"] > 50.0]
-
-        # 2. Verifica Limite SWL Bitte
-        b_loads = res.groupby("bollard_id")["Tension_tons"].sum()
-        over_swl_bitta = False
-        b_over_name = ""
-
-        for b_id, load in b_loads.items():
-          swl_val = float(
-              res[res["bollard_id"] == b_id]["SWL_Bitta_t"].iloc[0]
-          )
-          if load > swl_val:
-            over_swl_bitta = True
-            b_over_name = b_id
-            break
-
-        if not over_mbl.empty:
-          crit_cause = (
-              f"Cavo '{over_mbl.iloc[0]['line_name']}' ha superato il 50% MBL"
-              f" ({over_mbl.iloc[0]['Util_Percent']:.1f}%)"
-          )
-          break
-        elif over_swl_bitta:
-          crit_cause = (
-              f"Bitta '{b_over_name}' ha superato il proprio SWL di targa"
-          )
-          break
-
-        max_sust_wind = w_speed
-
-      st.metric(
-          "Velocità Massima Vento Sostenibile",
-          f"{max_sust_wind} knots",
-          f"Direzione {test_angle}°",
-      )
-      if crit_cause:
-        st.warning(f"⚠️ Limite raggiunto a {max_sust_wind + 1} kts: {crit_cause}")
-      else:
-        st.success("✅ La struttura e i cavi supportano venti oltre 100 knots.")
-
-  st.divider()
-
-  if st.button("💾 Registra Questo Ormeggio nello Storico Cavi"):
-    if not actual_geom_df.empty:
-      f_current = calculate_environmental_forces(
-          v_wind,
-          dir_wind,
-          v_curr,
-          dir_curr,
-          ship_dict["AFW"],
-          ship_dict["ALW"],
-          ship_dict["ALC"],
-          ship_dict["LOA"],
-      )
-      res_current = solve_line_tensions_3d(actual_geom_df, f_current)
-      log_mooring_session(
-          res_current, selected_port, duration_hours=dur_h
-      )
-      st.success(f"Sessione salvata con successo per {selected_port}!")
