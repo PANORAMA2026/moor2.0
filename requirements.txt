@@ -1,4 +1,7 @@
-streamlit
-pandas
 numpy
 plotly
+streamlit>=1.30.0
+pdfplumber>=0.10.0
+streamlit-image-coordinates>=0.1.6
+pandas>=2.0.0
+Pillow>=10.0.0
