@@ -1,19 +1,39 @@
 """
-core/fatigue_model.py
-Modello di calcolo dell'usura residua e degrado del cavo basato sul carico % MBL accumulate.
+views/tab_ship_inventory.py
+Interfaccia per la gestione delle dimensioni della nave e inventario linee.
 """
 
-def update_line_health(current_health: float, hours: float, avg_pct_mbl: float) -> float:
-    """
-    Calcola l'indice di salute residua (%) in base alle ore di lavoro e alla sollecitazione subita.
-    """
-    # Fattore di penalità per carichi elevati (> 50% MBL)
-    penalty_factor = 1.0
-    if avg_pct_mbl > 55.0:
-        penalty_factor = 3.5
-    elif avg_pct_mbl > 45.0:
-        penalty_factor = 1.8
-        
-    degradation = (hours * 0.005) * penalty_factor
-    new_health = max(0.0, current_health - degradation)
-    return round(new_health, 2)
+import streamlit as st
+import pandas as pd
+
+def render_tab_ship_inventory():
+    st.header("1. Dimensioni Nave & Inventario Linee")
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        st.subheader("Caratteristiche Scafo")
+        loa = st.number_input("Lunghezza Fuori Tutto (LOA) [m]", value=st.session_state.get('loa', 200.0))
+        beam = st.number_input("Larghezza (Beam) [m]", value=st.session_state.get('beam', 32.0))
+        st.session_state['loa'] = loa
+        st.session_state['beam'] = beam
+
+    with col2:
+        st.subheader("Superfici Esposte (MEG4)")
+        alw = st.number_input("Superficie Laterale Vento (ALW) [m²]", value=st.session_state.get('alw', 2500.0))
+        afw = st.number_input("Superficie Frontale Vento (AFW) [m²]", value=st.session_state.get('afw', 600.0))
+        st.session_state['alw'] = alw
+        st.session_state['afw'] = afw
+
+    st.markdown("---")
+    st.subheader("Inventario Cavi d'Ormeggio")
+    
+    default_lines = [
+        {"id": "HEAD_1", "mbl": 120.0, "diameter": 64, "x_chock": 95.0, "y_chock": 14.0},
+        {"id": "HEAD_2", "mbl": 120.0, "diameter": 64, "x_chock": 95.0, "y_chock": 14.0},
+        {"id": "STERN_1", "mbl": 120.0, "diameter": 64, "x_chock": -95.0, "y_chock": 14.0},
+        {"id": "STERN_2", "mbl": 120.0, "diameter": 64, "x_chock": -95.0, "y_chock": 14.0},
+    ]
+    
+    df_lines = pd.DataFrame(st.session_state.get('lines_data', default_lines))
+    edited_df = st.data_editor(df_lines, num_rows="dynamic", key="inventory_editor")
+    st.session_state['lines_data'] = edited_df.to_dict('records')
