@@ -11,118 +11,6 @@ from pypdf import PdfReader
 import requests
 import streamlit as st
 
-# ==============================================================================
-# FUNZIONI PER IL MOTORE NON LINEARE
-# ==============================================================================
-
-def fse_curve(material: str, load_ratio: float) -> float:
-    load_ratio = np.clip(load_ratio, 0.0, 1.5)
-    mat = str(material).upper()
-    
-    if "HMPE" in mat:
-        return 0.025 * (load_ratio ** 0.85)
-    elif "WIRE" in mat or "ACCIAIO" in mat:
-        return 0.015 * load_ratio
-    elif "POLYESTER" in mat or "POLIESTERE" in mat:
-        return 0.120 * (load_ratio ** 1.20)
-    elif "NYLON" in mat or "POLIAMMIDE" in mat:
-        return 0.220 * (load_ratio ** 1.35)
-    else:
-        return 0.080 * (load_ratio ** 1.10)
-
-def get_line_stiffness_tangent(material: str, mbl: float, L0: float, current_tension: float) -> float:
-    dT = 0.5
-    T1 = max(0.01, current_tension - dT)
-    T2 = current_tension + dT
-    
-    eps1 = fse_curve(material, T1 / mbl)
-    eps2 = fse_curve(material, T2 / mbl)
-    
-    dL1 = eps1 * L0
-    dL2 = eps2 * L0
-    
-    delta_dL = dL2 - dL1
-    if delta_dL <= 1e-9:
-        return 1e6
-        
-    return (2 * dT) / delta_dL
-
-def solve_mooring_nonlinear(lines_data, F_ext_3d, max_iter=100, tol=1e-3):
-    U = np.zeros(6)
-    tensions = np.zeros(len(lines_data))
-    converged = False
-    
-    for iteration in range(max_iter):
-        F_lines = np.zeros(6)
-        K_global = np.zeros((6, 6))
-        
-        for i, line in enumerate(lines_data):
-            r0 = line['fairlead']
-            rot_matrix = np.array([
-                [1.0, -U[5], U[4]],
-                [U[5], 1.0, -U[3]],
-                [-U[4], U[3], 1.0]
-            ])
-            r_curr = U[0:3] + rot_matrix @ r0
-            
-            v_line = line['bollard'] - r_curr
-            L_curr = np.linalg.norm(v_line)
-            if L_curr == 0:
-                continue
-            u_dir = v_line / L_curr
-            
-            L0 = line['L0']
-            dL = max(0.0, L_curr - L0)
-            
-            if dL > 0:
-                strain = dL / L0
-                T_est = tensions[i]
-                for _ in range(10):
-                    eps_est = fse_curve(line['material'], T_est / line['mbl'])
-                    diff = eps_est - strain
-                    if abs(diff) < 1e-6:
-                        break
-                    eps_plus = fse_curve(line['material'], (T_est + 0.1) / line['mbl'])
-                    k_eps = (eps_plus - eps_est) / 0.1
-                    if k_eps > 0:
-                        T_est = T_est - diff / k_eps
-                tensions[i] = max(0.0, T_est)
-            else:
-                tensions[i] = 0.0
-            
-            k_tangent = get_line_stiffness_tangent(line['material'], line['mbl'], L0, tensions[i]) if tensions[i] > 0 else 0.0
-            
-            f_vec = tensions[i] * u_dir
-            m_vec = np.cross(r_curr, f_vec)
-            
-            F_lines[0:3] += f_vec
-            F_lines[3:6] += m_vec
-            
-            J = np.zeros((3, 6))
-            J[0:3, 0:3] = np.eye(3)
-            J[0:3, 3:6] = np.array([
-                [0, r_curr[2], -r_curr[1]],
-                [-r_curr[2], 0, r_curr[0]],
-                [r_curr[1], -r_curr[0], 0]
-            ])
-            
-            K_spatial = k_tangent * np.outer(u_dir, u_dir)
-            K_global += J.T @ K_spatial @ J
-
-        R = F_ext_3d + F_lines
-        if np.linalg.norm(R) < tol:
-            converged = True
-            break
-            
-        try:
-            K_reg = K_global + np.diag([10.0, 10.0, 50.0, 100.0, 100.0, 50.0])
-            dU = np.linalg.solve(K_reg, R)
-            U += dU * 0.4
-        except np.linalg.LinAlgError:
-            break
-
-    return tensions, U, converged
-
 # Tenta l'importazione del modulo canvas interattivo
 try:
     from streamlit_drawable_canvas import st_canvas
@@ -1535,7 +1423,7 @@ geom_df = calculate_line_geometry(
 )
 
 # -----------------------------------------------------------------------------
-# TAB 5: SIMULAZIONE TENSIONI (NON LINEARE - MEG4 / LLOYD'S REGISTER)
+# TAB 5: SIMULAZIONE TENSIONI
 # -----------------------------------------------------------------------------
 with tab_sim:
     if geom_df.empty:
@@ -1544,7 +1432,6 @@ with tab_sim:
             " banchina."
         )
     else:
-        # 1. Calcolo Carichi Ambientali Esterni
         forces = calculate_environmental_forces(
             v_wind,
             dir_wind,
@@ -1555,54 +1442,18 @@ with tab_sim:
             ship_dict["ALC"],
             ship_dict["LOA"],
         )
+        results_df = solve_line_tensions_3d(geom_df, forces)
 
-        # 2. Preparazione Vettore Forze Esterne per Solutore 6-DOF (conversione ton -> kN)
-        # Assuming Fx, Fy in tonnellate e Mz in t*m -> conversione in kN e kNm (* 9.81)
-        Fx_kN = forces.get('Fx_total_t', 0.0) * 9.81
-        Fy_kN = forces.get('Fy_total_t', 0.0) * 9.81
-        Mz_kNm = forces.get('Mz_total_tm', 0.0) * 9.81
-        F_ext_3d = np.array([Fx_kN, Fy_kN, 0.0, 0.0, 0.0, Mz_kNm])
-
-        # 3. Mappatura Dataframe -> Formato Solutore Non Lineare
-        lines_data = []
-        for _, row in geom_df.iterrows():
-            lines_data.append({
-                'name': row.get('line_name', 'Line'),
-                'fairlead': np.array([row['chock_x_m'], row['chock_y_m'], row['chock_z_m']]),
-                'bollard': np.array([row['bollard_x_rendered'], row['bollard_y_rendered'], row['bollard_z_rendered']]),
-                'material': row.get('material', 'HMPE'), # Prende il materiale se presente o default
-                'mbl': row.get('mbl_t', 100.0) * 9.81,   # Conversione MBL ton -> kN
-                'L0': row.get('length_m', 30.0)
-            })
-
-        # 4. Esecuzione Solutore Newton-Raphson 3D (6-DOF)
-        tensions_kN, U_final, converged = solve_mooring_nonlinear(lines_data, F_ext_3d)
-
-        # 5. Aggiornamento results_df con le tensioni reali e percentuali
-        results_df = geom_df.copy()
-        results_df["Tension_kN"] = tensions_kN
-        results_df["Tension_tons"] = tensions_kN / 9.81
-        
-        # Gestione MBL e calcolo utilizzo %
-        mbl_series = results_df['mbl_t'] if 'mbl_t' in results_df.columns else 100.0
-        results_df["Util_Percent"] = (results_df["Tension_tons"] / mbl_series) * 100.0
-
-        # --- INTERFACCIA E METRICHE ---
         st.subheader(
-            f"Analisi Tensione Non Lineare: **{selected_port}** (Meteo: {v_wind} kts @"
+            f"Analisi Tensione Cavi: **{selected_port}** (Meteo: {v_wind} kts @"
             f" {dir_wind}°)"
         )
 
-        m1, m2, m3, m4 = st.columns(4)
+        m1, m2, m3 = st.columns(3)
         m1.metric("Forza Longitudinale (Fx)", f"{forces['Fx_total_t']:.2f} t")
         m2.metric("Forza Trasversale (Fy)", f"{forces['Fy_total_t']:.2f} t")
         m3.metric("Momento Imbardata (Mz)", f"{forces['Mz_total_tm']:.2f} t·m")
-        m4.metric("Spostamento Nave (Sway Y)", f"{U_final[1]:.2f} m", delta=f"Yaw: {np.degrees(U_final[5]):.1f}°")
 
-        if not converged:
-            st.warning("⚠️ Solutore: Convergenza raggiunta con tolleranza approssimata. Verificare se l'ormeggio è sottodimensionato.")
-
-        # --- GRAFICO PLOTLY 3D ---
         fig_sim = go.Figure()
         s_x = [-loa / 2, loa / 2 - 30, loa / 2, loa / 2 - 30, -loa / 2, -loa / 2]
         s_y = [-beam / 2, -beam / 2, 0, beam / 2, beam / 2, -beam / 2]
@@ -1640,7 +1491,6 @@ with tab_sim:
         )
         st.plotly_chart(fig_sim, use_container_width=True)
 
-        # --- GRAFICO A BARRE UTILIZZO MEG4 ---
         st.subheader("Carico Sulle Linee d'Ormeggio (% MBL)")
         fig_bar = px.bar(
             results_df,
@@ -1658,7 +1508,6 @@ with tab_sim:
         )
         st.plotly_chart(fig_bar, use_container_width=True)
 
-        # --- TABELLA DETTAGLIATA ---
         st.dataframe(
             results_df[[
                 "line_name",
