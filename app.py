@@ -20,12 +20,15 @@ from config.constants import (
     DEFAULT_SHIP,
     PORT_COORDINATES,
 )
-from core.mooring_physics import (
-    calculate_environmental_forces,
+
+# Import DIRETTO dai singoli file della cartella core
+from core.hydrodynamic_forces import calculate_environmental_forces
+from core.line_mechanics import (
     calculate_line_geometry,
     calculate_wind_operability_envelope,
     solve_line_tensions_3d,
 )
+
 from database.db_manager import init_db, log_mooring_session
 from utils.pdf_parser import extract_text_from_pdf, parse_certificate_text
 
