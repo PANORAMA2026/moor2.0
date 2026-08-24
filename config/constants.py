@@ -1,8 +1,9 @@
 """
 config/constants.py
-Dati nave di default, conversioni, offset di misurazione e porti.
+Dati nave di default, conversioni, offset di misurazione, porti e costanti di sistema.
 """
 
+DB_FILE_PATH = "openmooring.db"
 KN_TO_TONS = 0.10197162129779
 
 OFFSET_PLATFORM_FWD_M = 21.0  # 21 m dall'estrema prua
@@ -37,6 +38,9 @@ DEFAULT_BOLLARDS = [
         "X_Coordinata_m": 125.8,
         "Y_Coordinata_m": 25.0,
         "Z_Altezza_m": -3.0,
+        "bollard_x_m": 125.8,
+        "bollard_y_m": 25.0,
+        "bollard_z_m": -3.0,
         "SWL_Bitta_t": 150,
         "Stato": "Attivo",
     },
@@ -49,6 +53,9 @@ DEFAULT_BOLLARDS = [
         "X_Coordinata_m": 115.8,
         "Y_Coordinata_m": 25.0,
         "Z_Altezza_m": -3.0,
+        "bollard_x_m": 115.8,
+        "bollard_y_m": 25.0,
+        "bollard_z_m": -3.0,
         "SWL_Bitta_t": 150,
         "Stato": "Attivo",
     },
@@ -61,6 +68,9 @@ DEFAULT_BOLLARDS = [
         "X_Coordinata_m": 80.8,
         "Y_Coordinata_m": 25.0,
         "Z_Altezza_m": -3.0,
+        "bollard_x_m": 80.8,
+        "bollard_y_m": 25.0,
+        "bollard_z_m": -3.0,
         "SWL_Bitta_t": 100,
         "Stato": "Attivo",
     },
@@ -73,6 +83,9 @@ DEFAULT_BOLLARDS = [
         "X_Coordinata_m": -82.8,
         "Y_Coordinata_m": 25.0,
         "Z_Altezza_m": -3.0,
+        "bollard_x_m": -82.8,
+        "bollard_y_m": 25.0,
+        "bollard_z_m": -3.0,
         "SWL_Bitta_t": 100,
         "Stato": "Attivo",
     },
@@ -85,6 +98,9 @@ DEFAULT_BOLLARDS = [
         "X_Coordinata_m": -137.8,
         "Y_Coordinata_m": 25.0,
         "Z_Altezza_m": -3.0,
+        "bollard_x_m": -137.8,
+        "bollard_y_m": 25.0,
+        "bollard_z_m": -3.0,
         "SWL_Bitta_t": 150,
         "Stato": "Attivo",
     },
