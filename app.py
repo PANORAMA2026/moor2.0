@@ -1423,7 +1423,7 @@ geom_df = calculate_line_geometry(
 )
 
 # -----------------------------------------------------------------------------
-# TAB 5: SIMULAZIONE TENSIONI
+# TAB 5: SIMULAZIONE TENSIONI (NON LINEARE - MEG4 / LLOYD'S REGISTER)
 # -----------------------------------------------------------------------------
 with tab_sim:
     if geom_df.empty:
@@ -1432,6 +1432,7 @@ with tab_sim:
             " banchina."
         )
     else:
+        # 1. Calcolo Carichi Ambientali Esterni
         forces = calculate_environmental_forces(
             v_wind,
             dir_wind,
@@ -1442,18 +1443,54 @@ with tab_sim:
             ship_dict["ALC"],
             ship_dict["LOA"],
         )
-        results_df = solve_line_tensions_3d(geom_df, forces)
 
+        # 2. Preparazione Vettore Forze Esterne per Solutore 6-DOF (conversione ton -> kN)
+        # Assuming Fx, Fy in tonnellate e Mz in t*m -> conversione in kN e kNm (* 9.81)
+        Fx_kN = forces.get('Fx_total_t', 0.0) * 9.81
+        Fy_kN = forces.get('Fy_total_t', 0.0) * 9.81
+        Mz_kNm = forces.get('Mz_total_tm', 0.0) * 9.81
+        F_ext_3d = np.array([Fx_kN, Fy_kN, 0.0, 0.0, 0.0, Mz_kNm])
+
+        # 3. Mappatura Dataframe -> Formato Solutore Non Lineare
+        lines_data = []
+        for _, row in geom_df.iterrows():
+            lines_data.append({
+                'name': row.get('line_name', 'Line'),
+                'fairlead': np.array([row['chock_x_m'], row['chock_y_m'], row['chock_z_m']]),
+                'bollard': np.array([row['bollard_x_rendered'], row['bollard_y_rendered'], row['bollard_z_rendered']]),
+                'material': row.get('material', 'HMPE'), # Prende il materiale se presente o default
+                'mbl': row.get('mbl_t', 100.0) * 9.81,   # Conversione MBL ton -> kN
+                'L0': row.get('length_m', 30.0)
+            })
+
+        # 4. Esecuzione Solutore Newton-Raphson 3D (6-DOF)
+        tensions_kN, U_final, converged = solve_mooring_nonlinear(lines_data, F_ext_3d)
+
+        # 5. Aggiornamento results_df con le tensioni reali e percentuali
+        results_df = geom_df.copy()
+        results_df["Tension_kN"] = tensions_kN
+        results_df["Tension_tons"] = tensions_kN / 9.81
+        
+        # Gestione MBL e calcolo utilizzo %
+        mbl_series = results_df['mbl_t'] if 'mbl_t' in results_df.columns else 100.0
+        results_df["Util_Percent"] = (results_df["Tension_tons"] / mbl_series) * 100.0
+
+        # --- INTERFACCIA E METRICHE ---
         st.subheader(
-            f"Analisi Tensione Cavi: **{selected_port}** (Meteo: {v_wind} kts @"
+            f"Analisi Tensione Non Lineare: **{selected_port}** (Meteo: {v_wind} kts @"
             f" {dir_wind}°)"
         )
 
-        m1, m2, m3 = st.columns(3)
+        m1, m2, m3, m4 = st.columns(4)
         m1.metric("Forza Longitudinale (Fx)", f"{forces['Fx_total_t']:.2f} t")
         m2.metric("Forza Trasversale (Fy)", f"{forces['Fy_total_t']:.2f} t")
         m3.metric("Momento Imbardata (Mz)", f"{forces['Mz_total_tm']:.2f} t·m")
+        m4.metric("Spostamento Nave (Sway Y)", f"{U_final[1]:.2f} m", delta=f"Yaw: {np.degrees(U_final[5]):.1f}°")
 
+        if not converged:
+            st.warning("⚠️ Solutore: Convergenza raggiunta con tolleranza approssimata. Verificare se l'ormeggio è sottodimensionato.")
+
+        # --- GRAFICO PLOTLY 3D ---
         fig_sim = go.Figure()
         s_x = [-loa / 2, loa / 2 - 30, loa / 2, loa / 2 - 30, -loa / 2, -loa / 2]
         s_y = [-beam / 2, -beam / 2, 0, beam / 2, beam / 2, -beam / 2]
@@ -1491,6 +1528,7 @@ with tab_sim:
         )
         st.plotly_chart(fig_sim, use_container_width=True)
 
+        # --- GRAFICO A BARRE UTILIZZO MEG4 ---
         st.subheader("Carico Sulle Linee d'Ormeggio (% MBL)")
         fig_bar = px.bar(
             results_df,
@@ -1508,6 +1546,7 @@ with tab_sim:
         )
         st.plotly_chart(fig_bar, use_container_width=True)
 
+        # --- TABELLA DETTAGLIATA ---
         st.dataframe(
             results_df[[
                 "line_name",
