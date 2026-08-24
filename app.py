@@ -935,56 +935,118 @@ with tab_setup:
   )
   st.session_state.lines_inventory = edited_lines
 
-# -----------------------------------------------------------------------------
-# TAB 2: CERTIFICATI CAVI (DRAG & DROP PDF + PARSING AUTOMATICO)
-# -----------------------------------------------------------------------------
-with tab_certs:
-  st.header("📜 Modulo Certificati Cavi & Drag and Drop PDF")
-  st.info(
-      "📁 **Drag & Drop Certificato:** Trascina direttamente il file PDF del"
-      " certificato del cavo. Il sistema estrarrà il testo, eseguirà il parsing"
-      " Regex di MBL, Diametro e Costruttore e lo salverà nel database."
-  )
+# =============================================================================
+# 2. INTEGRATORE CERTIFICATI CAVI 
+# =============================================================================
 
-  c_col1, c_col2 = st.columns([1, 1])
+def extract_field_by_anchors(text: str, keywords: list) -> str:
+    """Cerca le parole chiave nel testo e tenta di estrarre il valore corrispondente."""
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        for kw in keywords:
+            if kw.lower() in line.lower():
+                # Caso 1: Cerca il valore sulla stessa riga dopo separatori (: = -)
+                match = re.search(r'[:=\-]\s*(.+)', line)
+                if match and match.group(1).strip():
+                    return match.group(1).strip()
+                
+                # Caso 2: Se la riga ha solo l'etichetta, prende la riga immediatamente successiva
+                if i + 1 < len(lines) and lines[i + 1].strip():
+                    return lines[i + 1].strip()
+    return None
 
-  with c_col1:
-    st.subheader("📤 Carica File PDF Certificato")
-    uploaded_pdf = st.file_uploader(
-        "Trascina qui il file PDF del Certificato",
-        type=["pdf"],
-        help="Carica il file PDF inviato dal produttore del cavo",
+def parse_certificate_text(text: str) -> dict:
+    """
+    Parser robusto multi-produttore: combina estrazione basata su parole chiave (ancore)
+    e ricerca flessibile delle unita di misura.
+    """
+    data = {
+        "cert_id": None,
+        "manufacturer": None,
+        "material": None,
+        "diameter_mm": None,
+        "mbl_tons": None,
+        "length_m": None,
+        "standard": None,
+    }
+
+    if not text:
+        return data
+
+    # 1. CERTIFICATE ID (Cerca variazioni di etichetta)
+    raw_cert = extract_field_by_anchors(text, [
+        "Certificate No", "Cert. No", "Certificate Number", 
+        "Certificato N", "Test Certificate", "Cert No"
+    ])
+    if raw_cert:
+        # Pulisce da eventuali caratteri estranei mantenendo identificativi classici (es. ABC-123/2026)
+        match = re.search(r'([A-Za-z0-9\-/]+)', raw_cert)
+        if match:
+            data["cert_id"] = match.group(1)
+
+    # 2. MANUFACTURER (Produttore)
+    raw_mfg = extract_field_by_anchors(text, [
+        "Manufacturer", "Costruttore", "Maker", "Producer", "Factory", "Issued by"
+    ])
+    if raw_mfg:
+        data["manufacturer"] = raw_mfg.split('\t')[0].strip()
+
+    # 3. MATERIAL (Ricerca dinamica sul testo completo)
+    mat_match = re.search(
+        r"\b(HMPE|Dyneema|Polyester|Polypropylene|Nylon|Wire|Steel|Aramid|Kevlar|Polyamide)\b",
+        text,
+        re.IGNORECASE,
     )
+    if mat_match:
+        data["material"] = mat_match.group(1).upper()
 
-    cert_text_to_parse = ""
+    # 4. DIAMETER (mm) - Estrazione tollerante rispetto alla posizione del numero
+    dia_raw = extract_field_by_anchors(text, ["Diameter", "Diametro", "Dia.", "Size"])
+    if dia_raw:
+        num_match = re.search(r'(\d+(?:[\.,]\d+)?)', dia_raw)
+        if num_match:
+            data["diameter_mm"] = float(num_match.group(1).replace(',', '.'))
+    else:
+        # Fallback ricerca diretta della misura "XX mm"
+        dia_match = re.search(r'(\d+(?:[\.,]\d+)?)\s*mm\b', text, re.IGNORECASE)
+        if dia_match:
+            data["diameter_mm"] = float(dia_match.group(1).replace(',', '.'))
 
-    if uploaded_pdf is not None:
-      st.success(f"File caricato: {uploaded_pdf.name}")
-      cert_text_to_parse = extract_text_from_pdf(uploaded_pdf)
-      with st.expander("📄 Testo estratto dal PDF"):
-        st.text_area(
-            "Anteprima Testo", cert_text_to_parse, height=150, disabled=True
-        )
+    # 5. MBL (Carico di Rottura) - Gestione automatica unità (kN, Tons, MT, kgf)
+    mbl_raw = extract_field_by_anchors(text, [
+        "MBL", "Breaking Load", "Carico di Rottura", "Minimum Breaking Load", "MBF"
+    ])
+    
+    if mbl_raw:
+        # Controlla l'unità di misura direttamente nel valore estratto o vicino
+        val_match = re.search(r'(\d+(?:[\.,]\d+)?)', mbl_raw)
+        if val_match:
+            val = float(val_match.group(1).replace(',', '.'))
+            if re.search(r'kN\b', mbl_raw, re.IGNORECASE):
+                data["mbl_tons"] = round(val * KN_TO_TONS, 2)
+            elif re.search(r'(Tons|MT|\bt\b)', mbl_raw, re.IGNORECASE):
+                data["mbl_tons"] = val
+    
+    # Fallback ricerca globale se l'ancora MBL fallisce
+    if data["mbl_tons"] is None:
+        mbl_kn_match = re.search(r'(?:MBL|Breaking Load|Carico)\D{0,15}(\d+(?:[\.,]\d+)?)\s*kN\b', text, re.IGNORECASE)
+        mbl_t_match = re.search(r'(?:MBL|Breaking Load|Carico)\D{0,15}(\d+(?:[\.,]\d+)?)\s*(?:Tons|t|MT)\b', text, re.IGNORECASE)
+        
+        if mbl_kn_match:
+            data["mbl_tons"] = round(float(mbl_kn_match.group(1).replace(',', '.')) * KN_TO_TONS, 2)
+        elif mbl_t_match:
+            data["mbl_tons"] = float(mbl_t_match.group(1).replace(',', '.'))
 
-    st.subheader("📝 Inserimento Manuale Alternate")
-    manual_text = st.text_area(
-        "Oppure incolla qui il testo del certificato",
-        height=100,
-        placeholder="Certificate No: CERT-2026-X ...",
+    # 6. STANDARD
+    std_match = re.search(
+        r"\b(MEG4|ISO\s*\d+|DNV\b|DNV-GL|Lloyd'?s(?:\s*Register)?|ABS\b|BV\b|ClassNK)\b",
+        text,
+        re.IGNORECASE,
     )
-    if manual_text:
-      cert_text_to_parse = manual_text
+    if std_match:
+        data["standard"] = std_match.group(1)
 
-    if st.button("🔍 Esegui Parsing Certificato"):
-      if cert_text_to_parse:
-        parsed = parse_certificate_text(cert_text_to_parse)
-        st.success("Parsing completato!")
-        st.json(parsed)
-
-        new_cert_id = (
-            parsed["cert_id"]
-            or f"CERT-{len(st.session_state.certificates_db)+1}"
-        )
+    return data
 
         new_cert = {
             "cert_id": new_cert_id,
