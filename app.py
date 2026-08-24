@@ -20,8 +20,7 @@ from config.constants import (
     DEFAULT_SHIP,
     PORT_COORDINATES,
 )
-# Import unificato dal pacchetto core (Soluzione A)
-from core import (
+from core.mooring_physics import (
     calculate_environmental_forces,
     calculate_line_geometry,
     calculate_wind_operability_envelope,
@@ -405,7 +404,6 @@ st.title("⚓ OpenMooring - MEG4 Pro Suite")
 with tab_setup:
     render_tab_ship_inventory()
 
-    # Recupera i dati aggiornati dello scafo per i moduli successivi
     ship_dict = {
         "LOA": st.session_state.get("loa", DEFAULT_SHIP["LOA"]),
         "Beam": st.session_state.get("beam", DEFAULT_SHIP["Beam"]),
@@ -490,7 +488,6 @@ with tab_stations:
 with tab_3d_editor:
     render_tab_berth(selected_port, ship_dict)
 
-# Calcolo preliminare delle geometrie per simulazione e polare
 active_bollards_df = st.session_state.ports_bollards[selected_port]
 geom_df = calculate_line_geometry(
     st.session_state.lines_inventory, active_bollards_df
