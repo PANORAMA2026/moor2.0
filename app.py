@@ -4,18 +4,24 @@ Punto di ingresso principale della suite OpenMooring MEG4 Pro.
 """
 
 from datetime import datetime
+import os
 import sqlite3
+import sys
 import pandas as pd
 import requests
 import streamlit as st
 
-# Import dei moduli personalizzati del progetto
+# Assicura che la directory radice sia nel PATH di sistema
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
+# Import dei moduli configurazione e database
 from config.constants import (
     DEFAULT_BOLLARDS,
     DEFAULT_SHIP,
     PORT_COORDINATES,
 )
-from core.mooring_physics import (
+# Import unificato dal pacchetto core (Soluzione A)
+from core import (
     calculate_environmental_forces,
     calculate_line_geometry,
     calculate_wind_operability_envelope,
@@ -325,6 +331,7 @@ selected_port = st.sidebar.selectbox(
 
 current_berth_heading = st.session_state.port_headings.get(selected_port, 0.0)
 
+
 def fetch_live_weather(lat, lon):
     try:
         url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current_weather=true"
@@ -338,8 +345,11 @@ def fetch_live_weather(lat, lon):
         pass
     return False, 0.0, 0.0
 
+
 if meteo_mode == "Live API (Windy / Open-Meteo)":
-    coords = PORT_COORDINATES.get(selected_port, {"lat": 33.7513, "lon": -118.1888})
+    coords = PORT_COORDINATES.get(
+        selected_port, {"lat": 33.7513, "lon": -118.1888}
+    )
     success, live_w_speed, live_w_dir_true = fetch_live_weather(
         coords["lat"], coords["lon"]
     )
@@ -394,7 +404,7 @@ st.title("⚓ OpenMooring - MEG4 Pro Suite")
 # -----------------------------------------------------------------------------
 with tab_setup:
     render_tab_ship_inventory()
-    
+
     # Recupera i dati aggiornati dello scafo per i moduli successivi
     ship_dict = {
         "LOA": st.session_state.get("loa", DEFAULT_SHIP["LOA"]),
@@ -411,19 +421,24 @@ with tab_setup:
 with tab_certs:
     st.header("📜 Modulo Certificati Cavi & Drag and Drop PDF")
     st.info(
-        "📁 **Drag & Drop Certificato:** Trascina direttamente il file PDF del certificato del cavo."
+        "📁 **Drag & Drop Certificato:** Trascina direttamente il file PDF del"
+        " certificato del cavo."
     )
 
     c_col1, c_col2 = st.columns([1, 1])
     with c_col1:
-        uploaded_pdf = st.file_uploader("Trascina qui il file PDF", type=["pdf"])
+        uploaded_pdf = st.file_uploader(
+            "Trascina qui il file PDF", type=["pdf"]
+        )
         cert_text_to_parse = ""
 
         if uploaded_pdf is not None:
             st.success(f"File caricato: {uploaded_pdf.name}")
             cert_text_to_parse = extract_text_from_pdf(uploaded_pdf)
 
-        manual_text = st.text_area("Oppure incolla qui il testo del certificato", height=100)
+        manual_text = st.text_area(
+            "Oppure incolla qui il testo del certificato", height=100
+        )
         if manual_text:
             cert_text_to_parse = manual_text
 
@@ -433,7 +448,10 @@ with tab_certs:
                 st.success("Parsing completato!")
                 st.json(parsed)
 
-                new_cert_id = parsed["cert_id"] or f"CERT-{len(st.session_state.certificates_db)+1}"
+                new_cert_id = (
+                    parsed["cert_id"]
+                    or f"CERT-{len(st.session_state.certificates_db)+1}"
+                )
                 new_cert = {
                     "cert_id": new_cert_id,
                     "manufacturer": parsed["manufacturer"] or "Unknown",
@@ -444,14 +462,21 @@ with tab_certs:
                     "issue_date": datetime.now().strftime("%Y-%m-%d"),
                 }
                 st.session_state.certificates_db = pd.concat(
-                    [st.session_state.certificates_db, pd.DataFrame([new_cert])],
+                    [
+                        st.session_state.certificates_db,
+                        pd.DataFrame([new_cert]),
+                    ],
                     ignore_index=True,
                 ).drop_duplicates(subset=["cert_id"], keep="last")
                 st.rerun()
 
     with c_col2:
         st.subheader("📚 Database Certificati Registrati")
-        st.dataframe(st.session_state.certificates_db, use_container_width=True, height=280)
+        st.dataframe(
+            st.session_state.certificates_db,
+            use_container_width=True,
+            height=280,
+        )
 
 # -----------------------------------------------------------------------------
 # TAB 3: MOORING STATIONS & PIANETTI
@@ -467,22 +492,36 @@ with tab_3d_editor:
 
 # Calcolo preliminare delle geometrie per simulazione e polare
 active_bollards_df = st.session_state.ports_bollards[selected_port]
-geom_df = calculate_line_geometry(st.session_state.lines_inventory, active_bollards_df)
+geom_df = calculate_line_geometry(
+    st.session_state.lines_inventory, active_bollards_df
+)
 
 # -----------------------------------------------------------------------------
 # TAB 5: SIMULAZIONE TENSIONI
 # -----------------------------------------------------------------------------
 with tab_sim:
     if geom_df.empty:
-        st.error("⚠️ Nessuna corrispondenza trovata tra le bitte dei cavi e della banchina.")
+        st.error(
+            "⚠️ Nessuna corrispondenza trovata tra le bitte dei cavi e della"
+            " banchina."
+        )
     else:
         forces = calculate_environmental_forces(
-            v_wind, dir_wind, v_curr, dir_curr,
-            ship_dict["AFW"], ship_dict["ALW"], ship_dict["ALC"], ship_dict["LOA"]
+            v_wind,
+            dir_wind,
+            v_curr,
+            dir_curr,
+            ship_dict["AFW"],
+            ship_dict["ALW"],
+            ship_dict["ALC"],
+            ship_dict["LOA"],
         )
         results_df = solve_line_tensions_3d(geom_df, forces)
 
-        st.subheader(f"Analisi Tensione Cavi: **{selected_port}** (Meteo: {v_wind} kts @ {dir_wind}°)")
+        st.subheader(
+            f"Analisi Tensione Cavi: **{selected_port}** (Meteo: {v_wind} kts @"
+            f" {dir_wind}°)"
+        )
         m1, m2, m3 = st.columns(3)
         m1.metric("Forza Longitudinale (Fx)", f"{forces['Fx_total_t']:.2f} t")
         m2.metric("Forza Trasversale (Fy)", f"{forces['Fy_total_t']:.2f} t")
@@ -490,10 +529,17 @@ with tab_sim:
 
         st.dataframe(
             results_df[[
-                "line_id", "line_name", "cert_id", "bollard_id",
-                "length_m", "azimuth_deg", "incline_deg", "Tension_tons", "Util_Percent"
+                "line_id",
+                "line_name",
+                "cert_id",
+                "bollard_id",
+                "length_m",
+                "azimuth_deg",
+                "incline_deg",
+                "Tension_tons",
+                "Util_Percent",
             ]],
-            use_container_width=True
+            use_container_width=True,
         )
 
         if st.button("💾 Registra Sessione d'Ormeggio nel DB"):
@@ -508,8 +554,13 @@ with tab_polar:
     if st.button("Esegui Simulazione Polare") and not geom_df.empty:
         with st.spinner("Calcolo dinamico in corso..."):
             angles, max_winds = calculate_wind_operability_envelope(
-                geom_df, ship_dict["AFW"], ship_dict["ALW"], ship_dict["ALC"], ship_dict["LOA"],
-                v_curr=v_curr, dir_curr=dir_curr
+                geom_df,
+                ship_dict["AFW"],
+                ship_dict["ALW"],
+                ship_dict["ALC"],
+                ship_dict["LOA"],
+                v_curr=v_curr,
+                dir_curr=dir_curr,
             )
             st.success("Calcolo inviluppo completato!")
 
