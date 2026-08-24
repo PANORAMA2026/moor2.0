@@ -1,2520 +1,1484 @@
-import os
+from datetime import datetime
+import io
 import re
-import json
-import math
-import shutil
 import sqlite3
-from datetime import datetime, timezone
-from contextlib import contextmanager
-
 import numpy as np
 import pandas as pd
+import plotly.express as px
 import plotly.graph_objects as go
+from pypdf import PdfReader
 import requests
 import streamlit as st
 
+# Tenta l'importazione del modulo canvas interattivo
 try:
-    import pdfplumber
-except Exception:
-    pdfplumber = None
+  from streamlit_drawable_canvas import st_canvas
 
-try:
-    from pypdf import PdfReader
-except Exception:
-    PdfReader = None
-
-
-# =============================================================================
-# CONFIGURATION
-# =============================================================================
+  HAS_CANVAS = True
+except ImportError:
+  HAS_CANVAS = False
 
 st.set_page_config(
-    page_title="OpenMooring",
-    page_icon="⚓",
+    page_title="OpenMooring MEG4 Pro - Multi-Port & Certificate Manager",
     layout="wide",
-    initial_sidebar_state="expanded",
 )
 
-APP_TITLE = "⚓ OpenMooring"
-DB_FILE = "openmooring.db"
-BACKUP_DIR = "backups"
-
-KNOT_TO_MPS = 0.514444
-TON_FORCE_TO_KN = 9.80665
-KGF_TO_KN = 0.00980665
-LBF_TO_KN = 0.0044482216152605
-
-PORT_COORDINATES = {
-    "Long Beach Cruise Terminal": {"lat": 33.7513, "lon": -118.1888},
-    "Cabo San Lucas": {"lat": 22.8905, "lon": -109.9167},
-    "Mazatlan Pier 4/5": {"lat": 23.1994, "lon": -106.4200},
-    "Mazatlan Pier 2/3": {"lat": 23.1994, "lon": -106.4200},
-    "La Paz": {"lat": 24.1426, "lon": -110.3128},
-    "Ensenada Pier #2": {"lat": 31.8667, "lon": -116.6000},
-    "Puerto Vallarta Pier #1": {"lat": 20.6534, "lon": -105.2253},
-    "Puerto Vallarta Pier #3": {"lat": 20.6534, "lon": -105.2253},
-}
-
-DEFAULT_PORT_HEADINGS = {
-    "Long Beach Cruise Terminal": 135.0,
-    "Cabo San Lucas": 0.0,
-    "Mazatlan Pier 4/5": 315.0,
-    "Mazatlan Pier 2/3": 135.0,
-    "La Paz": 180.0,
-    "Ensenada Pier #2": 220.0,
-    "Puerto Vallarta Pier #1": 0.0,
-    "Puerto Vallarta Pier #3": 0.0,
-}
-
+# Costante di conversione (kN in tonnellate metriche)
+KN_TO_TONS = 0.10197162129779
 
 # =============================================================================
-# DATABASE
+# 1. DATABASE & MANUTENZIONE PREDITTIVA (Persistent SQLite Database)
 # =============================================================================
 
-@contextmanager
-def get_connection():
-    conn = sqlite3.connect(DB_FILE, timeout=30, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
+DB_PATH = "openmooring.db"
 
-    try:
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA foreign_keys=ON")
-        conn.execute("PRAGMA synchronous=NORMAL")
-        yield conn
-        conn.commit()
-
-    except Exception:
-        conn.rollback()
-        raise
-
-    finally:
-        conn.close()
-
-
-def init_db():
-    with get_connection() as conn:
-
-        conn.execute("""
-        CREATE TABLE IF NOT EXISTS certificates (
-            cert_id TEXT PRIMARY KEY,
-            manufacturer TEXT,
-            material TEXT,
-            diameter_mm REAL,
-            mbl_kn REAL,
-            mbl_tons REAL,
-            standard TEXT,
-            issue_date TEXT,
-            expiry_date TEXT,
-            source_text TEXT,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        )
-        """)
-
-        conn.execute("""
-        CREATE TABLE IF NOT EXISTS mooring_lines (
-            line_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            line_name TEXT UNIQUE NOT NULL,
-            station TEXT,
-            line_type TEXT,
-            material TEXT,
-            diameter_mm REAL,
-            length_m REAL,
-            mbl_kn REAL,
-            mbl_tons REAL,
-            cert_id TEXT,
-            brake_holding_capacity_kn REAL,
-            condition TEXT,
-            notes TEXT,
-            updated_at TEXT NOT NULL,
-            FOREIGN KEY(cert_id) REFERENCES certificates(cert_id)
-        )
-        """)
-
-        conn.execute("""
-        CREATE TABLE IF NOT EXISTS mooring_stations (
-            station_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            station_name TEXT UNIQUE NOT NULL,
-            x_m REAL,
-            y_m REAL,
-            z_m REAL,
-            side TEXT,
-            notes TEXT,
-            updated_at TEXT NOT NULL
-        )
-        """)
-
-        conn.execute("""
-        CREATE TABLE IF NOT EXISTS bollards (
-            bollard_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            bollard_name TEXT UNIQUE NOT NULL,
-            station_name TEXT,
-            x_m REAL,
-            y_m REAL,
-            z_m REAL,
-            swl_kn REAL,
-            notes TEXT,
-            updated_at TEXT NOT NULL
-        )
-        """)
-
-        conn.execute("""
-        CREATE TABLE IF NOT EXISTS ports (
-            port_name TEXT PRIMARY KEY,
-            latitude REAL,
-            longitude REAL,
-            berth_heading REAL,
-            updated_at TEXT NOT NULL
-        )
-        """)
-
-        conn.execute("""
-        CREATE TABLE IF NOT EXISTS analysis_history (
-            analysis_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp TEXT NOT NULL,
-            port_name TEXT,
-            wind_speed_kn REAL,
-            wind_direction_deg REAL,
-            current_speed_kn REAL,
-            current_direction_deg REAL,
-            result_json TEXT
-        )
-        """)
-
-        now = utc_now()
-
-        for port_name, coords in PORT_COORDINATES.items():
-
-            conn.execute("""
-            INSERT INTO ports
-            (
-                port_name,
-                latitude,
-                longitude,
-                berth_heading,
-                updated_at
-            )
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(port_name)
-            DO NOTHING
-            """, (
-                port_name,
-                coords["lat"],
-                coords["lon"],
-                DEFAULT_PORT_HEADINGS.get(port_name, 0.0),
-                now,
-            ))
-
-
-def utc_now():
-    return datetime.now(timezone.utc).isoformat()
-
-
-def backup_database():
-
-    if not os.path.exists(DB_FILE):
-        return None
-
-    os.makedirs(BACKUP_DIR, exist_ok=True)
-
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    destination = os.path.join(
-        BACKUP_DIR,
-        f"openmooring_backup_{timestamp}.db"
+if "db_conn" not in st.session_state:
+    st.session_state.db_conn = sqlite3.connect(
+        DB_PATH,
+        check_same_thread=False
     )
-
-    shutil.copy2(DB_FILE, destination)
-
-    return destination
+    st.session_state.db_conn.row_factory = sqlite3.Row
 
 
-# =============================================================================
-# DATABASE HELPERS
-# =============================================================================
+def init_db(lines_df=None):
+  conn = st.session_state.db_conn
+  cursor = conn.cursor()
 
-def query_df(query, params=()):
-
-    with get_connection() as conn:
-        return pd.read_sql_query(query, conn, params=params)
-
-
-def get_certificates():
-
-    return query_df("""
-        SELECT *
-        FROM certificates
-        ORDER BY updated_at DESC
+  cursor.execute("""
+        CREATE TABLE IF NOT EXISTS line_history (
+            line_id TEXT PRIMARY KEY,
+            line_name TEXT,
+            mbl_tons REAL,
+            max_design_hours REAL DEFAULT 2000.0,
+            accumulated_hours REAL DEFAULT 0.0,
+            high_load_hours REAL DEFAULT 0.0,
+            fatigue_index REAL DEFAULT 0.0,
+            cert_id TEXT,
+            station_id TEXT,
+            winch_id TEXT
+        )
+    """)
+  cursor.execute("""
+        CREATE TABLE IF NOT EXISTS mooring_logs (
+            log_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT,
+            port_name TEXT,
+            line_id TEXT,
+            tension_tons REAL,
+            util_percent REAL,
+            duration_hours REAL
+        )
     """)
 
+  if lines_df is not None:
+    for _, row in lines_df.iterrows():
+      try:
+        line_id_val = row.get("line_id")
+        mbl_val = row.get("mbl_tons")
 
-def get_lines():
+        if pd.isna(line_id_val) or pd.isna(mbl_val):
+          continue
 
-    return query_df("""
-        SELECT *
-        FROM mooring_lines
-        ORDER BY line_name
-    """)
+        line_id = str(line_id_val).strip()
+        if not line_id:
+          continue
 
+        line_name = str(row.get("line_name", f"Line {line_id}")).strip()
+        mbl_tons = float(mbl_val)
+        cert_id = str(row.get("cert_id", "N/A"))
+        station_id = str(row.get("station_id", "N/A"))
+        winch_id = str(row.get("winch_id", "N/A"))
 
-def get_stations():
-
-    return query_df("""
-        SELECT *
-        FROM mooring_stations
-        ORDER BY station_name
-    """)
-
-
-def get_bollards():
-
-    return query_df("""
-        SELECT *
-        FROM bollards
-        ORDER BY bollard_name
-    """)
-
-
-def get_ports():
-
-    return query_df("""
-        SELECT *
-        FROM ports
-        ORDER BY port_name
-    """)
-
-
-def upsert_certificate(data):
-
-    now = utc_now()
-
-    with get_connection() as conn:
-
-        conn.execute("""
-        INSERT INTO certificates
-        (
-            cert_id,
-            manufacturer,
-            material,
-            diameter_mm,
-            mbl_kn,
-            mbl_tons,
-            standard,
-            issue_date,
-            expiry_date,
-            source_text,
-            created_at,
-            updated_at
+        cursor.execute(
+            """
+                    INSERT OR REPLACE INTO line_history (line_id, line_name, mbl_tons, cert_id, station_id, winch_id)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """,
+            (line_id, line_name, mbl_tons, cert_id, station_id, winch_id),
         )
-        VALUES
-        (
-            :cert_id,
-            :manufacturer,
-            :material,
-            :diameter_mm,
-            :mbl_kn,
-            :mbl_tons,
-            :standard,
-            :issue_date,
-            :expiry_date,
-            :source_text,
-            :created_at,
-            :updated_at
-        )
-        ON CONFLICT(cert_id)
-        DO UPDATE SET
-
-            manufacturer=excluded.manufacturer,
-            material=excluded.material,
-            diameter_mm=excluded.diameter_mm,
-            mbl_kn=excluded.mbl_kn,
-            mbl_tons=excluded.mbl_tons,
-            standard=excluded.standard,
-            issue_date=excluded.issue_date,
-            expiry_date=excluded.expiry_date,
-            source_text=excluded.source_text,
-            updated_at=excluded.updated_at
-        """, {
-            **data,
-            "created_at": now,
-            "updated_at": now,
-        })
+      except (ValueError, TypeError):
+        continue
+  conn.commit()
 
 
-def upsert_line(data):
+def log_mooring_session(results_df, port_name, duration_hours=6.0):
+  conn = st.session_state.db_conn
+  cursor = conn.cursor()
+  now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    now = utc_now()
-
-    with get_connection() as conn:
-
-        conn.execute("""
-        INSERT INTO mooring_lines
-        (
-            line_name,
-            station,
-            line_type,
-            material,
-            diameter_mm,
-            length_m,
-            mbl_kn,
-            mbl_tons,
-            cert_id,
-            brake_holding_capacity_kn,
-            condition,
-            notes,
-            updated_at
-        )
-        VALUES
-        (
-            :line_name,
-            :station,
-            :line_type,
-            :material,
-            :diameter_mm,
-            :length_m,
-            :mbl_kn,
-            :mbl_tons,
-            :cert_id,
-            :brake_holding_capacity_kn,
-            :condition,
-            :notes,
-            :updated_at
-        )
-        ON CONFLICT(line_name)
-        DO UPDATE SET
-
-            station=excluded.station,
-            line_type=excluded.line_type,
-            material=excluded.material,
-            diameter_mm=excluded.diameter_mm,
-            length_m=excluded.length_m,
-            mbl_kn=excluded.mbl_kn,
-            mbl_tons=excluded.mbl_tons,
-            cert_id=excluded.cert_id,
-            brake_holding_capacity_kn=excluded.brake_holding_capacity_kn,
-            condition=excluded.condition,
-            notes=excluded.notes,
-            updated_at=excluded.updated_at
-        """, {
-            **data,
-            "updated_at": now,
-        })
-
-
-def update_line_certificate(line_name, cert):
-
-    with get_connection() as conn:
-
-        conn.execute("""
-        UPDATE mooring_lines
-
-        SET
-            cert_id=?,
-            material=?,
-            diameter_mm=?,
-            mbl_kn=?,
-            mbl_tons=?,
-            updated_at=?
-
-        WHERE line_name=?
-        """, (
-            cert["cert_id"],
-            cert["material"],
-            cert["diameter_mm"],
-            cert["mbl_kn"],
-            cert["mbl_tons"],
-            utc_now(),
-            line_name,
-        ))
-
-
-def upsert_station(data):
-
-    with get_connection() as conn:
-
-        conn.execute("""
-        INSERT INTO mooring_stations
-        (
-            station_name,
-            x_m,
-            y_m,
-            z_m,
-            side,
-            notes,
-            updated_at
-        )
-        VALUES
-        (
-            :station_name,
-            :x_m,
-            :y_m,
-            :z_m,
-            :side,
-            :notes,
-            :updated_at
-        )
-        ON CONFLICT(station_name)
-        DO UPDATE SET
-
-            x_m=excluded.x_m,
-            y_m=excluded.y_m,
-            z_m=excluded.z_m,
-            side=excluded.side,
-            notes=excluded.notes,
-            updated_at=excluded.updated_at
-        """, {
-            **data,
-            "updated_at": utc_now(),
-        })
-
-
-def upsert_bollard(data):
-
-    with get_connection() as conn:
-
-        conn.execute("""
-        INSERT INTO bollards
-        (
-            bollard_name,
-            station_name,
-            x_m,
-            y_m,
-            z_m,
-            swl_kn,
-            notes,
-            updated_at
-        )
-        VALUES
-        (
-            :bollard_name,
-            :station_name,
-            :x_m,
-            :y_m,
-            :z_m,
-            :swl_kn,
-            :notes,
-            :updated_at
-        )
-        ON CONFLICT(bollard_name)
-        DO UPDATE SET
-
-            station_name=excluded.station_name,
-            x_m=excluded.x_m,
-            y_m=excluded.y_m,
-            z_m=excluded.z_m,
-            swl_kn=excluded.swl_kn,
-            notes=excluded.notes,
-            updated_at=excluded.updated_at
-        """, {
-            **data,
-            "updated_at": utc_now(),
-        })
-
-
-# =============================================================================
-# UNIT CONVERSION
-# =============================================================================
-
-def normalize_number(value):
-
-    if value is None:
-        return None
-
+  for _, row in results_df.iterrows():
     try:
-        return float(str(value).replace(",", "."))
+      line_id = str(row["line_id"])
+      tension = float(row["Tension_tons"])
+      util = float(row["Util_Percent"])
+
+      cursor.execute(
+          """
+                INSERT INTO mooring_logs (timestamp, port_name, line_id, tension_tons, util_percent, duration_hours)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """,
+          (now_str, port_name, line_id, tension, util, duration_hours),
+      )
+
+      fatigue_increment = ((util / 100.0) ** 3) * duration_hours
+      high_load_inc = duration_hours if util > 35.0 else 0.0
+
+      cursor.execute(
+          """
+                UPDATE line_history
+                SET accumulated_hours = accumulated_hours + ?,
+                    high_load_hours = high_load_hours + ?,
+                    fatigue_index = fatigue_index + ?
+                WHERE line_id = ?
+            """,
+          (duration_hours, high_load_inc, fatigue_increment, line_id),
+      )
     except Exception:
-        return None
+      continue
+  conn.commit()
 
 
-def force_to_kn(value, unit):
+def get_lines_health_status():
+  conn = st.session_state.db_conn
+  df = pd.read_sql_query("SELECT * FROM line_history", conn)
 
-    value = normalize_number(value)
+  if df.empty:
+    return df
 
-    if value is None:
-        return None
+  health_percent = []
+  recommendations = []
 
-    unit = (unit or "").lower().strip()
+  for _, row in df.iterrows():
+    max_h = row["max_design_hours"] if row["max_design_hours"] > 0 else 2000.0
+    hours_used_pct = (row["accumulated_hours"] / max_h) * 100.0
+    fatigue_pct = (row["fatigue_index"] / 300.0) * 100.0
+    wear_pct = max(hours_used_pct, fatigue_pct)
+    remaining_health = max(0.0, 100.0 - wear_pct)
 
-    if unit in ["kn", "kilonewton", "kilonewtons"]:
-        return value
+    health_percent.append(remaining_health)
 
-    if unit in ["t", "ton", "tons", "tonne", "tonnes", "tf"]:
-        return value * TON_FORCE_TO_KN
+    if remaining_health <= 20.0:
+      recommendations.append(
+          "🚨 SOSTITUZIONE IMMINENTE: Cavo a fine vita utile!"
+      )
+    elif remaining_health <= 40.0:
+      recommendations.append(
+          "⚠️ ISPEZIONE: Valutare rotazione testa-coda (End-for-End)."
+      )
+    else:
+      recommendations.append("✅ IDONEO: Condizioni operative regolari.")
 
-    if unit in ["kgf", "kg"]:
-        return value * KGF_TO_KN
-
-    if unit in ["lbf", "lb", "lbs"]:
-        return value * LBF_TO_KN
-
-    return None
-
-
-def length_to_mm(value, unit):
-
-    value = normalize_number(value)
-
-    if value is None:
-        return None
-
-    unit = (unit or "").lower().strip()
-
-    if unit in ["mm", "millimeter", "millimeters"]:
-        return value
-
-    if unit in ["cm", "centimeter", "centimeters"]:
-        return value * 10
-
-    if unit in ["m", "meter", "meters", "metre", "metres"]:
-        return value * 1000
-
-    if unit in ["in", "inch", "inches", '"']:
-        return value * 25.4
-
-    return None
-
-
-def kn_to_tonnes(kn):
-
-    if kn is None:
-        return None
-
-    return kn / TON_FORCE_TO_KN
+  df["Health_Percent"] = health_percent
+  df["Recommendation"] = recommendations
+  return df
 
 
 # =============================================================================
-# CERTIFICATE PARSER
+# 2. INTEGRATORE CERTIFICATI CAVI (PDF READ + PARSER REGEX)
 # =============================================================================
-
-MATERIAL_PATTERNS = {
-
-    "HMPE": [
-        "HMPE",
-        "UHMWPE",
-        "ULTRA HIGH MOLECULAR WEIGHT POLYETHYLENE",
-        "HIGH MODULUS POLYETHYLENE",
-    ],
-
-    "DYNEEMA": [
-        "DYNEEMA",
-    ],
-
-    "POLYESTER": [
-        "POLYESTER",
-        "PET",
-    ],
-
-    "NYLON": [
-        "NYLON",
-        "POLYAMIDE",
-        "PA6",
-        "PA 6",
-    ],
-
-    "ARAMID": [
-        "ARAMID",
-        "KEVLAR",
-        "TECHNORA",
-    ],
-
-    "POLYPROPYLENE": [
-        "POLYPROPYLENE",
-        "PP",
-    ],
-
-    "WIRE": [
-        "WIRE ROPE",
-        "STEEL WIRE",
-        "GALVANIZED WIRE",
-    ],
-}
-
-
-def extract_first_match(patterns, text, flags=re.IGNORECASE):
-
-    for pattern in patterns:
-
-        match = re.search(pattern, text, flags)
-
-        if match:
-            return match
-
-    return None
-
-
-def normalize_material(text):
-
-    if not text:
-        return None
-
-    upper_text = text.upper()
-
-    for canonical, aliases in MATERIAL_PATTERNS.items():
-
-        for alias in aliases:
-
-            if alias in upper_text:
-                return canonical
-
-    return None
-
-
-def extract_certificate_id(text):
-
-    patterns = [
-
-        r"(?:CERTIFICATE\s*(?:NO|NUMBER|#)?|CERT\.?\s*NO|CERT\s*NO)\s*[:#\-]?\s*([A-Z0-9][A-Z0-9\-_\/\.]{3,})",
-
-        r"(?:CERTIFICATE)\s+([A-Z0-9][A-Z0-9\-_\/\.]{3,})",
-
-        r"(?:SERIAL\s*(?:NO|NUMBER)?|S\/N)\s*[:#\-]?\s*([A-Z0-9][A-Z0-9\-_\/\.]{3,})",
-    ]
-
-    match = extract_first_match(patterns, text)
-
-    return match.group(1).strip() if match else None
-
-
-def extract_manufacturer(text):
-
-    patterns = [
-
-        r"(?:MANUFACTURER|MANUFACTURED BY|MAKER|PRODUCER)\s*[:\-]?\s*([A-Z0-9&.,() \-]{3,60})",
-
-        r"(?:MANUFACTURER)\s*\n?\s*([A-Z0-9&.,() \-]{3,60})",
-    ]
-
-    match = extract_first_match(patterns, text)
-
-    if match:
-
-        result = match.group(1).strip()
-
-        result = re.split(
-            r"\n|CERTIFICATE|DATE|MATERIAL|DIAMETER",
-            result,
-            flags=re.IGNORECASE
-        )[0].strip()
-
-        return result or None
-
-    return None
-
-
-def extract_diameter_mm(text):
-
-    patterns = [
-
-        r"(?:DIAMETER|DIAM\.?|Ø)\s*[:=\-]?\s*(\d+(?:[.,]\d+)?)\s*(MM|CM|M|IN|INCH|INCHES)?",
-
-        r"(\d+(?:[.,]\d+)?)\s*(MM|CM|IN|INCH|INCHES)\s*(?:DIAMETER|ROPE)",
-    ]
-
-    match = extract_first_match(patterns, text)
-
-    if not match:
-        return None
-
-    value = match.group(1)
-    unit = match.group(2) or "mm"
-
-    return length_to_mm(value, unit)
-
-
-def extract_mbl_kn(text):
-
-    patterns = [
-
-        r"(?:MBL|MINIMUM BREAKING LOAD|BREAKING LOAD|MIN\.?\s*BREAKING\s*STRENGTH|MBS)\s*[:=\-]?\s*(\d+(?:[.,]\d+)?)\s*(KN|KILONEWTONS?|TONNES?|TONS?|T|TF|KGF|LBF)?",
-
-        r"(\d+(?:[.,]\d+)?)\s*(KN|KILONEWTONS?|TONNES?|TONS?|T|TF|KGF|LBF)\s*(?:MBL|BREAKING LOAD|MBS)",
-    ]
-
-    match = extract_first_match(patterns, text)
-
-    if not match:
-        return None
-
-    value = match.group(1)
-    unit = match.group(2)
-
-    if not unit:
-        return None
-
-    return force_to_kn(value, unit)
-
-
-def extract_standard(text):
-
-    standards = [
-
-        "MEG4",
-        "MEG 4",
-        "OCIMF",
-        "ISO 2307",
-        "ISO 9554",
-        "EN ISO",
-        "ABS",
-        "DNV",
-        "LLOYD'S REGISTER",
-        "LR",
-        "BV",
-        "BUREAU VERITAS",
-    ]
-
-    upper = text.upper()
-
-    for standard in standards:
-
-        if standard.upper() in upper:
-            return standard
-
-    return None
-
-
-def extract_dates(text):
-
-    date_patterns = [
-
-        r"\b(\d{4}[-/]\d{2}[-/]\d{2})\b",
-
-        r"\b(\d{2}[-/]\d{2}[-/]\d{4})\b",
-
-        r"\b(\d{2}\s+(?:JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)[A-Z]*\s+\d{4})\b",
-    ]
-
-    dates = []
-
-    for pattern in date_patterns:
-
-        dates.extend(
-            re.findall(pattern, text, re.IGNORECASE)
-        )
-
-    return list(dict.fromkeys(dates))
+def extract_text_from_pdf(pdf_file):
+  """Estrae il testo da un file PDF scaricato o caricato via drag and drop."""
+  try:
+    reader = PdfReader(pdf_file)
+    extracted_text = ""
+    for page in reader.pages:
+      text = page.extract_text()
+      if text:
+        extracted_text += text + "\n"
+    return extracted_text
+  except Exception as e:
+    st.error(f"Errore nella lettura del PDF: {e}")
+    return ""
 
 
 def parse_certificate_text(text):
+  """Esegue il parsing automatico del testo/OCR del certificato cavo."""
+  data = {
+      "cert_id": None,
+      "manufacturer": None,
+      "material": None,
+      "diameter_mm": None,
+      "mbl_tons": None,
+      "length_m": None,
+      "standard": None,
+  }
 
-    if not text:
-        return {}
+  # Cert ID Pattern
+  cert_match = re.search(
+      r"(?:Certificat[eo]|Cert\.?|Certificate No\.?)\s*[:#]?\s*([A-Za-z0-9\-/]+)",
+      text,
+      re.IGNORECASE,
+  )
+  if cert_match:
+    data["cert_id"] = cert_match.group(1).strip()
 
-    text = re.sub(r"\r", "\n", text)
-    text = re.sub(r"[ \t]+", " ", text)
+  # Manufacturer
+  mfg_match = re.search(
+      r"(?:Manufacturer|Costruttore|Maker)\s*[:#]?\s*([A-Za-z0-9\s]+)",
+      text,
+      re.IGNORECASE,
+  )
+  if mfg_match:
+    data["manufacturer"] = mfg_match.group(1).strip()
 
-    mbl_kn = extract_mbl_kn(text)
+  # Material (HMPE, Polyester, Polypropylene, Wire, Nylon)
+  mat_match = re.search(
+      r"\b(HMPE|Dyneema|Polyester|Polypropylene|Nylon|Wire|Steel|Aramid)\b",
+      text,
+      re.IGNORECASE,
+  )
+  if mat_match:
+    data["material"] = mat_match.group(1).upper()
 
-    return {
+  # Diameter (mm)
+  dia_match = re.search(
+      r"(?:Diameter|Diametro|Dia\.?)\s*[:#]?\s*(\d+(?:\.\d+)?)\s*mm",
+      text,
+      re.IGNORECASE,
+  )
+  if dia_match:
+    data["diameter_mm"] = float(dia_match.group(1))
 
-        "cert_id": extract_certificate_id(text),
+  # MBL (kN or Tons)
+  mbl_kn_match = re.search(
+      r"(?:MBL|Breaking Load|Carico di Rottura)\s*[:#]?\s*(\d+(?:\.\d+)?)\s*kN",
+      text,
+      re.IGNORECASE,
+  )
+  mbl_t_match = re.search(
+      r"(?:MBL|Breaking Load|Carico di Rottura)\s*[:#]?\s*(\d+(?:\.\d+)?)\s*(?:Tons|t|MT)",
+      text,
+      re.IGNORECASE,
+  )
 
-        "manufacturer": extract_manufacturer(text),
+  if mbl_kn_match:
+    data["mbl_tons"] = round(float(mbl_kn_match.group(1)) * KN_TO_TONS, 2)
+  elif mbl_t_match:
+    data["mbl_tons"] = float(mbl_t_match.group(1))
 
-        "material": normalize_material(text),
+  # Standard / Certification body
+  std_match = re.search(
+      r"\b(MEG4|ISO\s*\d+|DNV|Lloyd'?s\s*Register|ABS|BV)\b",
+      text,
+      re.IGNORECASE,
+  )
+  if std_match:
+    data["standard"] = std_match.group(1)
 
-        "diameter_mm": extract_diameter_mm(text),
-
-        "mbl_kn": mbl_kn,
-
-        "mbl_tons": kn_to_tonnes(mbl_kn),
-
-        "standard": extract_standard(text),
-
-        "dates_found": extract_dates(text),
-
-        "source_text": text,
-    }
-
-
-def extract_pdf_text(uploaded_file):
-
-    if uploaded_file is None:
-        return ""
-
-    text = ""
-
-    if pdfplumber:
-
-        try:
-
-            with pdfplumber.open(uploaded_file) as pdf:
-
-                for page in pdf.pages:
-
-                    page_text = page.extract_text() or ""
-
-                    text += page_text + "\n"
-
-            if text.strip():
-                return text
-
-        except Exception:
-            pass
-
-    if PdfReader:
-
-        try:
-
-            uploaded_file.seek(0)
-
-            reader = PdfReader(uploaded_file)
-
-            for page in reader.pages:
-
-                text += (page.extract_text() or "") + "\n"
-
-        except Exception:
-            pass
-
-    return text
-
-
-# =============================================================================
-# WEATHER
-# =============================================================================
-
-@st.cache_data(ttl=600)
-def fetch_live_weather(latitude, longitude):
-
-    try:
-
-        url = "https://api.open-meteo.com/v1/forecast"
-
-        params = {
-            "latitude": latitude,
-            "longitude": longitude,
-            "current": "wind_speed_10m,wind_direction_10m",
-            "wind_speed_unit": "kn",
-            "timezone": "UTC",
-        }
-
-        response = requests.get(
-            url,
-            params=params,
-            timeout=10,
-        )
-
-        response.raise_for_status()
-
-        data = response.json()
-
-        current = data.get("current", {})
-
-        speed = current.get("wind_speed_10m")
-        direction = current.get("wind_direction_10m")
-        timestamp = current.get("time")
-
-        if speed is None or direction is None:
-            return False, None, None, None
-
-        return (
-            True,
-            float(speed),
-            float(direction),
-            timestamp,
-        )
-
-    except Exception:
-
-        return False, None, None, None
+  return data
 
 
 # =============================================================================
-# MOORING CALCULATIONS
+# 3. COORDINATE PORTO & METEO AUTOMATICO
 # =============================================================================
+PORT_COORDINATES = {
+    "Long Beach Cruise Terminal": {"lat": 33.7513, "lon": -118.1888},
+    "Mazatlan Pier 4/5": {"lat": 23.1978, "lon": -106.4211},
+    "Mazatlan Pier 2/3": {"lat": 23.1950, "lon": -106.4200},
+    "La Paz": {"lat": 24.1422, "lon": -110.3128},
+    "Ensenada Pier #2": {"lat": 31.8578, "lon": -116.6258},
+    "Puerto Vallarta Pier #1": {"lat": 20.6534, "lon": -105.2403},
+    "Puerto Vallarta Pier #3": {"lat": 20.6560, "lon": -105.2415},
+}
 
-def angle_to_vector(angle_deg):
 
-    angle_rad = math.radians(angle_deg)
+def fetch_live_weather(lat, lon):
+  try:
+    url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current_weather=true"
+    res = requests.get(url, timeout=5).json()
+    if "current_weather" in res:
+      cw = res["current_weather"]
+      wind_knots = cw["windspeed"] * 0.539957
+      wind_deg = cw["winddirection"]
+      return True, round(wind_knots, 1), round(wind_deg, 0)
+  except Exception:
+    pass
+  return False, 0.0, 0.0
 
-    return np.array([
-        math.cos(angle_rad),
-        math.sin(angle_rad),
-    ], dtype=float)
 
-
-def calculate_environmental_force(
-    wind_speed_kn,
-    wind_direction_deg,
-    current_speed_kn,
-    current_direction_deg,
-    projected_wind_area_m2=0.0,
-    projected_current_area_m2=0.0,
-    air_drag_coefficient=1.0,
-    water_drag_coefficient=1.0,
+# =============================================================================
+# 4. MOTORE FISICO & GEOMETRICO
+# =============================================================================
+def calculate_environmental_forces(
+    v_wind_knots,
+    dir_wind_deg,
+    v_curr_knots,
+    dir_curr_deg,
+    afw,
+    alw,
+    alc,
+    loa,
 ):
+  v_wind = float(v_wind_knots) * 0.514444
+  v_curr = float(v_curr_knots) * 0.514444
+  rho_air = 1.225
+  rho_water = 1025.0
 
-    wind_speed_mps = wind_speed_kn * KNOT_TO_MPS
-    current_speed_mps = current_speed_kn * KNOT_TO_MPS
+  rad_wind = np.radians(float(dir_wind_deg))
+  rad_curr = np.radians(float(dir_curr_deg))
 
-    rho_air = 1.225
-    rho_water = 1025.0
+  cx_w = -np.cos(rad_wind)
+  cy_w = np.sin(rad_wind)
+  cmz_w = 0.15 * np.sin(2 * rad_wind)
 
-    wind_force_n = (
-        0.5
-        * rho_air
-        * air_drag_coefficient
-        * projected_wind_area_m2
-        * wind_speed_mps ** 2
-    )
+  cx_c = -0.5 * np.cos(rad_curr)
+  cy_c = np.sin(rad_curr)
+  cmz_c = 0.1 * np.sin(2 * rad_curr)
 
-    current_force_n = (
-        0.5
-        * rho_water
-        * water_drag_coefficient
-        * projected_current_area_m2
-        * current_speed_mps ** 2
-    )
+  fx_w = (0.5 * rho_air * (v_wind**2) * float(afw) * cx_w / 1000.0) * KN_TO_TONS
+  fy_w = (0.5 * rho_air * (v_wind**2) * float(alw) * cy_w / 1000.0) * KN_TO_TONS
+  mz_w = (
+      0.5 * rho_air * (v_wind**2) * float(alw) * float(loa) * cmz_w / 1000.0
+  ) * KN_TO_TONS
 
-    wind_force_kn = wind_force_n / 1000.0
-    current_force_kn = current_force_n / 1000.0
+  fx_c = (
+      0.5 * rho_water * (v_curr**2) * float(afw) * 0.1 * cx_c / 1000.0
+  ) * KN_TO_TONS
+  fy_c = (
+      0.5 * rho_water * (v_curr**2) * float(alc) * cy_c / 1000.0
+  ) * KN_TO_TONS
+  mz_c = (
+      0.5 * rho_water * (v_curr**2) * float(alc) * float(loa) * cmz_c / 1000.0
+  ) * KN_TO_TONS
 
-    wind_vector = (
-        angle_to_vector(wind_direction_deg)
-        * wind_force_kn
-    )
-
-    current_vector = (
-        angle_to_vector(current_direction_deg)
-        * current_force_kn
-    )
-
-    total_vector = wind_vector + current_vector
-
-    return {
-        "wind_force_kn": wind_force_kn,
-        "current_force_kn": current_force_kn,
-        "wind_vector": wind_vector,
-        "current_vector": current_vector,
-        "total_vector": total_vector,
-        "total_force_kn": float(
-            np.linalg.norm(total_vector)
-        ),
-    }
+  return {
+      "Fx_total_t": fx_w + fx_c,
+      "Fy_total_t": fy_w + fy_c,
+      "Mz_total_tm": mz_w + mz_c,
+  }
 
 
-def calculate_line_geometry(
-    line_start,
-    line_end,
+def calculate_line_geometry(lines_df, bollards_df):
+  l_df = lines_df.copy()
+  b_df = bollards_df.copy()
+
+  l_df["bollard_id"] = l_df["bollard_id"].astype(str).str.strip()
+  b_df["bollard_id"] = b_df["bollard_id"].astype(str).str.strip()
+
+  merged = pd.merge(
+      l_df, b_df, on="bollard_id", suffixes=("_chock", "_bollard")
+  )
+
+  if merged.empty:
+    return merged
+
+  x_col = "X_Coordinata_m" if "X_Coordinata_m" in merged.columns else "bollard_x_m"
+  y_col = "Y_Coordinata_m" if "Y_Coordinata_m" in merged.columns else "bollard_y_m"
+  z_col = "Z_Altezza_m" if "Z_Altezza_m" in merged.columns else "bollard_z_m"
+
+  dx = merged[x_col].astype(float) - merged["chock_x_m"].astype(float)
+  dy = merged[y_col].astype(float) - merged["chock_y_m"].astype(float)
+  dz = merged[z_col].astype(float) - merged["chock_z_m"].astype(float)
+
+  length_3d = np.sqrt(dx**2 + dy**2 + dz**2)
+  length_2d = np.sqrt(dx**2 + dy**2)
+
+  merged["length_m"] = length_3d
+  merged["azimuth_deg"] = np.degrees(np.arctan2(dy, dx)) % 360
+  merged["incline_deg"] = np.degrees(np.arctan2(dz, length_2d))
+  merged["bollard_x_rendered"] = merged[x_col]
+  merged["bollard_y_rendered"] = merged[y_col]
+  merged["bollard_z_rendered"] = merged[z_col]
+
+  return merged
+
+
+def calculate_composite_stiffness(line):
+  length_tail = float(line.get("tail_length_m", 0.0))
+  length_main = max(0.1, float(line["length_m"]) - length_tail)
+  area_main = np.pi * ((float(line["diameter_mm"]) / 1000.0) ** 2) / 4.0
+
+  k_main = ((
+      float(line["E_modulus_GPa"]) * 1e6 * area_main
+  ) / length_main) * KN_TO_TONS
+
+  if length_tail <= 0 or float(line.get("tail_diameter_mm", 0)) <= 0:
+    return k_main, float(line["mbl_tons"])
+
+  area_tail = (
+      np.pi * ((float(line["tail_diameter_mm"]) / 1000.0) ** 2) / 4.0
+  )
+  k_tail = ((
+      float(line["tail_E_modulus_GPa"]) * 1e6 * area_tail
+  ) / length_tail) * KN_TO_TONS
+
+  k_eq = (k_main * k_tail) / (k_main + k_tail)
+  effective_mbl = min(
+      float(line["mbl_tons"]),
+      float(line.get("tail_mbl_tons", line["mbl_tons"])),
+  )
+
+  return k_eq, effective_mbl
+
+
+def solve_line_tensions_3d(lines_geom_df, forces):
+  if lines_geom_df.empty:
+    return lines_geom_df
+
+  K_global = np.zeros((3, 3))
+  F_ext = np.array(
+      [forces["Fx_total_t"], forces["Fy_total_t"], forces["Mz_total_tm"]]
+  )
+  line_data = []
+
+  for _, line in lines_geom_df.iterrows():
+    rad_az = np.radians(float(line["azimuth_deg"]))
+    rad_inc = np.radians(float(line["incline_deg"]))
+
+    dx = np.cos(rad_inc) * np.cos(rad_az)
+    dy = np.cos(rad_inc) * np.sin(rad_az)
+
+    k_eq, effective_mbl = calculate_composite_stiffness(line)
+
+    rx, ry = float(line["chock_x_m"]), float(line["chock_y_m"])
+    m_z = rx * dy - ry * dx
+
+    b = np.array([dx, dy, m_z])
+    K_global += k_eq * np.outer(b, b)
+
+    line_data.append({"k": k_eq, "b": b, "mbl": effective_mbl})
+
+  try:
+    displacements = np.linalg.solve(K_global, F_ext)
+  except np.linalg.LinAlgError:
+    displacements = np.zeros(3)
+
+  tensions, utilizations = [], []
+  for item in line_data:
+    t = max(0.0, item["k"] * np.dot(item["b"], displacements))
+    tensions.append(t)
+    utilizations.append((t / item["mbl"]) * 100.0 if item["mbl"] > 0 else 0.0)
+
+  lines_geom_df["Tension_tons"] = tensions
+  lines_geom_df["Util_Percent"] = utilizations
+  return lines_geom_df
+
+
+def calculate_wind_operability_envelope(
+    lines_geom_df,
+    afw,
+    alw,
+    alc,
+    loa,
+    v_curr=0.0,
+    dir_curr=0,
+    max_wind_test=80,
+    step_deg=10,
 ):
+  angles = np.arange(0, 360, step_deg)
+  max_safe_winds = []
 
-    start = np.array(line_start, dtype=float)
-    end = np.array(line_end, dtype=float)
+  if lines_geom_df.empty:
+    return list(angles), [0] * len(angles)
 
-    vector = end - start
+  for angle in angles:
+    safe_wind = 0
+    for v_w in range(1, max_wind_test + 1):
+      forces = calculate_environmental_forces(
+          v_w, angle, v_curr, dir_curr, afw, alw, alc, loa
+      )
+      results = solve_line_tensions_3d(lines_geom_df.copy(), forces)
 
-    horizontal_vector = vector[:2]
+      line_overload = (results["Util_Percent"] > 50.0).any()
 
-    horizontal_distance = np.linalg.norm(horizontal_vector)
+      bollard_loads = results.groupby("bollard_id")["Tension_tons"].sum()
+      bollard_overload = False
+      for b_id, load in bollard_loads.items():
+        swl_rows = results[results["bollard_id"] == b_id]["SWL_Bitta_t"]
+        if not swl_rows.empty:
+          swl = float(swl_rows.iloc[0])
+          if load > swl:
+            bollard_overload = True
+            break
 
-    total_distance = np.linalg.norm(vector)
+      if line_overload or bollard_overload:
+        break
+      safe_wind = v_w
+    max_safe_winds.append(safe_wind)
 
-    if total_distance <= 0:
-
-        return {
-            "valid": False,
-            "reason": "La lunghezza geometrica della linea è zero.",
-        }
-
-    unit_3d = vector / total_distance
-
-    if horizontal_distance <= 0:
-
-        horizontal_unit = np.array([0.0, 0.0])
-
-    else:
-
-        horizontal_unit = (
-            horizontal_vector
-            / horizontal_distance
-        )
-
-    horizontal_angle = (
-        math.degrees(
-            math.atan2(
-                horizontal_unit[1],
-                horizontal_unit[0],
-            )
-        )
-        % 360
-    )
-
-    vertical_angle = math.degrees(
-        math.atan2(
-            vector[2],
-            horizontal_distance,
-        )
-    )
-
-    return {
-        "valid": True,
-        "vector": vector,
-        "unit_3d": unit_3d,
-        "unit_horizontal": horizontal_unit,
-        "horizontal_distance_m": float(
-            horizontal_distance
-        ),
-        "distance_m": float(total_distance),
-        "horizontal_angle_deg": float(
-            horizontal_angle
-        ),
-        "vertical_angle_deg": float(
-            vertical_angle
-        ),
-    }
-
-
-def solve_line_tensions(
-    line_vectors,
-    external_force_kn,
-    regularization=1e-8,
-):
-
-    if len(line_vectors) == 0:
-
-        return {
-            "success": False,
-            "reason": "Nessuna linea disponibile.",
-        }
-
-    A = np.array(
-        line_vectors,
-        dtype=float,
-    ).T
-
-    b = -np.array(
-        external_force_kn,
-        dtype=float,
-    )
-
-    if A.shape[0] != 2:
-
-        return {
-            "success": False,
-            "reason": "La matrice delle forze deve avere 2 componenti.",
-        }
-
-    rank = np.linalg.matrix_rank(A)
-
-    try:
-
-        condition_number = np.linalg.cond(A)
-
-    except Exception:
-
-        condition_number = float("inf")
-
-    method = "least_squares"
-
-    try:
-
-        if (
-            A.shape[0] == A.shape[1]
-            and rank == min(A.shape)
-            and np.isfinite(condition_number)
-            and condition_number < 1e8
-        ):
-
-            tensions = np.linalg.solve(A, b)
-
-            method = "direct"
-
-        else:
-
-            ATA = A.T @ A
-            ATb = A.T @ b
-
-            if regularization > 0:
-
-                ATA = (
-                    ATA
-                    + regularization
-                    * np.eye(ATA.shape[0])
-                )
-
-            tensions = np.linalg.lstsq(
-                ATA,
-                ATb,
-                rcond=None,
-            )[0]
-
-    except Exception as exc:
-
-        return {
-            "success": False,
-            "reason": str(exc),
-        }
-
-    residual = A @ tensions - b
-
-    return {
-        "success": True,
-        "tensions_kn": tensions,
-        "residual_kn": residual,
-        "residual_norm_kn": float(
-            np.linalg.norm(residual)
-        ),
-        "matrix_rank": int(rank),
-        "condition_number": float(
-            condition_number
-        ),
-        "method": method,
-    }
+  return list(angles), max_safe_winds
 
 
 # =============================================================================
-# VISUALIZATION
+# 5. SESSION STATE & INIZIALIZZAZIONE DATI
 # =============================================================================
+DEFAULT_SHIP = {
+    "LOA": 323.6,
+    "Beam": 37.2,
+    "Draft": 8.2,
+    "AFW": 1250.0,
+    "ALW": 6120.0,
+    "ALC": 1200.0,
+}
 
-def create_force_plot(result):
+if "certificates_db" not in st.session_state:
+  st.session_state.certificates_db = pd.DataFrame([
+      {
+          "cert_id": "CERT-HMPE-2025-01",
+          "manufacturer": "Samson Rope",
+          "material": "HMPE",
+          "diameter_mm": 64,
+          "mbl_tons": 105.0,
+          "standard": "MEG4 / DNV",
+          "issue_date": "2025-01-15",
+      },
+      {
+          "cert_id": "CERT-HMPE-2025-02",
+          "manufacturer": "Katradis",
+          "material": "HMPE",
+          "diameter_mm": 64,
+          "mbl_tons": 105.0,
+          "standard": "MEG4 / LRS",
+          "issue_date": "2025-02-10",
+      },
+      {
+          "cert_id": "CERT-TAIL-2025-A1",
+          "manufacturer": "Lankhorst",
+          "material": "Polyester",
+          "diameter_mm": 72,
+          "mbl_tons": 100.0,
+          "standard": "MEG4",
+          "issue_date": "2025-03-01",
+      },
+  ])
 
-    fig = go.Figure()
+if "mooring_stations" not in st.session_state:
+  st.session_state.mooring_stations = {
+      "Forward Station (Prua)": pd.DataFrame([
+          {
+              "winch_id": "W1",
+              "winch_type": "Split Drum",
+              "chock_id": "C1",
+              "chock_x_m": 150.0,
+              "chock_y_m": 2.0,
+              "chock_z_m": 12.0,
+              "brake_holding_tons": 84.0,
+          },
+          {
+              "winch_id": "W2",
+              "winch_type": "Split Drum",
+              "chock_id": "C2",
+              "chock_x_m": 150.0,
+              "chock_y_m": -2.0,
+              "chock_z_m": 12.0,
+              "brake_holding_tons": 84.0,
+          },
+          {
+              "winch_id": "W3",
+              "winch_type": "Single Drum",
+              "chock_id": "C3",
+              "chock_x_m": 138.0,
+              "chock_y_m": 18.0,
+              "chock_z_m": 10.0,
+              "brake_holding_tons": 84.0,
+          },
+          {
+              "winch_id": "W4",
+              "winch_type": "Single Drum",
+              "chock_id": "C4",
+              "chock_x_m": 110.0,
+              "chock_y_m": 18.0,
+              "chock_z_m": 8.0,
+              "brake_holding_tons": 84.0,
+          },
+      ]),
+      "Aft Station (Poppa)": pd.DataFrame([
+          {
+              "winch_id": "W5",
+              "winch_type": "Single Drum",
+              "chock_id": "C5",
+              "chock_x_m": -110.0,
+              "chock_y_m": 18.0,
+              "chock_z_m": 8.0,
+              "brake_holding_tons": 84.0,
+          },
+          {
+              "winch_id": "W6",
+              "winch_type": "Split Drum",
+              "chock_id": "C6",
+              "chock_x_m": -138.0,
+              "chock_y_m": 18.0,
+              "chock_z_m": 10.0,
+              "brake_holding_tons": 84.0,
+          },
+          {
+              "winch_id": "W7",
+              "winch_type": "Split Drum",
+              "chock_id": "C7",
+              "chock_x_m": -150.0,
+              "chock_y_m": 0.0,
+              "chock_z_m": 12.0,
+              "brake_holding_tons": 84.0,
+          },
+      ]),
+  }
 
-    total = result["total_vector"]
-    wind = result["wind_vector"]
-    current = result["current_vector"]
+if "lines_inventory" not in st.session_state:
+  st.session_state.lines_inventory = pd.DataFrame([
+      {
+          "line_id": "1",
+          "line_name": "Head Line 1",
+          "line_type": "Head",
+          "station_id": "Forward Station (Prua)",
+          "winch_id": "W1",
+          "cert_id": "CERT-HMPE-2025-01",
+          "chock_x_m": 150.0,
+          "chock_y_m": 2.0,
+          "chock_z_m": 12.0,
+          "material": "HMPE",
+          "diameter_mm": 64,
+          "E_modulus_GPa": 120,
+          "mbl_tons": 105.0,
+          "tail_length_m": 11.0,
+          "tail_diameter_mm": 72,
+          "tail_E_modulus_GPa": 6,
+          "tail_mbl_tons": 100.0,
+          "bollard_id": "B1",
+      },
+      {
+          "line_id": "2",
+          "line_name": "Head Line 2",
+          "line_type": "Head",
+          "station_id": "Forward Station (Prua)",
+          "winch_id": "W2",
+          "cert_id": "CERT-HMPE-2025-01",
+          "chock_x_m": 150.0,
+          "chock_y_m": -2.0,
+          "chock_z_m": 12.0,
+          "material": "HMPE",
+          "diameter_mm": 64,
+          "E_modulus_GPa": 120,
+          "mbl_tons": 105.0,
+          "tail_length_m": 11.0,
+          "tail_diameter_mm": 72,
+          "tail_E_modulus_GPa": 6,
+          "tail_mbl_tons": 100.0,
+          "bollard_id": "B1",
+      },
+      {
+          "line_id": "3",
+          "line_name": "Fwd Breast 1",
+          "line_type": "Fwd Breast",
+          "station_id": "Forward Station (Prua)",
+          "winch_id": "W3",
+          "cert_id": "CERT-HMPE-2025-02",
+          "chock_x_m": 138.0,
+          "chock_y_m": 18.0,
+          "chock_z_m": 10.0,
+          "material": "HMPE",
+          "diameter_mm": 64,
+          "E_modulus_GPa": 120,
+          "mbl_tons": 105.0,
+          "tail_length_m": 11.0,
+          "tail_diameter_mm": 72,
+          "tail_E_modulus_GPa": 6,
+          "tail_mbl_tons": 100.0,
+          "bollard_id": "B2",
+      },
+      {
+          "line_id": "4",
+          "line_name": "Fwd Spring 1",
+          "line_type": "Fwd Spring",
+          "station_id": "Forward Station (Prua)",
+          "winch_id": "W4",
+          "cert_id": "CERT-HMPE-2025-02",
+          "chock_x_m": 110.0,
+          "chock_y_m": 18.0,
+          "chock_z_m": 8.0,
+          "material": "HMPE",
+          "diameter_mm": 64,
+          "E_modulus_GPa": 120,
+          "mbl_tons": 105.0,
+          "tail_length_m": 0.0,
+          "tail_diameter_mm": 0,
+          "tail_E_modulus_GPa": 0,
+          "tail_mbl_tons": 0,
+          "bollard_id": "B3",
+      },
+      {
+          "line_id": "5",
+          "line_name": "Aft Spring 1",
+          "line_type": "Aft Spring",
+          "station_id": "Aft Station (Poppa)",
+          "winch_id": "W5",
+          "cert_id": "CERT-HMPE-2025-01",
+          "chock_x_m": -110.0,
+          "chock_y_m": 18.0,
+          "chock_z_m": 8.0,
+          "material": "HMPE",
+          "diameter_mm": 64,
+          "E_modulus_GPa": 120,
+          "mbl_tons": 105.0,
+          "tail_length_m": 0.0,
+          "tail_diameter_mm": 0,
+          "tail_E_modulus_GPa": 0,
+          "tail_mbl_tons": 0,
+          "bollard_id": "B4",
+      },
+      {
+          "line_id": "6",
+          "line_name": "Aft Breast 1",
+          "line_type": "Aft Breast",
+          "station_id": "Aft Station (Poppa)",
+          "winch_id": "W6",
+          "cert_id": "CERT-HMPE-2025-02",
+          "chock_x_m": -138.0,
+          "chock_y_m": 18.0,
+          "chock_z_m": 10.0,
+          "material": "HMPE",
+          "diameter_mm": 64,
+          "E_modulus_GPa": 120,
+          "mbl_tons": 105.0,
+          "tail_length_m": 11.0,
+          "tail_diameter_mm": 72,
+          "tail_E_modulus_GPa": 6,
+          "tail_mbl_tons": 100.0,
+          "bollard_id": "B5",
+      },
+      {
+          "line_id": "7",
+          "line_name": "Stern Line 1",
+          "line_type": "Stern",
+          "station_id": "Aft Station (Poppa)",
+          "winch_id": "W7",
+          "cert_id": "CERT-HMPE-2025-02",
+          "chock_x_m": -150.0,
+          "chock_y_m": 0.0,
+          "chock_z_m": 12.0,
+          "material": "HMPE",
+          "diameter_mm": 64,
+          "E_modulus_GPa": 120,
+          "mbl_tons": 105.0,
+          "tail_length_m": 11.0,
+          "tail_diameter_mm": 72,
+          "tail_E_modulus_GPa": 6,
+          "tail_mbl_tons": 100.0,
+          "bollard_id": "B5",
+      },
+  ])
 
-    vectors = [
-        ("Wind", wind),
-        ("Current", current),
-        ("Total", total),
-    ]
+def_bollards = [
+    {
+        "bollard_id": "B1",
+        "Posizione": "Prua",
+        "Dist_Estrema_m": 8.2,
+        "X_Coordinata_m": 153.6,
+        "Y_Coordinata_m": 25.0,
+        "Z_Altezza_m": -3.0,
+        "SWL_Bitta_t": 150,
+        "Stato": "Attivo",
+    },
+    {
+        "bollard_id": "B2",
+        "Posizione": "Prua",
+        "Dist_Estrema_m": 21.8,
+        "X_Coordinata_m": 140.0,
+        "Y_Coordinata_m": 25.0,
+        "Z_Altezza_m": -3.0,
+        "SWL_Bitta_t": 150,
+        "Stato": "Attivo",
+    },
+    {
+        "bollard_id": "B3",
+        "Posizione": "Prua",
+        "Dist_Estrema_m": 81.8,
+        "X_Coordinata_m": 80.0,
+        "Y_Coordinata_m": 25.0,
+        "Z_Altezza_m": -3.0,
+        "SWL_Bitta_t": 100,
+        "Stato": "Attivo",
+    },
+    {
+        "bollard_id": "B4",
+        "Posizione": "Poppa",
+        "Dist_Estrema_m": 81.8,
+        "X_Coordinata_m": -80.0,
+        "Y_Coordinata_m": 25.0,
+        "Z_Altezza_m": -3.0,
+        "SWL_Bitta_t": 100,
+        "Stato": "Attivo",
+    },
+    {
+        "bollard_id": "B5",
+        "Posizione": "Poppa",
+        "Dist_Estrema_m": 1.8,
+        "X_Coordinata_m": -160.0,
+        "Y_Coordinata_m": 25.0,
+        "Z_Altezza_m": -3.0,
+        "SWL_Bitta_t": 150,
+        "Stato": "Attivo",
+    },
+]
 
-    for name, vector in vectors:
+if "ports_bollards" not in st.session_state:
+  st.session_state.ports_bollards = {
+      "Long Beach Cruise Terminal": pd.DataFrame(def_bollards),
+      "Mazatlan Pier 4/5": pd.DataFrame(def_bollards),
+      "Mazatlan Pier 2/3": pd.DataFrame(def_bollards),
+      "La Paz": pd.DataFrame(def_bollards),
+      "Ensenada Pier #2": pd.DataFrame(def_bollards),
+      "Puerto Vallarta Pier #1": pd.DataFrame(def_bollards),
+      "Puerto Vallarta Pier #3": pd.DataFrame(def_bollards),
+  }
 
-        fig.add_trace(
-            go.Scatter(
-                x=[0, vector[0]],
-                y=[0, vector[1]],
-                mode="lines+markers",
-                name=name,
-            )
-        )
+if "port_headings" not in st.session_state:
+  st.session_state.port_headings = {
+      "Long Beach Cruise Terminal": 135.0,
+      "Mazatlan Pier 4/5": 315.0,
+      "Mazatlan Pier 2/3": 135.0,
+      "La Paz": 180.0,
+      "Ensenada Pier #2": 220.0,
+      "Puerto Vallarta Pier #1": 0.0,
+      "Puerto Vallarta Pier #3": 0.0,
+  }
 
-    fig.update_layout(
-        title="Environmental Force Vectors",
-        xaxis_title="Longitudinal Force [kN]",
-        yaxis_title="Transverse Force [kN]",
-        height=500,
-        showlegend=True,
-    )
-
-    fig.update_yaxes(
-        scaleanchor="x",
-        scaleratio=1,
-    )
-
-    return fig
-
+init_db(st.session_state.lines_inventory)
 
 # =============================================================================
-# INITIALIZATION
+# 6. BARRA LATERALE METEO
 # =============================================================================
-
-init_db()
-
-
-# =============================================================================
-# SIDEBAR
-# =============================================================================
-
-st.sidebar.title("⚓ OpenMooring")
-
-st.sidebar.divider()
-
-ports_df = get_ports()
-
-port_names = ports_df["port_name"].tolist()
+st.sidebar.header("🌐 Condizioni Meteo-Marine")
+meteo_mode = st.sidebar.radio(
+    "Modalità Meteo:",
+    ["Manuale", "Live API (Windy / Open-Meteo)"],
+    index=0,
+)
 
 selected_port = st.sidebar.selectbox(
-    "📍 Porto di riferimento",
-    port_names,
+    "📌 Porto di Riferimento", list(st.session_state.ports_bollards.keys())
 )
 
-selected_port_row = ports_df[
-    ports_df["port_name"] == selected_port
-].iloc[0]
+current_berth_heading = st.session_state.port_headings.get(selected_port, 0.0)
 
-berth_heading = float(
-    selected_port_row["berth_heading"]
-    if pd.notna(selected_port_row["berth_heading"])
-    else 0.0
-)
+if meteo_mode == "Live API (Windy / Open-Meteo)":
+  coords = PORT_COORDINATES.get(selected_port, {"lat": 33.7513, "lon": -118.1888})
+  success, live_w_speed, live_w_dir_true = fetch_live_weather(
+      coords["lat"], coords["lon"]
+  )
 
-meteo_mode = st.sidebar.radio(
-    "Condizioni meteo",
-    [
-        "Manuale",
-        "Live Open-Meteo",
-    ],
-)
-
-if meteo_mode == "Live Open-Meteo":
-
-    if st.sidebar.button("🔄 Aggiorna meteo live"):
-
-        st.cache_data.clear()
-
-    success, live_speed, live_direction, weather_time = (
-        fetch_live_weather(
-            selected_port_row["latitude"],
-            selected_port_row["longitude"],
-        )
+  if success:
+    relative_wind_dir = (live_w_dir_true - current_berth_heading) % 360
+    st.sidebar.success(
+        f"Meteo Live: {live_w_speed} kts @ {live_w_dir_true}° True"
     )
-
-    if success:
-
-        relative_direction = (
-            live_direction - berth_heading
-        ) % 360
-
-        st.sidebar.success(
-            f"{live_speed:.1f} kn @ "
-            f"{live_direction:.0f}° True"
-        )
-
-        st.sidebar.caption(
-            f"Data source time: {weather_time} UTC"
-        )
-
-        v_wind = live_speed
-        dir_wind = relative_direction
-
-    else:
-
-        st.sidebar.warning(
-            "Dati live non disponibili. "
-            "Inserire valori manuali."
-        )
-
-        v_wind = st.sidebar.number_input(
-            "Vento [kn]",
-            min_value=0.0,
-            value=0.0,
-        )
-
-        dir_wind = st.sidebar.number_input(
-            "Direzione relativa [°]",
-            min_value=0.0,
-            max_value=360.0,
-            value=0.0,
-        )
-
+    st.sidebar.info(
+        f"🧭 Orientamento Banchina: {current_berth_heading:.0f}° True\n\n"
+        f"💨 Vento Relativo Banchina: **{relative_wind_dir:.0f}°**"
+    )
+    v_wind = live_w_speed
+    dir_wind = relative_wind_dir
+  else:
+    st.sidebar.error("Impossibile contattare il server meteo. Uso manuale.")
+    v_wind = st.sidebar.slider("Vento (knots)", 0, 80, 30)
+    dir_wind = st.sidebar.slider("Direzione Vento Relativa (°)", 0, 360, 45)
 else:
+  v_wind = st.sidebar.slider("Vento (knots)", 0, 80, 30)
+  dir_wind = st.sidebar.slider("Direzione Vento Relativa (°)", 0, 360, 45)
 
-    v_wind = st.sidebar.number_input(
-        "Vento [kn]",
-        min_value=0.0,
-        value=0.0,
-    )
-
-    dir_wind = st.sidebar.number_input(
-        "Direzione vento relativa [°]",
-        min_value=0.0,
-        max_value=360.0,
-        value=0.0,
-    )
-
-
-v_curr = st.sidebar.number_input(
-    "Corrente [kn]",
-    min_value=0.0,
-    value=0.0,
-)
-
-dir_curr = st.sidebar.number_input(
-    "Direzione corrente [°]",
-    min_value=0.0,
-    max_value=360.0,
-    value=0.0,
-)
-
-st.sidebar.divider()
-
-if st.sidebar.button("💾 Backup Database"):
-
-    backup_file = backup_database()
-
-    if backup_file:
-
-        st.sidebar.success(
-            f"Backup creato: {backup_file}"
-        )
-
-    else:
-
-        st.sidebar.warning(
-            "Database non ancora disponibile."
-        )
-
+v_curr = st.sidebar.slider("Corrente (knots)", 0.0, 4.0, 0.5)
+dir_curr = st.sidebar.slider("Direzione Corrente (deg)", 0, 360, 0)
 
 # =============================================================================
-# MAIN UI
+# 7. INTERFACCIA TABS
 # =============================================================================
+st.title("⚓ OpenMooring - MEG4 Pro Suite")
 
-st.title(APP_TITLE)
-st.caption(
-    "Persistent Mooring Analysis, Certificate Management "
-    "and Environmental Load Calculation"
-)
-
-tabs = st.tabs([
-    "🏠 Dashboard",
-    "📜 Certificates",
-    "🪢 Mooring Lines",
-    "🏗️ Stations & Bollards",
-    "🌊 Analysis",
+(
+    tab_setup,
+    tab_certs,
+    tab_stations,
+    tab_3d_editor,
+    tab_sim,
+    tab_polar,
+    tab_maint,
+) = st.tabs([
+    "🚢 1. Dati Nave & Inventario",
+    "📜 2. Certificati Cavi (PDF Drag & Drop)",
+    "🏗️ 3. Pianetti Mooring Stations",
+    "🗺️ 4. Layout Banchina & Bitte",
+    "📊 5. Simulazione Tensioni",
+    "🌀 6. Inviluppo Polare",
+    "📈 7. Storico & Usura Cavi",
 ])
 
+# -----------------------------------------------------------------------------
+# TAB 1: DATI NAVE E CAVI
+# -----------------------------------------------------------------------------
+with tab_setup:
+  st.header("🚢 Particulars Nave e Inventario Cavi Attivi")
 
-# =============================================================================
-# DASHBOARD
-# =============================================================================
-
-with tabs[0]:
-
-    st.header("🏠 Home Dashboard")
-
-    certificates_df = get_certificates()
-    lines_df = get_lines()
-    stations_df = get_stations()
-    bollards_df = get_bollards()
-
-    total_lines = len(lines_df)
-
-    total_certificates = len(certificates_df)
-
-    total_stations = len(stations_df)
-
-    total_bollards = len(bollards_df)
-
-    missing_certificate = 0
-
-    if not lines_df.empty:
-
-        missing_certificate = int(
-            lines_df["cert_id"]
-            .isna()
-            .sum()
-        )
-
-    col1, col2, col3, col4 = st.columns(4)
-
-    col1.metric(
-        "Mooring Lines",
-        total_lines,
+  col_n1, col_n2, col_n3 = st.columns(3)
+  with col_n1:
+    ship_name = st.text_input("Nome Nave", "Carnival Panorama")
+    loa = st.number_input("LOA (m)", value=DEFAULT_SHIP["LOA"], step=0.1)
+  with col_n2:
+    beam = st.number_input(
+        "Larghezza / Beam (m)", value=DEFAULT_SHIP["Beam"], step=0.1
+    )
+    draft = st.number_input(
+        "Pescaggio (m)", value=DEFAULT_SHIP["Draft"], step=0.1
+    )
+  with col_n3:
+    alw = st.number_input(
+        "Area Vento Laterale ALW (m²)", value=DEFAULT_SHIP["ALW"], step=10.0
+    )
+    afw = st.number_input(
+        "Area Vento Frontale AFW (m²)", value=DEFAULT_SHIP["AFW"], step=10.0
     )
 
-    col2.metric(
-        "Certificates",
-        total_certificates,
+  ship_dict = {
+      "LOA": loa,
+      "Beam": beam,
+      "Draft": draft,
+      "ALW": alw,
+      "AFW": afw,
+      "ALC": DEFAULT_SHIP["ALC"],
+  }
+
+  st.subheader("📋 Inventario Cavi & Mappatura")
+  edited_lines = st.data_editor(
+      st.session_state.lines_inventory,
+      num_rows="dynamic",
+      use_container_width=True,
+      key="lines_editor",
+  )
+  st.session_state.lines_inventory = edited_lines
+
+# -----------------------------------------------------------------------------
+# TAB 2: CERTIFICATI CAVI (DRAG & DROP PDF + PARSING AUTOMATICO)
+# -----------------------------------------------------------------------------
+with tab_certs:
+  st.header("📜 Modulo Certificati Cavi & Drag and Drop PDF")
+  st.info(
+      "📁 **Drag & Drop Certificato:** Trascina direttamente il file PDF del"
+      " certificato del cavo. Il sistema estrarrà il testo, eseguirà il parsing"
+      " Regex di MBL, Diametro e Costruttore e lo salverà nel database."
+  )
+
+  c_col1, c_col2 = st.columns([1, 1])
+
+  with c_col1:
+    st.subheader("📤 Carica File PDF Certificato")
+    uploaded_pdf = st.file_uploader(
+        "Trascina qui il file PDF del Certificato",
+        type=["pdf"],
+        help="Carica il file PDF inviato dal produttore del cavo",
     )
 
-    col3.metric(
-        "Stations",
-        total_stations,
+    cert_text_to_parse = ""
+
+    if uploaded_pdf is not None:
+      st.success(f"File caricato: {uploaded_pdf.name}")
+      cert_text_to_parse = extract_text_from_pdf(uploaded_pdf)
+      with st.expander("📄 Testo estratto dal PDF"):
+        st.text_area(
+            "Anteprima Testo", cert_text_to_parse, height=150, disabled=True
+        )
+
+    st.subheader("📝 Inserimento Manuale Alternate")
+    manual_text = st.text_area(
+        "Oppure incolla qui il testo del certificato",
+        height=100,
+        placeholder="Certificate No: CERT-2026-X ...",
+    )
+    if manual_text:
+      cert_text_to_parse = manual_text
+
+    if st.button("🔍 Esegui Parsing Certificato"):
+      if cert_text_to_parse:
+        parsed = parse_certificate_text(cert_text_to_parse)
+        st.success("Parsing completato!")
+        st.json(parsed)
+
+        new_cert_id = (
+            parsed["cert_id"]
+            or f"CERT-{len(st.session_state.certificates_db)+1}"
+        )
+
+        new_cert = {
+            "cert_id": new_cert_id,
+            "manufacturer": parsed["manufacturer"] or "Unknown",
+            "material": parsed["material"] or "HMPE",
+            "diameter_mm": parsed["diameter_mm"] or 64,
+            "mbl_tons": parsed["mbl_tons"] or 105.0,
+            "standard": parsed["standard"] or "MEG4",
+            "issue_date": datetime.now().strftime("%Y-%m-%d"),
+        }
+
+        # Aggiornamento/Inserimento nel DB
+        st.session_state.certificates_db = pd.concat(
+            [st.session_state.certificates_db, pd.DataFrame([new_cert])],
+            ignore_index=True,
+        ).drop_duplicates(subset=["cert_id"], keep="last")
+
+        st.success(f"Certificato {new_cert_id} salvato nel database!")
+        st.rerun()
+
+  with c_col2:
+    st.subheader("📚 Database Certificati Registrati")
+    st.dataframe(
+        st.session_state.certificates_db,
+        use_container_width=True,
+        height=280,
     )
 
-    col4.metric(
-        "Bollards",
-        total_bollards,
+    st.subheader("🔗 Associa Certificato a Linea d'Ormeggio")
+    col_sel1, col_sel2 = st.columns(2)
+    selected_line = col_sel1.selectbox(
+        "Seleziona Linea", st.session_state.lines_inventory["line_name"]
+    )
+    selected_cert = col_sel2.selectbox(
+        "Seleziona Certificato", st.session_state.certificates_db["cert_id"]
     )
 
-    st.divider()
+    if st.button("🔗 Applica Certificato a Linea"):
+      cert_row = st.session_state.certificates_db[
+          st.session_state.certificates_db["cert_id"] == selected_cert
+      ].iloc[0]
+      idx = st.session_state.lines_inventory[
+          st.session_state.lines_inventory["line_name"] == selected_line
+      ].index
 
-    st.subheader("⚠️ Data Quality Alerts")
-
-    alerts = []
-
-    if total_lines == 0:
-
-        alerts.append(
-            "No mooring lines are currently registered."
-        )
-
-    if missing_certificate > 0:
-
-        alerts.append(
-            f"{missing_certificate} line(s) do not have an associated certificate."
-        )
-
-    if not lines_df.empty:
-
-        missing_mbl = lines_df["mbl_kn"].isna().sum()
-
-        if missing_mbl > 0:
-
-            alerts.append(
-                f"{missing_mbl} line(s) do not have a verified MBL."
-            )
-
-        missing_brake = (
-            lines_df["brake_holding_capacity_kn"]
-            .isna()
-            .sum()
-        )
-
-        if missing_brake > 0:
-
-            alerts.append(
-                f"{missing_brake} line(s) do not have Brake Holding Capacity data."
-            )
-
-    if alerts:
-
-        for alert in alerts:
-            st.warning(alert)
-
-    else:
-
-        st.success(
-            "No critical data completeness alerts detected."
-        )
-
-    st.divider()
-
-    st.subheader("Current Inventory")
-
-    if not lines_df.empty:
-
-        display_columns = [
-            col for col in [
-                "line_name",
-                "station",
-                "line_type",
-                "material",
-                "diameter_mm",
-                "mbl_kn",
-                "cert_id",
-                "condition",
-            ]
-            if col in lines_df.columns
+      if not idx.empty:
+        st.session_state.lines_inventory.loc[idx[0], "cert_id"] = selected_cert
+        st.session_state.lines_inventory.loc[idx[0], "mbl_tons"] = cert_row[
+            "mbl_tons"
         ]
-
-        st.dataframe(
-            lines_df[display_columns],
-            use_container_width=True,
+        st.session_state.lines_inventory.loc[idx[0], "diameter_mm"] = cert_row[
+            "diameter_mm"
+        ]
+        st.session_state.lines_inventory.loc[idx[0], "material"] = cert_row[
+            "material"
+        ]
+        st.success(
+            f"Linea '{selected_line}' aggiornata con MBL ({cert_row['mbl_tons']}t)"
+            f" dal certificato {selected_cert}!"
         )
+        st.rerun()
 
+# -----------------------------------------------------------------------------
+# TAB 3: MOORING STATIONS, DOWNLOAD PIANETTI & ANNOTAZIONE INTERATTIVA
+# -----------------------------------------------------------------------------
+with tab_stations:
+  st.header("🏗️ Mappatura Stazioni d'Ormeggio, Pianetti & Annotazione")
+
+  station_sel = st.selectbox(
+      "Seleziona Stazione d'Ormeggio",
+      list(st.session_state.mooring_stations.keys()),
+  )
+  st_df = st.session_state.mooring_stations[station_sel]
+
+  st.subheader(f"⚙️ Configurazione Dati: {station_sel}")
+  edited_st = st.data_editor(
+      st_df,
+      num_rows="dynamic",
+      use_container_width=True,
+      key=f"edit_st_{station_sel}",
+  )
+  st.session_state.mooring_stations[station_sel] = edited_st
+
+  # Generazione Figura Grafica Pianetto
+  fig_st = go.Figure()
+
+  # Disegno dei guidacavi / chocks / verricelli
+  fig_st.add_trace(
+      go.Scatter(
+          x=edited_st["chock_x_m"],
+          y=edited_st["chock_y_m"],
+          mode="markers+text",
+          marker=dict(size=18, color="darkorange", symbol="square"),
+          text=edited_st["winch_id"] + " (" + edited_st["chock_id"] + ")",
+          textposition="top center",
+          name="Winch / Chock Position",
+      )
+  )
+
+  fig_st.update_layout(
+      title=f"Pianetto Grafico Vetrina - {station_sel}",
+      xaxis_title="Coordinata X Longitudinale (m)",
+      yaxis_title="Coordinata Y Trasversale (m)",
+      height=380,
+  )
+
+  col_plan1, col_plan2 = st.columns([1, 1])
+
+  with col_plan1:
+    st.plotly_chart(fig_st, use_container_width=True)
+
+    # Export Pianetto in HTML / Formato Immagine
+    buffer = io.StringIO()
+    fig_st.write_html(buffer, include_plotlyjs="cdn")
+    html_bytes = buffer.getvalue().encode()
+
+    st.download_button(
+        label="💾 Scarica Pianetto (Interactive HTML)",
+        data=html_bytes,
+        file_name=f"pianetto_{station_sel.replace(' ', '_')}.html",
+        mime="text/html",
+    )
+
+  with col_plan2:
+    st.subheader("🖌️ Identificazione & Annotazione Manuale Pianetto")
+    st.write(
+        "Disegna o annota a mano sul canvas sottostante per identificare verricelli,"
+        " tamburi e numeri cavo:"
+    )
+
+    if HAS_CANVAS:
+      drawing_mode = st.selectbox(
+          "Strumento di Disegno:",
+          ["freedraw", "circle", "rect", "line", "transform"],
+      )
+      stroke_color = st.color_picker("Colore Penna", "#FF0000")
+      stroke_width = st.slider("Spessore Penna", 1, 10, 3)
+
+      canvas_result = st_canvas(
+          fill_color="rgba(255, 165, 0, 0.3)",
+          stroke_width=stroke_width,
+          stroke_color=stroke_color,
+          background_color="#f0f2f6",
+          height=300,
+          width=500,
+          drawing_mode=drawing_mode,
+          key=f"canvas_{station_sel}",
+      )
     else:
+      st.warning(
+          "Modulo `streamlit-drawable-canvas` non installato. Per abilitare la"
+          " lavagna interattiva esegui: `pip install streamlit-drawable-canvas`"
+      )
 
-        st.info(
-            "Add mooring lines from the Mooring Lines tab."
-        )
+# -----------------------------------------------------------------------------
+# TAB 4: EDITOR BITTE CON MISURE RANGEFINDER (PRUA / POPPA) & ALLINEAMENTO BANCHINA
+# -----------------------------------------------------------------------------
+with tab_3d_editor:
+  st.header(f"🗺️ Layout Banchina & Bitte: {selected_port}")
+  st.info(
+      "📏 **Misurazione Banchina (Rangefinder):** Le coordinate X sono inserite"
+      " come **distanza dall'estrema prua** (per bitte a prua) o **dall'estrema"
+      " poppa** (per bitte a poppa)."
+  )
 
+  st.subheader("📐 Orientamento e Allineamento Banchina")
+  berth_heading = st.number_input(
+      "Orientamento Banchina / Berth True Heading (° True)",
+      min_value=0.0,
+      max_value=360.0,
+      value=float(st.session_state.port_headings.get(selected_port, 135.0)),
+      step=1.0,
+      key=f"heading_input_{selected_port}",
+  )
+  st.session_state.port_headings[selected_port] = berth_heading
 
-# =============================================================================
-# CERTIFICATES
-# =============================================================================
+  st.divider()
 
-with tabs[1]:
+  df_bollards = st.session_state.ports_bollards[selected_port]
 
-    st.header("📜 Certificate Management")
+  st.subheader("➕ Aggiungi Bitta alla Banchina")
+  c_add1, c_add2, c_add3, c_add4, c_add5, c_add6 = st.columns(6)
 
-    col1, col2 = st.columns(2)
+  new_b_id = c_add1.text_input("ID Bitta", f"B{len(df_bollards) + 1}")
+  new_pos = c_add2.selectbox("Zona Bitta", ["Prua", "Poppa"])
+  new_dist = c_add3.number_input("Dist. Estrema (m)", min_value=0.0, value=15.0)
+  new_y = c_add4.number_input("Dist. Banchina Y (m)", value=25.0)
+  new_z = c_add5.number_input("Altezza Z (m)", value=-3.0)
+  new_swl = c_add6.number_input("SWL Bitta (t)", value=150)
 
-    with col1:
+  col_btn1, col_btn2 = st.columns(2)
 
-        st.subheader("Upload Certificate")
-
-        uploaded_file = st.file_uploader(
-            "Upload PDF",
-            type=["pdf"],
-        )
-
-        manual_text = st.text_area(
-            "Or paste certificate text",
-            height=250,
-        )
-
-        certificate_text = ""
-
-        if uploaded_file is not None:
-
-            certificate_text = extract_pdf_text(
-                uploaded_file
-            )
-
-        if manual_text.strip():
-
-            certificate_text = manual_text
-
-        if st.button(
-            "🔍 Parse Certificate",
-            key="parse_certificate"
-        ):
-
-            if not certificate_text.strip():
-
-                st.error(
-                    "No certificate text available."
-                )
-
-            else:
-
-                parsed = parse_certificate_text(
-                    certificate_text
-                )
-
-                st.session_state[
-                    "parsed_certificate"
-                ] = parsed
-
-                st.success(
-                    "Certificate parsing completed."
-                )
-
-    with col2:
-
-        st.subheader("Parsed Data")
-
-        parsed = st.session_state.get(
-            "parsed_certificate",
-            {}
-        )
-
-        if parsed:
-
-            cert_id = st.text_input(
-                "Certificate ID",
-                value=parsed.get("cert_id") or "",
-            )
-
-            manufacturer = st.text_input(
-                "Manufacturer",
-                value=parsed.get("manufacturer") or "",
-            )
-
-            material = st.text_input(
-                "Material",
-                value=parsed.get("material") or "",
-            )
-
-            diameter = st.number_input(
-                "Diameter [mm]",
-                min_value=0.0,
-                value=float(
-                    parsed.get("diameter_mm") or 0.0
-                ),
-            )
-
-            mbl_kn = st.number_input(
-                "MBL [kN]",
-                min_value=0.0,
-                value=float(
-                    parsed.get("mbl_kn") or 0.0
-                ),
-            )
-
-            standard = st.text_input(
-                "Standard",
-                value=parsed.get("standard") or "",
-            )
-
-            issue_date = st.text_input(
-                "Issue Date",
-                value="",
-            )
-
-            expiry_date = st.text_input(
-                "Expiry Date",
-                value="",
-            )
-
-            if st.button(
-                "💾 Save Certificate"
-            ):
-
-                if not cert_id.strip():
-
-                    st.error(
-                        "Certificate ID is required."
-                    )
-
-                else:
-
-                    verified_mbl_kn = (
-                        mbl_kn
-                        if mbl_kn > 0
-                        else None
-                    )
-
-                    verified_diameter = (
-                        diameter
-                        if diameter > 0
-                        else None
-                    )
-
-                    upsert_certificate({
-
-                        "cert_id": cert_id.strip(),
-
-                        "manufacturer": (
-                            manufacturer.strip()
-                            or None
-                        ),
-
-                        "material": (
-                            material.strip()
-                            or None
-                        ),
-
-                        "diameter_mm": verified_diameter,
-
-                        "mbl_kn": verified_mbl_kn,
-
-                        "mbl_tons": (
-                            kn_to_tonnes(
-                                verified_mbl_kn
-                            )
-                            if verified_mbl_kn
-                            else None
-                        ),
-
-                        "standard": (
-                            standard.strip()
-                            or None
-                        ),
-
-                        "issue_date": (
-                            issue_date.strip()
-                            or None
-                        ),
-
-                        "expiry_date": (
-                            expiry_date.strip()
-                            or None
-                        ),
-
-                        "source_text": (
-                            parsed.get(
-                                "source_text",
-                                ""
-                            )
-                        ),
-                    })
-
-                    st.success(
-                        f"Certificate {cert_id} saved."
-                    )
-
-                    st.rerun()
-
-        else:
-
-            st.info(
-                "Upload or paste a certificate and run the parser."
-            )
-
-    st.divider()
-
-    st.subheader("Registered Certificates")
-
-    certificates_df = get_certificates()
-
-    st.dataframe(
-        certificates_df,
-        use_container_width=True,
+  if col_btn1.button("➕ Aggiungi Bitta a Prua"):
+    x_abs = (loa / 2.0) - new_dist
+    new_row = {
+        "bollard_id": new_b_id,
+        "Posizione": "Prua",
+        "Dist_Estrema_m": new_dist,
+        "X_Coordinata_m": x_abs,
+        "Y_Coordinata_m": new_y,
+        "Z_Altezza_m": new_z,
+        "SWL_Bitta_t": new_swl,
+        "Stato": "Attivo",
+    }
+    st.session_state.ports_bollards[selected_port] = pd.concat(
+        [df_bollards, pd.DataFrame([new_row])], ignore_index=True
     )
+    st.rerun()
 
-
-# =============================================================================
-# MOORING LINES
-# =============================================================================
-
-with tabs[2]:
-
-    st.header("🪢 Mooring Line Inventory")
-
-    certificates_df = get_certificates()
-
-    with st.expander(
-        "➕ Add / Update Mooring Line",
-        expanded=False,
-    ):
-
-        with st.form("line_form"):
-
-            line_name = st.text_input(
-                "Line Name"
-            )
-
-            station = st.text_input(
-                "Station"
-            )
-
-            line_type = st.selectbox(
-                "Line Type",
-                [
-                    "",
-                    "Head Line",
-                    "Stern Line",
-                    "Breast Line",
-                    "Spring Line",
-                    "Other",
-                ],
-            )
-
-            material = st.text_input(
-                "Material"
-            )
-
-            diameter_mm = st.number_input(
-                "Diameter [mm]",
-                min_value=0.0,
-            )
-
-            length_m = st.number_input(
-                "Length [m]",
-                min_value=0.0,
-            )
-
-            mbl_kn = st.number_input(
-                "MBL [kN]",
-                min_value=0.0,
-            )
-
-            brake_holding_capacity_kn = (
-                st.number_input(
-                    "Brake Holding Capacity [kN]",
-                    min_value=0.0,
-                    help=(
-                        "Leave at zero if the verified "
-                        "value is not currently available."
-                    ),
-                )
-            )
-
-            condition = st.selectbox(
-                "Condition",
-                [
-                    "Unknown",
-                    "Good",
-                    "Fair",
-                    "Monitor",
-                    "Replace",
-                ],
-            )
-
-            notes = st.text_area(
-                "Notes"
-            )
-
-            submitted = st.form_submit_button(
-                "💾 Save Line"
-            )
-
-        if submitted:
-
-            if not line_name.strip():
-
-                st.error(
-                    "Line Name is required."
-                )
-
-            else:
-
-                verified_mbl = (
-                    mbl_kn
-                    if mbl_kn > 0
-                    else None
-                )
-
-                verified_brake = (
-                    brake_holding_capacity_kn
-                    if brake_holding_capacity_kn > 0
-                    else None
-                )
-
-                upsert_line({
-
-                    "line_name": line_name.strip(),
-
-                    "station": (
-                        station.strip()
-                        or None
-                    ),
-
-                    "line_type": (
-                        line_type
-                        or None
-                    ),
-
-                    "material": (
-                        material.strip()
-                        or None
-                    ),
-
-                    "diameter_mm": (
-                        diameter_mm
-                        if diameter_mm > 0
-                        else None
-                    ),
-
-                    "length_m": (
-                        length_m
-                        if length_m > 0
-                        else None
-                    ),
-
-                    "mbl_kn": verified_mbl,
-
-                    "mbl_tons": (
-                        kn_to_tonnes(
-                            verified_mbl
-                        )
-                        if verified_mbl
-                        else None
-                    ),
-
-                    "cert_id": None,
-
-                    "brake_holding_capacity_kn": (
-                        verified_brake
-                    ),
-
-                    "condition": condition,
-
-                    "notes": (
-                        notes.strip()
-                        or None
-                    ),
-                })
-
-                st.success(
-                    f"Line {line_name} saved."
-                )
-
-                st.rerun()
-
-    lines_df = get_lines()
-
-    if not lines_df.empty:
-
-        st.subheader(
-            "Associate Certificate"
-        )
-
-        col1, col2 = st.columns(2)
-
-        selected_line = col1.selectbox(
-            "Select Line",
-            lines_df["line_name"].tolist(),
-        )
-
-        if not certificates_df.empty:
-
-            selected_cert = col2.selectbox(
-                "Select Certificate",
-                certificates_df["cert_id"].tolist(),
-            )
-
-            if st.button(
-                "🔗 Apply Certificate"
-            ):
-
-                cert = certificates_df[
-                    certificates_df["cert_id"]
-                    == selected_cert
-                ].iloc[0]
-
-                update_line_certificate(
-                    selected_line,
-                    cert,
-                )
-
-                st.success(
-                    "Certificate applied to line."
-                )
-
-                st.rerun()
-
-        else:
-
-            st.info(
-                "No certificates available."
-            )
-
-    st.divider()
-
-    lines_df = get_lines()
-
-    st.dataframe(
-        lines_df,
-        use_container_width=True,
+  if col_btn2.button("➕ Aggiungi Bitta a Poppa"):
+    x_abs = -(loa / 2.0) + new_dist
+    new_row = {
+        "bollard_id": new_b_id,
+        "Posizione": "Poppa",
+        "Dist_Estrema_m": new_dist,
+        "X_Coordinata_m": x_abs,
+        "Y_Coordinata_m": new_y,
+        "Z_Altezza_m": new_z,
+        "SWL_Bitta_t": new_swl,
+        "Stato": "Attivo",
+    }
+    st.session_state.ports_bollards[selected_port] = pd.concat(
+        [df_bollards, pd.DataFrame([new_row])], ignore_index=True
     )
-
-
-# =============================================================================
-# STATIONS AND BOLLARDS
-# =============================================================================
-
-with tabs[3]:
-
-    st.header("🏗️ Mooring Stations & Bollards")
-
-    col_station, col_bollard = st.columns(2)
-
-    with col_station:
-
-        st.subheader("Mooring Station")
-
-        with st.form("station_form"):
-
-            station_name = st.text_input(
-                "Station Name"
-            )
-
-            x_m = st.number_input(
-                "X [m]",
-                value=0.0,
-            )
-
-            y_m = st.number_input(
-                "Y [m]",
-                value=0.0,
-            )
-
-            z_m = st.number_input(
-                "Z [m]",
-                value=0.0,
-            )
-
-            side = st.selectbox(
-                "Side",
-                [
-                    "",
-                    "Port",
-                    "Starboard",
-                    "Center",
-                ],
-            )
-
-            notes = st.text_area(
-                "Station Notes"
-            )
-
-            if st.form_submit_button(
-                "Save Station"
-            ):
-
-                if station_name.strip():
-
-                    upsert_station({
-
-                        "station_name": (
-                            station_name.strip()
-                        ),
-
-                        "x_m": x_m,
-
-                        "y_m": y_m,
-
-                        "z_m": z_m,
-
-                        "side": side or None,
-
-                        "notes": (
-                            notes.strip()
-                            or None
-                        ),
-                    })
-
-                    st.success(
-                        "Station saved."
-                    )
-
-                    st.rerun()
-
-                else:
-
-                    st.error(
-                        "Station name is required."
-                    )
-
-    with col_bollard:
-
-        st.subheader("Bollard")
-
-        with st.form("bollard_form"):
-
-            bollard_name = st.text_input(
-                "Bollard Name"
-            )
-
-            station_name = st.text_input(
-                "Associated Station"
-            )
-
-            x_m = st.number_input(
-                "Bollard X [m]",
-                value=0.0,
-            )
-
-            y_m = st.number_input(
-                "Bollard Y [m]",
-                value=0.0,
-            )
-
-            z_m = st.number_input(
-                "Bollard Z [m]",
-                value=0.0,
-            )
-
-            swl_kn = st.number_input(
-                "SWL [kN]",
-                min_value=0.0,
-            )
-
-            notes = st.text_area(
-                "Bollard Notes"
-            )
-
-            if st.form_submit_button(
-                "Save Bollard"
-            ):
-
-                if bollard_name.strip():
-
-                    upsert_bollard({
-
-                        "bollard_name": (
-                            bollard_name.strip()
-                        ),
-
-                        "station_name": (
-                            station_name.strip()
-                            or None
-                        ),
-
-                        "x_m": x_m,
-
-                        "y_m": y_m,
-
-                        "z_m": z_m,
-
-                        "swl_kn": (
-                            swl_kn
-                            if swl_kn > 0
-                            else None
-                        ),
-
-                        "notes": (
-                            notes.strip()
-                            or None
-                        ),
-                    })
-
-                    st.success(
-                        "Bollard saved."
-                    )
-
-                    st.rerun()
-
-                else:
-
-                    st.error(
-                        "Bollard name is required."
-                    )
-
-    st.divider()
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-
-        st.subheader("Stations")
-
-        st.dataframe(
-            get_stations(),
-            use_container_width=True,
-        )
-
-    with col2:
-
-        st.subheader("Bollards")
-
-        st.dataframe(
-            get_bollards(),
-            use_container_width=True,
-        )
-
-
-# =============================================================================
-# ANALYSIS
-# =============================================================================
-
-with tabs[4]:
-
-    st.header("🌊 Mooring Analysis")
-
-    st.subheader(
-        "Environmental Input"
-    )
-
-    col1, col2, col3 = st.columns(3)
-
-    with col1:
-
-        projected_wind_area = st.number_input(
-            "Projected Wind Area [m²]",
-            min_value=0.0,
-            value=0.0,
-        )
-
-        air_drag_coefficient = st.number_input(
-            "Air Drag Coefficient",
-            min_value=0.0,
-            value=1.0,
-        )
-
-    with col2:
-
-        projected_current_area = st.number_input(
-            "Projected Current Area [m²]",
-            min_value=0.0,
-            value=0.0,
-        )
-
-        water_drag_coefficient = st.number_input(
-            "Water Drag Coefficient",
-            min_value=0.0,
-            value=1.0,
-        )
-
-    with col3:
-
-        st.metric(
-            "Wind",
-            f"{v_wind:.1f} kn",
-        )
-
-        st.metric(
-            "Current",
-            f"{v_curr:.1f} kn",
-        )
-
-        st.metric(
-            "Port",
-            selected_port,
-        )
-
-    result = calculate_environmental_force(
-
-        wind_speed_kn=v_wind,
-
-        wind_direction_deg=dir_wind,
-
-        current_speed_kn=v_curr,
-
-        current_direction_deg=dir_curr,
-
-        projected_wind_area_m2=(
-            projected_wind_area
-        ),
-
-        projected_current_area_m2=(
-            projected_current_area
-        ),
-
-        air_drag_coefficient=(
-            air_drag_coefficient
-        ),
-
-        water_drag_coefficient=(
-            water_drag_coefficient
-        ),
-    )
-
-    st.divider()
-
-    c1, c2, c3 = st.columns(3)
-
-    c1.metric(
-        "Wind Force",
-        f"{result['wind_force_kn']:.2f} kN",
-    )
-
-    c2.metric(
-        "Current Force",
-        f"{result['current_force_kn']:.2f} kN",
-    )
-
-    c3.metric(
-        "Resultant Force",
-        f"{result['total_force_kn']:.2f} kN",
-    )
-
-    st.plotly_chart(
-        create_force_plot(result),
-        use_container_width=True,
-    )
-
-    st.divider()
-
-    st.subheader(
-        "Mooring Line Equilibrium"
-    )
-
-    lines_df = get_lines()
-
-    if lines_df.empty:
-
-        st.info(
-            "No mooring lines available for analysis."
-        )
-
+    st.rerun()
+
+  st.divider()
+
+  df_curr = st.session_state.ports_bollards[selected_port].copy()
+  calc_x = []
+  for _, r in df_curr.iterrows():
+    if r.get("Posizione") == "Prua":
+      calc_x.append((loa / 2.0) - float(r.get("Dist_Estrema_m", 0)))
     else:
+      calc_x.append(-(loa / 2.0) + float(r.get("Dist_Estrema_m", 0)))
+  df_curr["X_Coordinata_m"] = calc_x
 
-        available_lines = (
-            lines_df["line_name"]
-            .tolist()
+  col_ed_left, col_ed_right = st.columns([1, 1])
+
+  with col_ed_left:
+    st.subheader("📋 Tabella Bitte Banchina")
+    edited_bollards = st.data_editor(
+        df_curr,
+        num_rows="dynamic",
+        use_container_width=True,
+        key=f"editor_{selected_port}",
+    )
+    st.session_state.ports_bollards[selected_port] = edited_bollards
+
+  with col_ed_right:
+    st.subheader("🌐 Visualizzazione Layout 3D")
+
+    fig_setup = go.Figure()
+    s_x = [-loa / 2, loa / 2 - 30, loa / 2, loa / 2 - 30, -loa / 2, -loa / 2]
+    s_y = [-beam / 2, -beam / 2, 0, beam / 2, beam / 2, -beam / 2]
+    s_z = [10.0] * len(s_x)
+    fig_setup.add_trace(
+        go.Scatter3d(
+            x=s_x,
+            y=s_y,
+            z=s_z,
+            mode="lines",
+            line=dict(color="navy", width=5),
+            name=f"Scafo ({ship_name})",
         )
+    )
 
-        selected_lines = st.multiselect(
-            "Select lines for calculation",
-            available_lines,
-            default=available_lines,
+    act_b = edited_bollards[edited_bollards["Stato"] == "Attivo"]
+    fig_setup.add_trace(
+        go.Scatter3d(
+            x=act_b["X_Coordinata_m"],
+            y=act_b["Y_Coordinata_m"],
+            z=act_b["Z_Altezza_m"],
+            mode="markers+text",
+            marker=dict(
+                size=9,
+                color=act_b["SWL_Bitta_t"],
+                colorscale="Viridis",
+                showscale=True,
+            ),
+            text=[
+                f"{r['bollard_id']} ({r['Posizione']}: {r['Dist_Estrema_m']}m,"
+                f" SWL:{r['SWL_Bitta_t']}t)"
+                for _, r in act_b.iterrows()
+            ],
+            textposition="top center",
+            name="Bitte",
         )
+    )
 
-        geometry_data = []
+    fig_setup.update_layout(
+        scene=dict(
+            aspectmode="data",
+            xaxis_title="X (m)",
+            yaxis_title="Y (m)",
+            zaxis_title="Z (m)",
+        ),
+        margin=dict(l=0, r=0, b=0, t=30),
+        height=520,
+    )
+    st.plotly_chart(fig_setup, use_container_width=True)
 
-        for line_name in selected_lines:
-
-            with st.expander(
-                f"Geometry: {line_name}"
-            ):
-
-                c1, c2, c3, c4 = st.columns(4)
-
-                start_x = c1.number_input(
-                    "Ship X [m]",
-                    value=0.0,
-                    key=f"{line_name}_sx",
-                )
-
-                start_y = c2.number_input(
-                    "Ship Y [m]",
-                    value=0.0,
-                    key=f"{line_name}_sy",
-                )
-
-                end_x = c3.number_input(
-                    "Shore X [m]",
-                    value=0.0,
-                    key=f"{line_name}_ex",
-                )
-
-                end_y = c4.number_input(
-                    "Shore Y [m]",
-                    value=0.0,
-                    key=f"{line_name}_ey",
-                )
-
-                geometry = calculate_line_geometry(
-
-                    [start_x, start_y, 0.0],
-
-                    [end_x, end_y, 0.0],
-                )
-
-                if geometry["valid"]:
-
-                    st.caption(
-                        f"Angle: "
-                        f"{geometry['horizontal_angle_deg']:.1f}° | "
-                        f"Distance: "
-                        f"{geometry['distance_m']:.2f} m"
-                    )
-
-                    geometry_data.append({
-
-                        "line_name": line_name,
-
-                        "vector": (
-                            geometry[
-                                "unit_horizontal"
-                            ]
-                        ),
-                    })
-
-                else:
-
-                    st.error(
-                        geometry["reason"]
-                    )
-
-        if (
-            st.button(
-                "⚙️ Calculate Line Equilibrium"
-            )
-            and geometry_data
-        ):
-
-            vectors = [
-                item["vector"]
-                for item in geometry_data
-            ]
-
-            external_force = (
-                result["total_vector"]
-            )
-
-            solution = solve_line_tensions(
-                vectors,
-                external_force,
-            )
-
-            if solution["success"]:
-
-                tension_values = (
-                    solution["tensions_kn"]
-                )
-
-                output = []
-
-                for i, item in enumerate(
-                    geometry_data
-                ):
-
-                    line_row = lines_df[
-                        lines_df["line_name"]
-                        == item["line_name"]
-                    ].iloc[0]
-
-                    calculated_tension = float(
-                        tension_values[i]
-                    )
-
-                    mbl_kn = line_row["mbl_kn"]
-
-                    utilization = None
-
-                    if (
-                        pd.notna(mbl_kn)
-                        and mbl_kn > 0
-                    ):
-
-                        utilization = (
-                            abs(calculated_tension)
-                            / mbl_kn
-                            * 100
-                        )
-
-                    output.append({
-
-                        "Line": item[
-                            "line_name"
-                        ],
-
-                        "Calculated Tension [kN]": (
-                            calculated_tension
-                        ),
-
-                        "MBL [kN]": (
-                            mbl_kn
-                            if pd.notna(mbl_kn)
-                            else None
-                        ),
-
-                        "Utilization [%]": (
-                            utilization
-                        ),
-
-                        "Brake Holding Capacity [kN]": (
-                            line_row[
-                                "brake_holding_capacity_kn"
-                            ]
-                            if pd.notna(
-                                line_row[
-                                    "brake_holding_capacity_kn"
-                                ]
-                            )
-                            else None
-                        ),
-                    })
-
-                output_df = pd.DataFrame(
-                    output
-                )
-
-                st.success(
-                    f"Calculation completed using "
-                    f"{solution['method']}."
-                )
-
-                st.dataframe(
-                    output_df,
-                    use_container_width=True,
-                )
-
-                st.caption(
-                    f"Matrix rank: "
-                    f"{solution['matrix_rank']} | "
-                    f"Condition number: "
-                    f"{solution['condition_number']:.2e} | "
-                    f"Residual: "
-                    f"{solution['residual_norm_kn']:.6f} kN"
-                )
-
-                high_utilization = output_df[
-                    output_df["Utilization [%]"] > 100
-                ]
-
-                if not high_utilization.empty:
-
-                    st.error(
-                        "One or more lines exceed 100% of the stored MBL."
-                    )
-
-                elif output_df[
-                    "Utilization [%]"
-                ].notna().any():
-
-                    st.success(
-                        "No calculated line utilization exceeds 100% of stored MBL."
-                    )
-
-                with get_connection() as conn:
-
-                    conn.execute("""
-                    INSERT INTO analysis_history
-                    (
-                        timestamp,
-                        port_name,
-                        wind_speed_kn,
-                        wind_direction_deg,
-                        current_speed_kn,
-                        current_direction_deg,
-                        result_json
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                    """, (
-                        utc_now(),
-                        selected_port,
-                        v_wind,
-                        dir_wind,
-                        v_curr,
-                        dir_curr,
-                        output_df.to_json(
-                            orient="records"
-                        ),
-                    ))
-
-            else:
-
-                st.error(
-                    f"Calculation failed: "
-                    f"{solution['reason']}"
-                )
-
-
-# =============================================================================
-# FOOTER
-# =============================================================================
-
-st.divider()
-
-st.caption(
-    f"OpenMooring | Persistent SQLite Database | "
-    f"Database: {DB_FILE}"
+# Calcolo della geometria
+active_bollards_df = st.session_state.ports_bollards[selected_port]
+geom_df = calculate_line_geometry(
+    st.session_state.lines_inventory, active_bollards_df
 )
+
+# -----------------------------------------------------------------------------
+# TAB 5: SIMULAZIONE TENSIONI
+# -----------------------------------------------------------------------------
+with tab_sim:
+  if geom_df.empty:
+    st.error(
+        "⚠️ Nessuna corrispondenza trovata tra le bitte dei cavi e della"
+        " banchina."
+    )
+  else:
+    forces = calculate_environmental_forces(
+        v_wind,
+        dir_wind,
+        v_curr,
+        dir_curr,
+        ship_dict["AFW"],
+        ship_dict["ALW"],
+        ship_dict["ALC"],
+        ship_dict["LOA"],
+    )
+    results_df = solve_line_tensions_3d(geom_df, forces)
+
+    st.subheader(
+        f"Analisi Tensione Cavi: **{selected_port}** (Meteo: {v_wind} kts @"
+        f" {dir_wind}°)"
+    )
+
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Forza Longitudinale (Fx)", f"{forces['Fx_total_t']:.2f} t")
+    m2.metric("Forza Trasversale (Fy)", f"{forces['Fy_total_t']:.2f} t")
+    m3.metric("Momento Imbardata (Mz)", f"{forces['Mz_total_tm']:.2f} t·m")
+
+    fig_sim = go.Figure()
+    s_x = [-loa / 2, loa / 2 - 30, loa / 2, loa / 2 - 30, -loa / 2, -loa / 2]
+    s_y = [-beam / 2, -beam / 2, 0, beam / 2, beam / 2, -beam / 2]
+    fig_sim.add_trace(
+        go.Scatter3d(
+            x=s_x,
+            y=s_y,
+            z=[10.0] * len(s_x),
+            mode="lines",
+            line=dict(color="navy", width=5),
+            name="Nave",
+        )
+    )
+
+    for _, line in results_df.iterrows():
+      util = line["Util_Percent"]
+      col_line = (
+          "red" if util > 50.0 else ("orange" if util > 35.0 else "green")
+      )
+
+      fig_sim.add_trace(
+          go.Scatter3d(
+              x=[line["chock_x_m"], line["bollard_x_rendered"]],
+              y=[line["chock_y_m"], line["bollard_y_rendered"]],
+              z=[line["chock_z_m"], line["bollard_z_rendered"]],
+              mode="lines+markers",
+              line=dict(color=col_line, width=5),
+              name=f"{line['line_name']} ({line['Tension_tons']:.1f}t /"
+              f" {util:.1f}%)",
+          )
+      )
+
+    fig_sim.update_layout(
+        scene=dict(aspectmode="data"), margin=dict(l=0, r=0, b=0, t=20)
+    )
+    st.plotly_chart(fig_sim, use_container_width=True)
+
+    st.subheader("Carico Sulle Linee d'Ormeggio (% MBL)")
+    fig_bar = px.bar(
+        results_df,
+        x="line_name",
+        y="Util_Percent",
+        color="Util_Percent",
+        color_continuous_scale=["green", "yellow", "red"],
+        range_color=[0, 100],
+    )
+    fig_bar.add_hline(
+        y=50,
+        line_dash="dash",
+        line_color="red",
+        annotation_text="Limite MEG4 (50%)",
+    )
+    st.plotly_chart(fig_bar, use_container_width=True)
+
+    st.dataframe(
+        results_df[[
+            "line_name",
+            "cert_id",
+            "bollard_id",
+            "length_m",
+            "azimuth_deg",
+            "incline_deg",
+            "Tension_tons",
+            "Util_Percent",
+        ]]
+    )
+
+    if st.button("💾 Registra Sessione d'Ormeggio nel DB"):
+      log_mooring_session(results_df, selected_port)
+      st.success("Sessione salvata con successo nello storico usura!")
+
+# -----------------------------------------------------------------------------
+# TAB 6: INVILUPPO POLARE
+# -----------------------------------------------------------------------------
+with tab_polar:
+  st.subheader("Inviluppo Polare dei Limiti Operativi del Vento (0-360°)")
+
+  if st.button("Esegui Simulazione Polare") and not geom_df.empty:
+    with st.spinner("Calcolo dinamico in corso..."):
+      angles, max_winds = calculate_wind_operability_envelope(
+          geom_df,
+          ship_dict["AFW"],
+          ship_dict["ALW"],
+          ship_dict["ALC"],
+          ship_dict["LOA"],
+          v_curr=v_curr,
+          dir_curr=dir_curr,
+      )
+
+      fig_polar = go.Figure()
+      fig_polar.add_trace(
+          go.Scatterpolar(
+              r=max_winds,
+              theta=angles,
+              fill="toself",
+              fillcolor="rgba(0, 128, 0, 0.25)",
+              line=dict(color="green", width=2),
+          )
+      )
+
+      max_r = max(max_winds) + 10 if max_winds and len(max_winds) > 0 else 80
+
+      fig_polar.update_layout(
+          polar=dict(
+              radialaxis=dict(
+                  visible=True, range=[0, max_r], ticksuffix=" kts"
+              ),
+              angularaxis=dict(direction="clockwise", rotation=90),
+          ),
+          margin=dict(l=40, r=40, t=20, b=20),
+      )
+      st.plotly_chart(fig_polar, use_container_width=True)
+
+# -----------------------------------------------------------------------------
+# TAB 7: STORICO & USURA CAVI
+# -----------------------------------------------------------------------------
+with tab_maint:
+  st.subheader("📈 Registro Storico Usura & Suggerimento Sostituzione Cavi")
+
+  health_df = get_lines_health_status()
+  if not health_df.empty:
+    fig_health = px.bar(
+        health_df,
+        x="line_name",
+        y="Health_Percent",
+        color="Health_Percent",
+        color_continuous_scale=["red", "yellow", "green"],
+        range_color=[0, 100],
+    )
+    fig_health.add_hline(
+        y=20,
+        line_dash="dash",
+        line_color="red",
+        annotation_text="Soglia Sostituzione (20%)",
+    )
+    st.plotly_chart(fig_health, use_container_width=True)
+
+    st.dataframe(
+        health_df[[
+            "line_id",
+            "line_name",
+            "cert_id",
+            "accumulated_hours",
+            "high_load_hours",
+            "Health_Percent",
+            "Recommendation",
+        ]]
+    )
