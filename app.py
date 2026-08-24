@@ -187,6 +187,142 @@ def get_lines_health_status():
     df["Recommendation"] = recommendations
     return df
 
+
+# =============================================================================
+# 2. INTEGRATORE CERTIFICATI CAVI (PDF READ + PARSER MULTI-PRODUTTORE)
+# =============================================================================
+def extract_text_from_pdf(pdf_file):
+    try:
+        reader = PdfReader(pdf_file)
+        extracted_text = ""
+        for page in reader.pages:
+            text = page.extract_text()
+            if text:
+                extracted_text += text + "\n"
+        return extracted_text
+    except Exception as e:
+        st.error(f"Errore nella lettura del PDF: {e}")
+        return ""
+
+
+def extract_field_by_anchors(text: str, keywords: list) -> str:
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        for kw in keywords:
+            if kw.lower() in line.lower():
+                match = re.search(r"[:=\-]\s*(.+)", line)
+                if match and match.group(1).strip():
+                    return match.group(1).strip()
+                if i + 1 < len(lines) and lines[i + 1].strip():
+                    return lines[i + 1].strip()
+    return None
+
+
+def parse_certificate_text(text: str) -> dict:
+    data = {
+        "cert_id": None,
+        "manufacturer": None,
+        "material": None,
+        "diameter_mm": None,
+        "mbl_tons": None,
+        "length_m": None,
+        "standard": None,
+    }
+
+    if not text:
+        return data
+
+    raw_cert = extract_field_by_anchors(text, [
+        "Certificate No",
+        "Cert. No",
+        "Certificate Number",
+        "Certificato N",
+        "Test Certificate",
+        "Cert No",
+    ])
+    if raw_cert:
+        match = re.search(r"([A-Za-z0-9\-/]+)", raw_cert)
+        if match:
+            data["cert_id"] = match.group(1)
+
+    raw_mfg = extract_field_by_anchors(text, [
+        "Manufacturer",
+        "Costruttore",
+        "Maker",
+        "Producer",
+        "Factory",
+        "Issued by",
+    ])
+    if raw_mfg:
+        data["manufacturer"] = raw_mfg.split("\t")[0].strip()
+
+    mat_match = re.search(
+        r"\b(HMPE|Dyneema|Polyester|Polypropylene|Nylon|Wire|Steel|Aramid|Kevlar|Polyamide)\b",
+        text,
+        re.IGNORECASE,
+    )
+    if mat_match:
+        data["material"] = mat_match.group(1).upper()
+
+    dia_raw = extract_field_by_anchors(
+        text, ["Diameter", "Diametro", "Dia.", "Size"]
+    )
+    if dia_raw:
+        num_match = re.search(r"(\d+(?:[\.,]\d+)?)", dia_raw)
+        if num_match:
+            data["diameter_mm"] = float(num_match.group(1).replace(",", "."))
+    else:
+        dia_match = re.search(r"(\d+(?:[\.,]\d+)?)\s*mm\b", text, re.IGNORECASE)
+        if dia_match:
+            data["diameter_mm"] = float(dia_match.group(1).replace(",", "."))
+
+    mbl_raw = extract_field_by_anchors(text, [
+        "MBL",
+        "Breaking Load",
+        "Carico di Rottura",
+        "Minimum Breaking Load",
+        "MBF",
+    ])
+
+    if mbl_raw:
+        val_match = re.search(r"(\d+(?:[\.,]\d+)?)", mbl_raw)
+        if val_match:
+            val = float(val_match.group(1).replace(",", "."))
+            if re.search(r"kN\b", mbl_raw, re.IGNORECASE):
+                data["mbl_tons"] = round(val * KN_TO_TONS, 2)
+            elif re.search(r"(Tons|MT|\bt\b)", mbl_raw, re.IGNORECASE):
+                data["mbl_tons"] = val
+
+    if data["mbl_tons"] is None:
+        mbl_kn_match = re.search(
+            r"(?:MBL|Breaking Load|Carico)\D{0,15}(\d+(?:[\.,]\d+)?)\s*kN\b",
+            text,
+            re.IGNORECASE,
+        )
+        mbl_t_match = re.search(
+            r"(?:MBL|Breaking Load|Carico)\D{0,15}(\d+(?:[\.,]\d+)?)\s*(?:Tons|t|MT)\b",
+            text,
+            re.IGNORECASE,
+        )
+
+        if mbl_kn_match:
+            data["mbl_tons"] = round(
+                float(mbl_kn_match.group(1).replace(",", ".")) * KN_TO_TONS, 2
+            )
+        elif mbl_t_match:
+            data["mbl_tons"] = float(mbl_t_match.group(1).replace(",", "."))
+
+    std_match = re.search(
+        r"\b(MEG4|ISO\s*\d+|DNV\b|DNV-GL|Lloyd'?s(?:\s*Register)?|ABS\b|BV\b|ClassNK)\b",
+        text,
+        re.IGNORECASE,
+    )
+    if std_match:
+        data["standard"] = std_match.group(1)
+
+    return data
+
+
 # =============================================================================
 # 3. COORDINATE PORTO & METEO AUTOMATICO
 # =============================================================================
@@ -420,6 +556,352 @@ def calculate_wind_operability_envelope(
         max_safe_winds.append(safe_wind)
 
     return list(angles), max_safe_winds
+
+
+# =============================================================================
+# 5. SESSION STATE & INIZIALIZZAZIONE DATI
+# =============================================================================
+DEFAULT_SHIP = {
+    "LOA": 323.6,
+    "Beam": 37.2,
+    "Draft": 8.2,
+    "AFW": 1250.0,
+    "ALW": 6120.0,
+    "ALC": 1200.0,
+}
+
+if "certificates_db" not in st.session_state:
+    st.session_state.certificates_db = pd.DataFrame([
+        {
+            "cert_id": "CERT-HMPE-2025-01",
+            "manufacturer": "Samson Rope",
+            "material": "HMPE",
+            "diameter_mm": 64,
+            "mbl_tons": 105.0,
+            "standard": "MEG4 / DNV",
+            "issue_date": "2025-01-15",
+        },
+        {
+            "cert_id": "CERT-HMPE-2025-02",
+            "manufacturer": "Katradis",
+            "material": "HMPE",
+            "diameter_mm": 64,
+            "mbl_tons": 105.0,
+            "standard": "MEG4 / LRS",
+            "issue_date": "2025-02-10",
+        },
+        {
+            "cert_id": "CERT-TAIL-2025-A1",
+            "manufacturer": "Lankhorst",
+            "material": "Polyester",
+            "diameter_mm": 72,
+            "mbl_tons": 100.0,
+            "standard": "MEG4",
+            "issue_date": "2025-03-01",
+        },
+    ])
+
+if "mooring_stations" not in st.session_state:
+    st.session_state.mooring_stations = {
+        "Forward Station (Prua)": pd.DataFrame([
+            {
+                "winch_id": "W1",
+                "winch_type": "Split Drum",
+                "chock_id": "C1",
+                "chock_x_m": 150.0,
+                "chock_y_m": 2.0,
+                "chock_z_m": 12.0,
+                "brake_holding_tons": 84.0,
+            },
+            {
+                "winch_id": "W2",
+                "winch_type": "Split Drum",
+                "chock_id": "C2",
+                "chock_x_m": 150.0,
+                "chock_y_m": -2.0,
+                "chock_z_m": 12.0,
+                "brake_holding_tons": 84.0,
+            },
+            {
+                "winch_id": "W3",
+                "winch_type": "Single Drum",
+                "chock_id": "C3",
+                "chock_x_m": 138.0,
+                "chock_y_m": 18.0,
+                "chock_z_m": 10.0,
+                "brake_holding_tons": 84.0,
+            },
+            {
+                "winch_id": "W4",
+                "winch_type": "Single Drum",
+                "chock_id": "C4",
+                "chock_x_m": 110.0,
+                "chock_y_m": 18.0,
+                "chock_z_m": 8.0,
+                "brake_holding_tons": 84.0,
+            },
+        ]),
+        "Aft Station (Poppa)": pd.DataFrame([
+            {
+                "winch_id": "W5",
+                "winch_type": "Single Drum",
+                "chock_id": "C5",
+                "chock_x_m": -110.0,
+                "chock_y_m": 18.0,
+                "chock_z_m": 8.0,
+                "brake_holding_tons": 84.0,
+            },
+            {
+                "winch_id": "W6",
+                "winch_type": "Split Drum",
+                "chock_id": "C6",
+                "chock_x_m": -138.0,
+                "chock_y_m": 18.0,
+                "chock_z_m": 10.0,
+                "brake_holding_tons": 84.0,
+            },
+            {
+                "winch_id": "W7",
+                "winch_type": "Split Drum",
+                "chock_id": "C7",
+                "chock_x_m": -150.0,
+                "chock_y_m": 0.0,
+                "chock_z_m": 12.0,
+                "brake_holding_tons": 84.0,
+            },
+        ]),
+    }
+
+if "lines_inventory" not in st.session_state:
+    st.session_state.lines_inventory = pd.DataFrame([
+        {
+            "line_id": "1",
+            "line_name": "Head Line 1",
+            "line_type": "Head",
+            "station_id": "Forward Station (Prua)",
+            "winch_id": "W1",
+            "cert_id": "CERT-HMPE-2025-01",
+            "chock_x_m": 150.0,
+            "chock_y_m": 2.0,
+            "chock_z_m": 12.0,
+            "material": "HMPE",
+            "diameter_mm": 64,
+            "E_modulus_GPa": 120,
+            "mbl_tons": 105.0,
+            "tail_length_m": 11.0,
+            "tail_diameter_mm": 72,
+            "tail_E_modulus_GPa": 6,
+            "tail_mbl_tons": 100.0,
+            "bollard_id": "B1",
+        },
+        {
+            "line_id": "2",
+            "line_name": "Head Line 2",
+            "line_type": "Head",
+            "station_id": "Forward Station (Prua)",
+            "winch_id": "W2",
+            "cert_id": "CERT-HMPE-2025-01",
+            "chock_x_m": 150.0,
+            "chock_y_m": -2.0,
+            "chock_z_m": 12.0,
+            "material": "HMPE",
+            "diameter_mm": 64,
+            "E_modulus_GPa": 120,
+            "mbl_tons": 105.0,
+            "tail_length_m": 11.0,
+            "tail_diameter_mm": 72,
+            "tail_E_modulus_GPa": 6,
+            "tail_mbl_tons": 100.0,
+            "bollard_id": "B1",
+        },
+        {
+            "line_id": "3",
+            "line_name": "Fwd Breast 1",
+            "line_type": "Fwd Breast",
+            "station_id": "Forward Station (Prua)",
+            "winch_id": "W3",
+            "cert_id": "CERT-HMPE-2025-02",
+            "chock_x_m": 138.0,
+            "chock_y_m": 18.0,
+            "chock_z_m": 10.0,
+            "material": "HMPE",
+            "diameter_mm": 64,
+            "E_modulus_GPa": 120,
+            "mbl_tons": 105.0,
+            "tail_length_m": 11.0,
+            "tail_diameter_mm": 72,
+            "tail_E_modulus_GPa": 6,
+            "tail_mbl_tons": 100.0,
+            "bollard_id": "B2",
+        },
+        {
+            "line_id": "4",
+            "line_name": "Fwd Spring 1",
+            "line_type": "Fwd Spring",
+            "station_id": "Forward Station (Prua)",
+            "winch_id": "W4",
+            "cert_id": "CERT-HMPE-2025-02",
+            "chock_x_m": 110.0,
+            "chock_y_m": 18.0,
+            "chock_z_m": 8.0,
+            "material": "HMPE",
+            "diameter_mm": 64,
+            "E_modulus_GPa": 120,
+            "mbl_tons": 105.0,
+            "tail_length_m": 0.0,
+            "tail_diameter_mm": 0,
+            "tail_E_modulus_GPa": 0,
+            "tail_mbl_tons": 0,
+            "bollard_id": "B3",
+        },
+        {
+            "line_id": "5",
+            "line_name": "Aft Spring 1",
+            "line_type": "Aft Spring",
+            "station_id": "Aft Station (Poppa)",
+            "winch_id": "W5",
+            "cert_id": "CERT-HMPE-2025-01",
+            "chock_x_m": -110.0,
+            "chock_y_m": 18.0,
+            "chock_z_m": 8.0,
+            "material": "HMPE",
+            "diameter_mm": 64,
+            "E_modulus_GPa": 120,
+            "mbl_tons": 105.0,
+            "tail_length_m": 0.0,
+            "tail_diameter_mm": 0,
+            "tail_E_modulus_GPa": 0,
+            "tail_mbl_tons": 0,
+            "bollard_id": "B4",
+        },
+        {
+            "line_id": "6",
+            "line_name": "Aft Breast 1",
+            "line_type": "Aft Breast",
+            "station_id": "Aft Station (Poppa)",
+            "winch_id": "W6",
+            "cert_id": "CERT-HMPE-2025-02",
+            "chock_x_m": -138.0,
+            "chock_y_m": 18.0,
+            "chock_z_m": 10.0,
+            "material": "HMPE",
+            "diameter_mm": 64,
+            "E_modulus_GPa": 120,
+            "mbl_tons": 105.0,
+            "tail_length_m": 11.0,
+            "tail_diameter_mm": 72,
+            "tail_E_modulus_GPa": 6,
+            "tail_mbl_tons": 100.0,
+            "bollard_id": "B5",
+        },
+        {
+            "line_id": "7",
+            "line_name": "Stern Line 1",
+            "line_type": "Stern",
+            "station_id": "Aft Station (Poppa)",
+            "winch_id": "W7",
+            "cert_id": "CERT-HMPE-2025-02",
+            "chock_x_m": -150.0,
+            "chock_y_m": 0.0,
+            "chock_z_m": 12.0,
+            "material": "HMPE",
+            "diameter_mm": 64,
+            "E_modulus_GPa": 120,
+            "mbl_tons": 105.0,
+            "tail_length_m": 11.0,
+            "tail_diameter_mm": 72,
+            "tail_E_modulus_GPa": 6,
+            "tail_mbl_tons": 100.0,
+            "bollard_id": "B5",
+        },
+    ])
+
+def_bollards = [
+    {
+        "bollard_id": "B1",
+        "Posizione": "Prua",
+        "Dist_Inclinata_m": 15.0,
+        "Pendenza_deg": 0.0,
+        "Dist_Orizzontale_m": 15.0,
+        "X_Coordinata_m": 125.8,
+        "Y_Coordinata_m": 25.0,
+        "Z_Altezza_m": -3.0,
+        "SWL_Bitta_t": 150,
+        "Stato": "Attivo",
+    },
+    {
+        "bollard_id": "B2",
+        "Posizione": "Prua",
+        "Dist_Inclinata_m": 25.0,
+        "Pendenza_deg": 0.0,
+        "Dist_Orizzontale_m": 25.0,
+        "X_Coordinata_m": 115.8,
+        "Y_Coordinata_m": 25.0,
+        "Z_Altezza_m": -3.0,
+        "SWL_Bitta_t": 150,
+        "Stato": "Attivo",
+    },
+    {
+        "bollard_id": "B3",
+        "Posizione": "Prua",
+        "Dist_Inclinata_m": 60.0,
+        "Pendenza_deg": 0.0,
+        "Dist_Orizzontale_m": 60.0,
+        "X_Coordinata_m": 80.8,
+        "Y_Coordinata_m": 25.0,
+        "Z_Altezza_m": -3.0,
+        "SWL_Bitta_t": 100,
+        "Stato": "Attivo",
+    },
+    {
+        "bollard_id": "B4",
+        "Posizione": "Poppa",
+        "Dist_Inclinata_m": 65.0,
+        "Pendenza_deg": 0.0,
+        "Dist_Orizzontale_m": 65.0,
+        "X_Coordinata_m": -82.8,
+        "Y_Coordinata_m": 25.0,
+        "Z_Altezza_m": -3.0,
+        "SWL_Bitta_t": 100,
+        "Stato": "Attivo",
+    },
+    {
+        "bollard_id": "B5",
+        "Posizione": "Poppa",
+        "Dist_Inclinata_m": 10.0,
+        "Pendenza_deg": 0.0,
+        "Dist_Orizzontale_m": 10.0,
+        "X_Coordinata_m": -137.8,
+        "Y_Coordinata_m": 25.0,
+        "Z_Altezza_m": -3.0,
+        "SWL_Bitta_t": 150,
+        "Stato": "Attivo",
+    },
+]
+
+if "ports_bollards" not in st.session_state:
+    st.session_state.ports_bollards = {
+        "Long Beach Cruise Terminal": pd.DataFrame(def_bollards),
+        "Mazatlan Pier 4/5": pd.DataFrame(def_bollards),
+        "Mazatlan Pier 2/3": pd.DataFrame(def_bollards),
+        "La Paz": pd.DataFrame(def_bollards),
+        "Ensenada Pier #2": pd.DataFrame(def_bollards),
+        "Puerto Vallarta Pier #1": pd.DataFrame(def_bollards),
+        "Puerto Vallarta Pier #3": pd.DataFrame(def_bollards),
+    }
+
+if "port_headings" not in st.session_state:
+    st.session_state.port_headings = {
+        "Long Beach Cruise Terminal": 135.0,
+        "Mazatlan Pier 4/5": 315.0,
+        "Mazatlan Pier 2/3": 135.0,
+        "La Paz": 180.0,
+        "Ensenada Pier #2": 220.0,
+        "Puerto Vallarta Pier #1": 0.0,
+        "Puerto Vallarta Pier #3": 0.0,
+    }
+
+init_db(st.session_state.lines_inventory)
 
 # =============================================================================
 # 6. BARRA LATERALE METEO
@@ -939,6 +1421,153 @@ active_bollards_df = st.session_state.ports_bollards[selected_port]
 geom_df = calculate_line_geometry(
     st.session_state.lines_inventory, active_bollards_df
 )
+
+# -----------------------------------------------------------------------------
+# TAB 5: SIMULAZIONE TENSIONI
+# -----------------------------------------------------------------------------
+with tab_sim:
+    if geom_df.empty:
+        st.error(
+            "⚠️ Nessuna corrispondenza trovata tra le bitte dei cavi e della"
+            " banchina."
+        )
+    else:
+        forces = calculate_environmental_forces(
+            v_wind,
+            dir_wind,
+            v_curr,
+            dir_curr,
+            ship_dict["AFW"],
+            ship_dict["ALW"],
+            ship_dict["ALC"],
+            ship_dict["LOA"],
+        )
+        results_df = solve_line_tensions_3d(geom_df, forces)
+
+        st.subheader(
+            f"Analisi Tensione Cavi: **{selected_port}** (Meteo: {v_wind} kts @"
+            f" {dir_wind}°)"
+        )
+
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Forza Longitudinale (Fx)", f"{forces['Fx_total_t']:.2f} t")
+        m2.metric("Forza Trasversale (Fy)", f"{forces['Fy_total_t']:.2f} t")
+        m3.metric("Momento Imbardata (Mz)", f"{forces['Mz_total_tm']:.2f} t·m")
+
+        fig_sim = go.Figure()
+        s_x = [-loa / 2, loa / 2 - 30, loa / 2, loa / 2 - 30, -loa / 2, -loa / 2]
+        s_y = [-beam / 2, -beam / 2, 0, beam / 2, beam / 2, -beam / 2]
+        fig_sim.add_trace(
+            go.Scatter3d(
+                x=s_x,
+                y=s_y,
+                z=[10.0] * len(s_x),
+                mode="lines",
+                line=dict(color="navy", width=5),
+                name="Nave",
+            )
+        )
+
+        for _, line in results_df.iterrows():
+            util = line["Util_Percent"]
+            col_line = (
+                "red" if util > 50.0 else ("orange" if util > 35.0 else "green")
+            )
+
+            fig_sim.add_trace(
+                go.Scatter3d(
+                    x=[line["chock_x_m"], line["bollard_x_rendered"]],
+                    y=[line["chock_y_m"], line["bollard_y_rendered"]],
+                    z=[line["chock_z_m"], line["bollard_z_rendered"]],
+                    mode="lines+markers",
+                    line=dict(color=col_line, width=5),
+                    name=f"{line['line_name']} ({line['Tension_tons']:.1f}t /"
+                    f" {util:.1f}%)",
+                )
+            )
+
+        fig_sim.update_layout(
+            scene=dict(aspectmode="data"), margin=dict(l=0, r=0, b=0, t=20)
+        )
+        st.plotly_chart(fig_sim, use_container_width=True)
+
+        st.subheader("Carico Sulle Linee d'Ormeggio (% MBL)")
+        fig_bar = px.bar(
+            results_df,
+            x="line_name",
+            y="Util_Percent",
+            color="Util_Percent",
+            color_continuous_scale=["green", "yellow", "red"],
+            range_color=[0, 100],
+        )
+        fig_bar.add_hline(
+            y=50,
+            line_dash="dash",
+            line_color="red",
+            annotation_text="Limite MEG4 (50%)",
+        )
+        st.plotly_chart(fig_bar, use_container_width=True)
+
+        st.dataframe(
+            results_df[[
+                "line_name",
+                "cert_id",
+                "bollard_id",
+                "length_m",
+                "azimuth_deg",
+                "incline_deg",
+                "Tension_tons",
+                "Util_Percent",
+            ]]
+        )
+
+        if st.button("💾 Registra Sessione d'Ormeggio nel DB"):
+            log_mooring_session(results_df, selected_port)
+            st.success("Sessione salvata con successo nello storico usura!")
+
+# -----------------------------------------------------------------------------
+# TAB 6: INVILUPPO POLARE
+# -----------------------------------------------------------------------------
+with tab_polar:
+    st.subheader("Inviluppo Polare dei Limiti Operativi del Vento (0-360°)")
+
+    if st.button("Esegui Simulazione Polare") and not geom_df.empty:
+        with st.spinner("Calcolo dinamico in corso..."):
+            angles, max_winds = calculate_wind_operability_envelope(
+                geom_df,
+                ship_dict["AFW"],
+                ship_dict["ALW"],
+                ship_dict["ALC"],
+                ship_dict["LOA"],
+                v_curr=v_curr,
+                dir_curr=dir_curr,
+            )
+
+            fig_polar = go.Figure()
+            fig_polar.add_trace(
+                go.Scatterpolar(
+                    r=max_winds,
+                    theta=angles,
+                    fill="toself",
+                    fillcolor="rgba(0, 128, 0, 0.25)",
+                    line=dict(color="green", width=2),
+                )
+            )
+
+            max_r = (
+                max(max_winds) + 10 if max_winds and len(max_winds) > 0 else 80
+            )
+
+            fig_polar.update_layout(
+                polar=dict(
+                    radialaxis=dict(
+                        visible=True, range=[0, max_r], ticksuffix=" kts"
+                    ),
+                    angularaxis=dict(direction="clockwise", rotation=90),
+                ),
+                margin=dict(l=40, r=40, t=20, b=20),
+            )
+            st.plotly_chart(fig_polar, use_container_width=True)
 
 # -----------------------------------------------------------------------------
 # TAB 7: STORICO & USURA CAVI
