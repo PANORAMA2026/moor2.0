@@ -1,40 +1,28 @@
-with tab_polar:
-    st.subheader("Inviluppo Polare dei Limiti Operativi del Vento (0-360°)")
+"""
+views/tab_polar.py
+Interfaccia per la simulazione dell'inviluppo polare a 360 gradi.
+"""
 
-    if st.button("Esegui Simulazione Polare") and not geom_df.empty:
-        with st.spinner("Calcolo dinamico in corso..."):
-            angles, max_winds = calculate_wind_operability_envelope(
-                geom_df,
-                ship_dict["AFW"],
-                ship_dict["ALW"],
-                ship_dict["ALC"],
-                ship_dict["LOA"],
-                v_curr=v_curr,
-                dir_curr=dir_curr,
-            )
+import streamlit as st
+import plotly.express as px
+from core.hydrodynamic_forces import generate_polar_envelope
 
-            fig_polar = go.Figure()
-            fig_polar.add_trace(
-                go.Scatterpolar(
-                    r=max_winds,
-                    theta=angles,
-                    fill="toself",
-                    fillcolor="rgba(0, 128, 0, 0.25)",
-                    line=dict(color="green", width=2),
-                )
-            )
-
-            max_r = (
-                max(max_winds) + 10 if max_winds and len(max_winds) > 0 else 80
-            )
-
-            fig_polar.update_layout(
-                polar=dict(
-                    radialaxis=dict(
-                        visible=True, range=[0, max_r], ticksuffix=" kts"
-                    ),
-                    angularaxis=dict(direction="clockwise", rotation=90),
-                ),
-                margin=dict(l=40, r=40, t=20, b=20),
-            )
-            st.plotly_chart(fig_polar, use_container_width=True)
+def render_tab_polar():
+    st.header("6. Inviluppo Polare Operativo")
+    st.write("Valutazione dei limiti di sostenibilità del vento per ogni direzione attorno alla nave.")
+    
+    alw = st.session_state.get('alw', 2500.0)
+    afw = st.session_state.get('afw', 600.0)
+    lines_data = st.session_state.get('lines_data', [])
+    
+    if st.button("Calcola Diagramma Polare"):
+        polar_data = generate_polar_envelope(lines_data, alw, afw)
+        
+        fig = px.line_polar(
+            r=polar_data['max_winds'],
+            theta=polar_data['angles'],
+            start_angle=0,
+            direction="clockwise",
+            title="Massimo Vento Sostenibile [kts] (<55% MBL)"
+        )
+        st.plotly_chart(fig, use_container_width=True)
