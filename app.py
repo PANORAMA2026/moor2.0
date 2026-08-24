@@ -1,5 +1,6 @@
 from datetime import datetime
 import io
+import math
 import re
 import sqlite3
 import numpy as np
@@ -13,6 +14,7 @@ import streamlit as st
 # Tenta l'importazione del modulo canvas interattivo
 try:
     from streamlit_drawable_canvas import st_canvas
+
     HAS_CANVAS = True
 except ImportError:
     HAS_CANVAS = False
@@ -25,6 +27,10 @@ st.set_page_config(
 # Costante di conversione (kN in tonnellate metriche)
 KN_TO_TONS = 0.10197162129779
 
+# Offset fissi delle piattaforme di osservazione rispetto alle estremità della nave
+OFFSET_PLATFORM_FWD_M = 21.0  # 21 m dall'estrema prua
+OFFSET_PLATFORM_AFT_M = 14.0  # 14 m dall'estrema poppa
+
 # =============================================================================
 # 1. DATABASE & MANUTENZIONE PREDITTIVA (Persistent SQLite Database)
 # =============================================================================
@@ -33,10 +39,10 @@ DB_PATH = "openmooring.db"
 
 if "db_conn" not in st.session_state:
     st.session_state.db_conn = sqlite3.connect(
-        DB_PATH,
-        check_same_thread=False
+        DB_PATH, check_same_thread=False
     )
     st.session_state.db_conn.row_factory = sqlite3.Row
+
 
 def init_db(lines_df=None):
     conn = st.session_state.db_conn
@@ -81,7 +87,9 @@ def init_db(lines_df=None):
                 if not line_id:
                     continue
 
-                line_name = str(row.get("line_name", f"Line {line_id}")).strip()
+                line_name = str(
+                    row.get("line_name", f"Line {line_id}")
+                ).strip()
                 mbl_tons = float(mbl_val)
                 cert_id = str(row.get("cert_id", "N/A"))
                 station_id = str(row.get("station_id", "N/A"))
@@ -92,7 +100,14 @@ def init_db(lines_df=None):
                     INSERT OR REPLACE INTO line_history (line_id, line_name, mbl_tons, cert_id, station_id, winch_id)
                     VALUES (?, ?, ?, ?, ?, ?)
                     """,
-                    (line_id, line_name, mbl_tons, cert_id, station_id, winch_id),
+                    (
+                        line_id,
+                        line_name,
+                        mbl_tons,
+                        cert_id,
+                        station_id,
+                        winch_id,
+                    ),
                 )
             except (ValueError, TypeError):
                 continue
@@ -147,7 +162,9 @@ def get_lines_health_status():
     recommendations = []
 
     for _, row in df.iterrows():
-        max_h = row["max_design_hours"] if row["max_design_hours"] > 0 else 2000.0
+        max_h = (
+            row["max_design_hours"] if row["max_design_hours"] > 0 else 2000.0
+        )
         hours_used_pct = (row["accumulated_hours"] / max_h) * 100.0
         fatigue_pct = (row["fatigue_index"] / 300.0) * 100.0
         wear_pct = max(hours_used_pct, fatigue_pct)
@@ -156,9 +173,13 @@ def get_lines_health_status():
         health_percent.append(remaining_health)
 
         if remaining_health <= 20.0:
-            recommendations.append("🚨 SOSTITUZIONE IMMINENTE: Cavo a fine vita utile!")
+            recommendations.append(
+                "🚨 SOSTITUZIONE IMMINENTE: Cavo a fine vita utile!"
+            )
         elif remaining_health <= 40.0:
-            recommendations.append("⚠️ ISPEZIONE: Valutare rotazione testa-coda (End-for-End).")
+            recommendations.append(
+                "⚠️ ISPEZIONE: Valutare rotazione testa-coda (End-for-End)."
+            )
         else:
             recommendations.append("✅ IDONEO: Condizioni operative regolari.")
 
@@ -185,27 +206,19 @@ def extract_text_from_pdf(pdf_file):
 
 
 def extract_field_by_anchors(text: str, keywords: list) -> str:
-    """Cerca le parole chiave nel testo e tenta di estrarre il valore corrispondente."""
     lines = text.splitlines()
     for i, line in enumerate(lines):
         for kw in keywords:
             if kw.lower() in line.lower():
-                # Caso 1: Cerca il valore sulla stessa riga dopo separatori (: = -)
-                match = re.search(r'[:=\-]\s*(.+)', line)
+                match = re.search(r"[:=\-]\s*(.+)", line)
                 if match and match.group(1).strip():
                     return match.group(1).strip()
-                
-                # Caso 2: Se la riga ha solo l'etichetta, prende la riga immediatamente successiva
                 if i + 1 < len(lines) and lines[i + 1].strip():
                     return lines[i + 1].strip()
     return None
 
 
 def parse_certificate_text(text: str) -> dict:
-    """
-    Parser robusto multi-produttore: combina estrazione basata su parole chiave (ancore)
-    e ricerca flessibile delle unita di misura.
-    """
     data = {
         "cert_id": None,
         "manufacturer": None,
@@ -219,24 +232,30 @@ def parse_certificate_text(text: str) -> dict:
     if not text:
         return data
 
-    # 1. CERTIFICATE ID
     raw_cert = extract_field_by_anchors(text, [
-        "Certificate No", "Cert. No", "Certificate Number", 
-        "Certificato N", "Test Certificate", "Cert No"
+        "Certificate No",
+        "Cert. No",
+        "Certificate Number",
+        "Certificato N",
+        "Test Certificate",
+        "Cert No",
     ])
     if raw_cert:
-        match = re.search(r'([A-Za-z0-9\-/]+)', raw_cert)
+        match = re.search(r"([A-Za-z0-9\-/]+)", raw_cert)
         if match:
             data["cert_id"] = match.group(1)
 
-    # 2. MANUFACTURER
     raw_mfg = extract_field_by_anchors(text, [
-        "Manufacturer", "Costruttore", "Maker", "Producer", "Factory", "Issued by"
+        "Manufacturer",
+        "Costruttore",
+        "Maker",
+        "Producer",
+        "Factory",
+        "Issued by",
     ])
     if raw_mfg:
-        data["manufacturer"] = raw_mfg.split('\t')[0].strip()
+        data["manufacturer"] = raw_mfg.split("\t")[0].strip()
 
-    # 3. MATERIAL
     mat_match = re.search(
         r"\b(HMPE|Dyneema|Polyester|Polypropylene|Nylon|Wire|Steel|Aramid|Kevlar|Polyamide)\b",
         text,
@@ -245,41 +264,54 @@ def parse_certificate_text(text: str) -> dict:
     if mat_match:
         data["material"] = mat_match.group(1).upper()
 
-    # 4. DIAMETER (mm)
-    dia_raw = extract_field_by_anchors(text, ["Diameter", "Diametro", "Dia.", "Size"])
+    dia_raw = extract_field_by_anchors(
+        text, ["Diameter", "Diametro", "Dia.", "Size"]
+    )
     if dia_raw:
-        num_match = re.search(r'(\d+(?:[\.,]\d+)?)', dia_raw)
+        num_match = re.search(r"(\d+(?:[\.,]\d+)?)", dia_raw)
         if num_match:
-            data["diameter_mm"] = float(num_match.group(1).replace(',', '.'))
+            data["diameter_mm"] = float(num_match.group(1).replace(",", "."))
     else:
-        dia_match = re.search(r'(\d+(?:[\.,]\d+)?)\s*mm\b', text, re.IGNORECASE)
+        dia_match = re.search(r"(\d+(?:[\.,]\d+)?)\s*mm\b", text, re.IGNORECASE)
         if dia_match:
-            data["diameter_mm"] = float(dia_match.group(1).replace(',', '.'))
+            data["diameter_mm"] = float(dia_match.group(1).replace(",", "."))
 
-    # 5. MBL (Carico di Rottura)
     mbl_raw = extract_field_by_anchors(text, [
-        "MBL", "Breaking Load", "Carico di Rottura", "Minimum Breaking Load", "MBF"
+        "MBL",
+        "Breaking Load",
+        "Carico di Rottura",
+        "Minimum Breaking Load",
+        "MBF",
     ])
-    
-    if mbl_raw:
-        val_match = re.search(r'(\d+(?:[\.,]\d+)?)', mbl_raw)
-        if val_match:
-            val = float(val_match.group(1).replace(',', '.'))
-            if re.search(r'kN\b', mbl_raw, re.IGNORECASE):
-                data["mbl_tons"] = round(val * KN_TO_TONS, 2)
-            elif re.search(r'(Tons|MT|\bt\b)', mbl_raw, re.IGNORECASE):
-                data["mbl_tons"] = val
-    
-    if data["mbl_tons"] is None:
-        mbl_kn_match = re.search(r'(?:MBL|Breaking Load|Carico)\D{0,15}(\d+(?:[\.,]\d+)?)\s*kN\b', text, re.IGNORECASE)
-        mbl_t_match = re.search(r'(?:MBL|Breaking Load|Carico)\D{0,15}(\d+(?:[\.,]\d+)?)\s*(?:Tons|t|MT)\b', text, re.IGNORECASE)
-        
-        if mbl_kn_match:
-            data["mbl_tons"] = round(float(mbl_kn_match.group(1).replace(',', '.')) * KN_TO_TONS, 2)
-        elif mbl_t_match:
-            data["mbl_tons"] = float(mbl_t_match.group(1).replace(',', '.'))
 
-    # 6. STANDARD
+    if mbl_raw:
+        val_match = re.search(r"(\d+(?:[\.,]\d+)?)", mbl_raw)
+        if val_match:
+            val = float(val_match.group(1).replace(",", "."))
+            if re.search(r"kN\b", mbl_raw, re.IGNORECASE):
+                data["mbl_tons"] = round(val * KN_TO_TONS, 2)
+            elif re.search(r"(Tons|MT|\bt\b)", mbl_raw, re.IGNORECASE):
+                data["mbl_tons"] = val
+
+    if data["mbl_tons"] is None:
+        mbl_kn_match = re.search(
+            r"(?:MBL|Breaking Load|Carico)\D{0,15}(\d+(?:[\.,]\d+)?)\s*kN\b",
+            text,
+            re.IGNORECASE,
+        )
+        mbl_t_match = re.search(
+            r"(?:MBL|Breaking Load|Carico)\D{0,15}(\d+(?:[\.,]\d+)?)\s*(?:Tons|t|MT)\b",
+            text,
+            re.IGNORECASE,
+        )
+
+        if mbl_kn_match:
+            data["mbl_tons"] = round(
+                float(mbl_kn_match.group(1).replace(",", ".")) * KN_TO_TONS, 2
+            )
+        elif mbl_t_match:
+            data["mbl_tons"] = float(mbl_t_match.group(1).replace(",", "."))
+
     std_match = re.search(
         r"\b(MEG4|ISO\s*\d+|DNV\b|DNV-GL|Lloyd'?s(?:\s*Register)?|ABS\b|BV\b|ClassNK)\b",
         text,
@@ -348,13 +380,25 @@ def calculate_environmental_forces(
     cy_c = np.sin(rad_curr)
     cmz_c = 0.1 * np.sin(2 * rad_curr)
 
-    fx_w = (0.5 * rho_air * (v_wind**2) * float(afw) * cx_w / 1000.0) * KN_TO_TONS
-    fy_w = (0.5 * rho_air * (v_wind**2) * float(alw) * cy_w / 1000.0) * KN_TO_TONS
-    mz_w = (0.5 * rho_air * (v_wind**2) * float(alw) * float(loa) * cmz_w / 1000.0) * KN_TO_TONS
+    fx_w = (
+        0.5 * rho_air * (v_wind**2) * float(afw) * cx_w / 1000.0
+    ) * KN_TO_TONS
+    fy_w = (
+        0.5 * rho_air * (v_wind**2) * float(alw) * cy_w / 1000.0
+    ) * KN_TO_TONS
+    mz_w = (
+        0.5 * rho_air * (v_wind**2) * float(alw) * float(loa) * cmz_w / 1000.0
+    ) * KN_TO_TONS
 
-    fx_c = (0.5 * rho_water * (v_curr**2) * float(afw) * 0.1 * cx_c / 1000.0) * KN_TO_TONS
-    fy_c = (0.5 * rho_water * (v_curr**2) * float(alc) * cy_c / 1000.0) * KN_TO_TONS
-    mz_c = (0.5 * rho_water * (v_curr**2) * float(alc) * float(loa) * cmz_c / 1000.0) * KN_TO_TONS
+    fx_c = (
+        0.5 * rho_water * (v_curr**2) * float(afw) * 0.1 * cx_c / 1000.0
+    ) * KN_TO_TONS
+    fy_c = (
+        0.5 * rho_water * (v_curr**2) * float(alc) * cy_c / 1000.0
+    ) * KN_TO_TONS
+    mz_c = (
+        0.5 * rho_water * (v_curr**2) * float(alc) * float(loa) * cmz_c / 1000.0
+    ) * KN_TO_TONS
 
     return {
         "Fx_total_t": fx_w + fx_c,
@@ -403,13 +447,17 @@ def calculate_composite_stiffness(line):
     length_main = max(0.1, float(line["length_m"]) - length_tail)
     area_main = np.pi * ((float(line["diameter_mm"]) / 1000.0) ** 2) / 4.0
 
-    k_main = ((float(line["E_modulus_GPa"]) * 1e6 * area_main) / length_main) * KN_TO_TONS
+    k_main = (
+        (float(line["E_modulus_GPa"]) * 1e6 * area_main) / length_main
+    ) * KN_TO_TONS
 
     if length_tail <= 0 or float(line.get("tail_diameter_mm", 0)) <= 0:
         return k_main, float(line["mbl_tons"])
 
     area_tail = np.pi * ((float(line["tail_diameter_mm"]) / 1000.0) ** 2) / 4.0
-    k_tail = ((float(line["tail_E_modulus_GPa"]) * 1e6 * area_tail) / length_tail) * KN_TO_TONS
+    k_tail = (
+        (float(line["tail_E_modulus_GPa"]) * 1e6 * area_tail) / length_tail
+    ) * KN_TO_TONS
 
     k_eq = (k_main * k_tail) / (k_main + k_tail)
     effective_mbl = min(
@@ -425,7 +473,9 @@ def solve_line_tensions_3d(lines_geom_df, forces):
         return lines_geom_df
 
     K_global = np.zeros((3, 3))
-    F_ext = np.array([forces["Fx_total_t"], forces["Fy_total_t"], forces["Mz_total_tm"]])
+    F_ext = np.array(
+        [forces["Fx_total_t"], forces["Fy_total_t"], forces["Mz_total_tm"]]
+    )
     line_data = []
 
     for _, line in lines_geom_df.iterrows():
@@ -454,7 +504,9 @@ def solve_line_tensions_3d(lines_geom_df, forces):
     for item in line_data:
         t = max(0.0, item["k"] * np.dot(item["b"], displacements))
         tensions.append(t)
-        utilizations.append((t / item["mbl"]) * 100.0 if item["mbl"] > 0 else 0.0)
+        utilizations.append(
+            (t / item["mbl"]) * 100.0 if item["mbl"] > 0 else 0.0
+        )
 
     lines_geom_df["Tension_tons"] = tensions
     lines_geom_df["Util_Percent"] = utilizations
@@ -768,8 +820,10 @@ def_bollards = [
     {
         "bollard_id": "B1",
         "Posizione": "Prua",
-        "Dist_Estrema_m": 8.2,
-        "X_Coordinata_m": 153.6,
+        "Dist_Inclinata_m": 15.0,
+        "Pendenza_deg": 0.0,
+        "Dist_Orizzontale_m": 15.0,
+        "X_Coordinata_m": 125.8,
         "Y_Coordinata_m": 25.0,
         "Z_Altezza_m": -3.0,
         "SWL_Bitta_t": 150,
@@ -778,8 +832,10 @@ def_bollards = [
     {
         "bollard_id": "B2",
         "Posizione": "Prua",
-        "Dist_Estrema_m": 21.8,
-        "X_Coordinata_m": 140.0,
+        "Dist_Inclinata_m": 25.0,
+        "Pendenza_deg": 0.0,
+        "Dist_Orizzontale_m": 25.0,
+        "X_Coordinata_m": 115.8,
         "Y_Coordinata_m": 25.0,
         "Z_Altezza_m": -3.0,
         "SWL_Bitta_t": 150,
@@ -788,8 +844,10 @@ def_bollards = [
     {
         "bollard_id": "B3",
         "Posizione": "Prua",
-        "Dist_Estrema_m": 81.8,
-        "X_Coordinata_m": 80.0,
+        "Dist_Inclinata_m": 60.0,
+        "Pendenza_deg": 0.0,
+        "Dist_Orizzontale_m": 60.0,
+        "X_Coordinata_m": 80.8,
         "Y_Coordinata_m": 25.0,
         "Z_Altezza_m": -3.0,
         "SWL_Bitta_t": 100,
@@ -798,8 +856,10 @@ def_bollards = [
     {
         "bollard_id": "B4",
         "Posizione": "Poppa",
-        "Dist_Estrema_m": 81.8,
-        "X_Coordinata_m": -80.0,
+        "Dist_Inclinata_m": 65.0,
+        "Pendenza_deg": 0.0,
+        "Dist_Orizzontale_m": 65.0,
+        "X_Coordinata_m": -82.8,
         "Y_Coordinata_m": 25.0,
         "Z_Altezza_m": -3.0,
         "SWL_Bitta_t": 100,
@@ -808,8 +868,10 @@ def_bollards = [
     {
         "bollard_id": "B5",
         "Posizione": "Poppa",
-        "Dist_Estrema_m": 1.8,
-        "X_Coordinata_m": -160.0,
+        "Dist_Inclinata_m": 10.0,
+        "Pendenza_deg": 0.0,
+        "Dist_Orizzontale_m": 10.0,
+        "X_Coordinata_m": -137.8,
         "Y_Coordinata_m": 25.0,
         "Z_Altezza_m": -3.0,
         "SWL_Bitta_t": 150,
@@ -958,8 +1020,9 @@ with tab_certs:
     st.header("📜 Modulo Certificati Cavi & Drag and Drop PDF")
     st.info(
         "📁 **Drag & Drop Certificato:** Trascina direttamente il file PDF del"
-        " certificato del cavo. Il sistema estrarrà il testo, eseguirà il parsing"
-        " flessibile multi-produttore di MBL, Diametro e Costruttore e lo salverà nel database."
+        " certificato del cavo. Il sistema estrarrà il testo, eseguirà il"
+        " parsing flessibile multi-produttore di MBL, Diametro e Costruttore e"
+        " lo salverà nel database."
     )
 
     c_col1, c_col2 = st.columns([1, 1])
@@ -979,7 +1042,10 @@ with tab_certs:
             cert_text_to_parse = extract_text_from_pdf(uploaded_pdf)
             with st.expander("📄 Testo estratto dal PDF"):
                 st.text_area(
-                    "Anteprima Testo", cert_text_to_parse, height=150, disabled=True
+                    "Anteprima Testo",
+                    cert_text_to_parse,
+                    height=150,
+                    disabled=True,
                 )
 
         st.subheader("📝 Inserimento Manuale Alternate")
@@ -1012,7 +1078,6 @@ with tab_certs:
                     "issue_date": datetime.now().strftime("%Y-%m-%d"),
                 }
 
-                # Aggiornamento/Inserimento nel DB
                 st.session_state.certificates_db = pd.concat(
                     [st.session_state.certificates_db, pd.DataFrame([new_cert])],
                     ignore_index=True,
@@ -1035,7 +1100,8 @@ with tab_certs:
             "Seleziona Linea", st.session_state.lines_inventory["line_name"]
         )
         selected_cert = col_sel2.selectbox(
-            "Seleziona Certificato", st.session_state.certificates_db["cert_id"]
+            "Seleziona Certificato",
+            st.session_state.certificates_db["cert_id"],
         )
 
         if st.button("🔗 Applica Certificato a Linea"):
@@ -1047,13 +1113,22 @@ with tab_certs:
             ].index
 
             if not idx.empty:
-                st.session_state.lines_inventory.loc[idx[0], "cert_id"] = selected_cert
-                st.session_state.lines_inventory.loc[idx[0], "mbl_tons"] = cert_row["mbl_tons"]
-                st.session_state.lines_inventory.loc[idx[0], "diameter_mm"] = cert_row["diameter_mm"]
-                st.session_state.lines_inventory.loc[idx[0], "material"] = cert_row["material"]
+                st.session_state.lines_inventory.loc[idx[0], "cert_id"] = (
+                    selected_cert
+                )
+                st.session_state.lines_inventory.loc[idx[0], "mbl_tons"] = (
+                    cert_row["mbl_tons"]
+                )
+                st.session_state.lines_inventory.loc[idx[0], "diameter_mm"] = (
+                    cert_row["diameter_mm"]
+                )
+                st.session_state.lines_inventory.loc[idx[0], "material"] = (
+                    cert_row["material"]
+                )
                 st.success(
-                    f"Linea '{selected_line}' aggiornata con MBL ({cert_row['mbl_tons']}t)"
-                    f" dal certificato {selected_cert}!"
+                    f"Linea '{selected_line}' aggiornata con MBL"
+                    f" ({cert_row['mbl_tons']}t) dal certificato"
+                    f" {selected_cert}!"
                 )
                 st.rerun()
 
@@ -1078,10 +1153,7 @@ with tab_stations:
     )
     st.session_state.mooring_stations[station_sel] = edited_st
 
-    # Generazione Figura Grafica Pianetto
     fig_st = go.Figure()
-
-    # Disegno dei guidacavi / chocks / verricelli
     fig_st.add_trace(
         go.Scatter(
             x=edited_st["chock_x_m"],
@@ -1106,7 +1178,6 @@ with tab_stations:
     with col_plan1:
         st.plotly_chart(fig_st, use_container_width=True)
 
-        # Export Pianetto in HTML / Formato Immagine
         buffer = io.StringIO()
         fig_st.write_html(buffer, include_plotlyjs="cdn")
         html_bytes = buffer.getvalue().encode()
@@ -1119,10 +1190,10 @@ with tab_stations:
         )
 
     with col_plan2:
-        st.subheader("🖌️ Identificazione & Annotazione Manuale Pianetto")
+        st.subheader("MSO Identificazione & Annotazione Manuale Pianetto")
         st.write(
-            "Disegna o annota a mano sul canvas sottostante per identificare verricelli,"
-            " tamburi e numeri cavo:"
+            "Disegna o annota a mano sul canvas sottostante per identificare"
+            " verricelli, tamburi e numeri cavo:"
         )
 
         if HAS_CANVAS:
@@ -1145,8 +1216,9 @@ with tab_stations:
             )
         else:
             st.warning(
-                "Modulo `streamlit-drawable-canvas` non installato. Per abilitare la"
-                " lavagna interattiva esegui: `pip install streamlit-drawable-canvas`"
+                "Modulo `streamlit-drawable-canvas` non installato. Per abilitare"
+                " la lavagna interattiva esegui: `pip install"
+                " streamlit-drawable-canvas`"
             )
 
 # -----------------------------------------------------------------------------
@@ -1155,12 +1227,18 @@ with tab_stations:
 with tab_3d_editor:
     st.header(f"🗺️ Layout Banchina & Bitte: {selected_port}")
     st.info(
-        "📏 **Misurazione Banchina (Rangefinder):** Le coordinate X sono inserite"
-        " come **distanza dall'estrema prua** (per bitte a prua) o **dall'estrema"
-        " poppa** (per bitte a poppa)."
+        "📐 **Misurazione da Piattaforme d'Osservazione (Rangefinder):**\n"
+        "• **Observation Platform Prua:** posizionata a **21 m** dall'estrema"
+        " prua.\n"
+        "• **Observation Platform Poppa:** posizionata a **14 m** dall'estrema"
+        " poppa.\n"
+        "Inserisci la **Distanza Inclinata (m)** e la **Pendenza (°)** rilevate"
+        " con il telemetro. Il sistema calcolerà automaticamente la distanza"
+        " orizzontale piana $\\text{Distanza} \\times \\cos(\\text{Pendenza})$"
+        " e la coordinata assoluta della bitta."
     )
 
-    st.subheader("📐 Orientamento e Allineamento Banchina")
+    st.subheader("⚙️ Orientamento Banchina")
     berth_heading = st.number_input(
         "Orientamento Banchina / Berth True Heading (° True)",
         min_value=0.0,
@@ -1175,25 +1253,53 @@ with tab_3d_editor:
 
     df_bollards = st.session_state.ports_bollards[selected_port]
 
-    st.subheader("➕ Aggiungi Bitta alla Banchina")
-    c_add1, c_add2, c_add3, c_add4, c_add5, c_add6 = st.columns(6)
+    st.subheader("➕ Aggiungi Nuova Bitta tramite Rilevamento Telemetro")
+    c_add1, c_add2, c_add3, c_add4, c_add5, c_add6, c_add7 = st.columns(7)
 
     new_b_id = c_add1.text_input("ID Bitta", f"B{len(df_bollards) + 1}")
-    new_pos = c_add2.selectbox("Zona Bitta", ["Prua", "Poppa"])
-    new_dist = c_add3.number_input("Dist. Estrema (m)", min_value=0.0, value=15.0)
-    new_y = c_add4.number_input("Dist. Banchina Y (m)", value=25.0)
-    new_z = c_add5.number_input("Altezza Z (m)", value=-3.0)
-    new_swl = c_add6.number_input("SWL Bitta (t)", value=150)
+    new_pos = c_add2.selectbox(
+        "Piattaforma Misura",
+        ["Prua (21m fwd)", "Poppa (14m aft)"],
+    )
+    new_dist_inc = c_add3.number_input(
+        "Dist. Inclinata (m)", min_value=0.0, value=15.0, step=0.5
+    )
+    new_pendenza = c_add4.number_input(
+        "Pendenza (°)", min_value=-60.0, max_value=60.0, value=0.0, step=1.0
+    )
+    new_y = c_add5.number_input(
+        "Dist. Banchina Y (m)", value=25.0, step=0.5
+    )
+    new_z = c_add6.number_input("Altezza Z (m)", value=-3.0, step=0.5)
+    new_swl = c_add7.number_input("SWL Bitta (t)", value=150, step=10)
 
-    col_btn1, col_btn2 = st.columns(2)
+    # Calcolo immediato della distanza piana e della posizione X
+    dist_horiz = new_dist_inc * math.cos(math.radians(new_pendenza))
 
-    if col_btn1.button("➕ Aggiungi Bitta a Prua"):
-        x_abs = (loa / 2.0) - new_dist
+    if "Prua" in new_pos:
+        # Piattaforma Prua: a (LOA/2 - 21) dal centro
+        x_platform = (loa / 2.0) - OFFSET_PLATFORM_FWD_M
+        x_abs_calc = x_platform - dist_horiz
+        zone_label = "Prua"
+    else:
+        # Piattaforma Poppa: a -(LOA/2 - 14) dal centro
+        x_platform = -(loa / 2.0) + OFFSET_PLATFORM_AFT_M
+        x_abs_calc = x_platform + dist_horiz
+        zone_label = "Poppa"
+
+    st.caption(
+        f"💡 **Calcolo Anteprima:** Distanza Orizzontale = **{dist_horiz:.2f} m**"
+        f" | Coordinata X calcolata = **{x_abs_calc:.2f} m**"
+    )
+
+    if st.button("➕ Registra Bitta in Banchina"):
         new_row = {
             "bollard_id": new_b_id,
-            "Posizione": "Prua",
-            "Dist_Estrema_m": new_dist,
-            "X_Coordinata_m": x_abs,
+            "Posizione": zone_label,
+            "Dist_Inclinata_m": new_dist_inc,
+            "Pendenza_deg": new_pendenza,
+            "Dist_Orizzontale_m": round(dist_horiz, 2),
+            "X_Coordinata_m": round(x_abs_calc, 2),
             "Y_Coordinata_m": new_y,
             "Z_Altezza_m": new_z,
             "SWL_Bitta_t": new_swl,
@@ -1202,34 +1308,30 @@ with tab_3d_editor:
         st.session_state.ports_bollards[selected_port] = pd.concat(
             [df_bollards, pd.DataFrame([new_row])], ignore_index=True
         )
-        st.rerun()
-
-    if col_btn2.button("➕ Aggiungi Bitta a Poppa"):
-        x_abs = -(loa / 2.0) + new_dist
-        new_row = {
-            "bollard_id": new_b_id,
-            "Posizione": "Poppa",
-            "Dist_Estrema_m": new_dist,
-            "X_Coordinata_m": x_abs,
-            "Y_Coordinata_m": new_y,
-            "Z_Altezza_m": new_z,
-            "SWL_Bitta_t": new_swl,
-            "Stato": "Attivo",
-        }
-        st.session_state.ports_bollards[selected_port] = pd.concat(
-            [df_bollards, pd.DataFrame([new_row])], ignore_index=True
-        )
+        st.success(f"Bitta {new_b_id} aggiunta con successo!")
         st.rerun()
 
     st.divider()
 
+    # Ricalcolo dinamico delle coordinate della tabella
     df_curr = st.session_state.ports_bollards[selected_port].copy()
-    calc_x = []
+
+    calc_dist_h, calc_x = [], []
     for _, r in df_curr.iterrows():
-        if r.get("Posizione") == "Prua":
-            calc_x.append((loa / 2.0) - float(r.get("Dist_Estrema_m", 0)))
+        d_inc = float(r.get("Dist_Inclinata_m", r.get("Dist_Estrema_m", 0.0)))
+        pend = float(r.get("Pendenza_deg", 0.0))
+        d_h = d_inc * math.cos(math.radians(pend))
+        calc_dist_h.append(round(d_h, 2))
+
+        pos = str(r.get("Posizione", "Prua"))
+        if "Prua" in pos:
+            x_plat = (loa / 2.0) - OFFSET_PLATFORM_FWD_M
+            calc_x.append(round(x_plat - d_h, 2))
         else:
-            calc_x.append(-(loa / 2.0) + float(r.get("Dist_Estrema_m", 0)))
+            x_plat = -(loa / 2.0) + OFFSET_PLATFORM_AFT_M
+            calc_x.append(round(x_plat + d_h, 2))
+
+    df_curr["Dist_Orizzontale_m"] = calc_dist_h
     df_curr["X_Coordinata_m"] = calc_x
 
     col_ed_left, col_ed_right = st.columns([1, 1])
@@ -1245,7 +1347,7 @@ with tab_3d_editor:
         st.session_state.ports_bollards[selected_port] = edited_bollards
 
     with col_ed_right:
-        st.subheader("🌐 Visualizzazione Layout 3D")
+        st.subheader("🌐 Visualizzazione Layout 3D Banchina")
 
         fig_setup = go.Figure()
         s_x = [-loa / 2, loa / 2 - 30, loa / 2, loa / 2 - 30, -loa / 2, -loa / 2]
@@ -1259,6 +1361,23 @@ with tab_3d_editor:
                 mode="lines",
                 line=dict(color="navy", width=5),
                 name=f"Scafo ({ship_name})",
+            )
+        )
+
+        # Marker Piattaforme di Osservazione
+        plat_x = [(loa / 2.0) - OFFSET_PLATFORM_FWD_M, -(loa / 2.0) + OFFSET_PLATFORM_AFT_M]
+        plat_y = [beam / 2.0, beam / 2.0]
+        plat_z = [12.0, 12.0]
+        fig_setup.add_trace(
+            go.Scatter3d(
+                x=plat_x,
+                y=plat_y,
+                z=plat_z,
+                mode="markers+text",
+                marker=dict(size=10, color="crimson", symbol="diamond"),
+                text=["Obs. Platform Prua (21m)", "Obs. Platform Poppa (14m)"],
+                textposition="top center",
+                name="Piattaforme Rilevamento",
             )
         )
 
@@ -1276,12 +1395,12 @@ with tab_3d_editor:
                     showscale=True,
                 ),
                 text=[
-                    f"{r['bollard_id']} ({r['Posizione']}: {r['Dist_Estrema_m']}m,"
+                    f"{r['bollard_id']} ({r['Posizione']}: {r['Dist_Orizzontale_m']}m h-dist,"
                     f" SWL:{r['SWL_Bitta_t']}t)"
                     for _, r in act_b.iterrows()
                 ],
                 textposition="top center",
-                name="Bitte",
+                name="Bitte Banchina",
             )
         )
 
@@ -1435,7 +1554,9 @@ with tab_polar:
                 )
             )
 
-            max_r = max(max_winds) + 10 if max_winds and len(max_winds) > 0 else 80
+            max_r = (
+                max(max_winds) + 10 if max_winds and len(max_winds) > 0 else 80
+            )
 
             fig_polar.update_layout(
                 polar=dict(
