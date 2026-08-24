@@ -39,7 +39,6 @@ if "db_conn" not in st.session_state:
     )
     st.session_state.db_conn.row_factory = sqlite3.Row
 
-
 def init_db(lines_df=None):
   conn = st.session_state.db_conn
   cursor = conn.cursor()
@@ -177,7 +176,6 @@ def get_lines_health_status():
 # 2. INTEGRATORE CERTIFICATI CAVI (PDF READ + PARSER REGEX)
 # =============================================================================
 def extract_text_from_pdf(pdf_file):
-  """Estrae il testo da un file PDF scaricato o caricato via drag and drop."""
   try:
     reader = PdfReader(pdf_file)
     extracted_text = ""
@@ -192,7 +190,6 @@ def extract_text_from_pdf(pdf_file):
 
 
 def parse_certificate_text(text):
-  """Esegue il parsing automatico del testo/OCR del certificato cavo."""
   data = {
       "cert_id": None,
       "manufacturer": None,
@@ -203,7 +200,6 @@ def parse_certificate_text(text):
       "standard": None,
   }
 
-  # Cert ID Pattern
   cert_match = re.search(
       r"(?:Certificat[eo]|Cert\.?|Certificate No\.?)\s*[:#]?\s*([A-Za-z0-9\-/]+)",
       text,
@@ -212,7 +208,6 @@ def parse_certificate_text(text):
   if cert_match:
     data["cert_id"] = cert_match.group(1).strip()
 
-  # Manufacturer
   mfg_match = re.search(
       r"(?:Manufacturer|Costruttore|Maker)\s*[:#]?\s*([A-Za-z0-9\s]+)",
       text,
@@ -221,7 +216,6 @@ def parse_certificate_text(text):
   if mfg_match:
     data["manufacturer"] = mfg_match.group(1).strip()
 
-  # Material (HMPE, Polyester, Polypropylene, Wire, Nylon)
   mat_match = re.search(
       r"\b(HMPE|Dyneema|Polyester|Polypropylene|Nylon|Wire|Steel|Aramid)\b",
       text,
@@ -230,7 +224,6 @@ def parse_certificate_text(text):
   if mat_match:
     data["material"] = mat_match.group(1).upper()
 
-  # Diameter (mm)
   dia_match = re.search(
       r"(?:Diameter|Diametro|Dia\.?)\s*[:#]?\s*(\d+(?:\.\d+)?)\s*mm",
       text,
@@ -239,7 +232,6 @@ def parse_certificate_text(text):
   if dia_match:
     data["diameter_mm"] = float(dia_match.group(1))
 
-  # MBL (kN or Tons)
   mbl_kn_match = re.search(
       r"(?:MBL|Breaking Load|Carico di Rottura)\s*[:#]?\s*(\d+(?:\.\d+)?)\s*kN",
       text,
@@ -256,7 +248,6 @@ def parse_certificate_text(text):
   elif mbl_t_match:
     data["mbl_tons"] = float(mbl_t_match.group(1))
 
-  # Standard / Certification body
   std_match = re.search(
       r"\b(MEG4|ISO\s*\d+|DNV|Lloyd'?s\s*Register|ABS|BV)\b",
       text,
@@ -380,7 +371,7 @@ def calculate_line_geometry(lines_df, bollards_df):
   merged["bollard_y_rendered"] = merged[y_col]
   merged["bollard_z_rendered"] = merged[z_col]
 
-  return merged
+  return merged.reset_index(drop=True)
 
 
 def calculate_composite_stiffness(line):
