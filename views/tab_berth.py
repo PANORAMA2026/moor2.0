@@ -1,9 +1,9 @@
 """
 views/tab_berth.py
 Modulo per la gestione del layout di banchina:
-- Nave in 2D (Perimetro/Sagoma piana sul piano di galleggiamento Z=0)
-- Banchina in 3D (Solido banchina + bitte tridimensionali)
-- Calcolo automatico X, Y, Z dalle Observation Platform (Prua/Poppa)
+- Banchina in 3D posizionata a Z=0
+- Nave 2D sopraelevata alla quota calcolata in base alla pendenza dei cavi
+- Observation Platforms posizionate sul piano nave sopraelevato
 """
 
 import numpy as np
@@ -17,17 +17,13 @@ from config.constants import OFFSET_PLATFORM_AFT_M, OFFSET_PLATFORM_FWD_M
 def calculate_bollard_coordinates(
     position_type, dist_inc, slope_deg, ship_loa, ship_beam
 ):
-    """Calcola le coordinate X, Y, Z della bitta partendo da Distanza Inclinata e Pendenza
-
-    misurate dalle Observation Platform di Prua / Poppa.
-    """
+    """Calcola le coordinate X, Y, Z della bitta rispetto alla piattaforma."""
     slope_rad = np.radians(slope_deg)
 
-    # 1. Distanza orizzontale e delta Z
+    # Distanza orizzontale e dislivello Z (inclinazione cavo)
     dist_horiz = dist_inc * np.cos(slope_rad)
     z_m = -1.0 * (dist_inc * np.sin(slope_rad))
 
-    # 2. Coordinata X basata sull'offset delle piattaforme
     if position_type == "Prua":
         x_platform = (ship_loa / 2.0) - OFFSET_PLATFORM_FWD_M
         x_m = x_platform - dist_horiz
@@ -35,14 +31,13 @@ def calculate_bollard_coordinates(
         x_platform = (-ship_loa / 2.0) + OFFSET_PLATFORM_AFT_M
         x_m = x_platform + dist_horiz
 
-    # 3. Coordinata Y (filo banchina dal centro nave)
     y_m = (ship_beam / 2.0) + 6.4
 
     return round(dist_horiz, 2), round(x_m, 2), round(y_m, 2), round(z_m, 2)
 
 
-def build_3d_dock_mesh(x_min, x_max, y_front, width_y=15.0, depth_z=5.0):
-    """Crea una struttura volumetrica 3D (Mesh3d) della banchina."""
+def build_3d_dock_mesh(x_min, x_max, y_front, width_y=15.0, depth_z=4.0):
+    """Crea la struttura 3D della banchina con estradosso a quota Z=0."""
     y_back = y_front + width_y
     z_top = 0.0
     z_bottom = -depth_z
@@ -86,15 +81,16 @@ def build_3d_dock_mesh(x_min, x_max, y_front, width_y=15.0, depth_z=5.0):
 
 
 def render_tab_berth(selected_port, ship_dict):
-    st.header(f"🗺️ Layout Banchina 3D & Nave 2D — {selected_port}")
+    st.header(f"🗺️ Layout Banchina 3D & Nave Sopraelevata — {selected_port}")
     st.caption(
-        "📐 Inserisci **Distanza** e **Pendenza** dal telemetro. "
-        "La nave viene proiettata in 2D sul galleggiamento ($Z=0$), mentre la banchina e le bitte sono modellate in 3D."
+        "📐 **Telemetro Laser:** Modifica **Distanza** e **Pendenza**. "
+        "La nave 2D si posiziona automaticamente sopraelevata rispetto alla banchina in base al dislivello calcolato."
     )
 
     df_bollards = st.session_state.ports_bollards[selected_port].copy()
 
-    # Ricalcolo automatico di X, Y, Z per ogni bitta
+    # Ricalcolo coordinate bitte e media della pendenza/quota nave
+    z_offsets = []
     for idx, row in df_bollards.iterrows():
         pos = row.get("Posizione", "Prua")
         d_inc = float(row.get("Dist_Inclinata_m", 15.0))
@@ -111,6 +107,12 @@ def render_tab_berth(selected_port, ship_dict):
         df_bollards.at[idx, "bollard_x_m"] = x_calc
         df_bollards.at[idx, "bollard_y_m"] = y_calc
         df_bollards.at[idx, "bollard_z_m"] = z_calc
+
+        # Dislivello verticale piattaforma -> bitta
+        z_offsets.append(abs(z_calc))
+
+    # Quota della nave (se dislivello 0, usa un'altezza predefinita di 8m)
+    ship_z_elevation = max(z_offsets) if any(z_offsets) else 8.0
 
     col_edit, col_map = st.columns([1, 1.2])
 
@@ -182,24 +184,23 @@ def render_tab_berth(selected_port, ship_dict):
             st.success("Layout aggiornato con successo!")
             st.rerun()
 
-    # --- SCENA 3D (Banchina 3D + Nave 2D Corretta) ---
+    # --- SCENA 3D ---
     with col_map:
-        st.subheader("🧊 Vista 3D: Banchina Tridimensionale & Nave 2D")
+        st.subheader("🧊 Vista 3D: Nave Sopraelevata & Banchina")
 
         loa = ship_dict["LOA"]
         beam = ship_dict["Beam"]
-        freeboard = ship_dict.get("Freeboard", 12.0)
 
         fig = go.Figure()
 
-        # 1. Banchina 3D (Mesh Tridimensionale)
+        # 1. Banchina 3D a quota Z=0
         berth_front_y = (beam / 2.0) + 6.4
         bx, by, bz, bi, bj, bk = build_3d_dock_mesh(
             x_min=-loa * 0.7,
             x_max=loa * 0.7,
             y_front=berth_front_y,
             width_y=12.0,
-            depth_z=6.0,
+            depth_z=5.0,
         )
         fig.add_trace(
             go.Mesh3d(
@@ -211,14 +212,19 @@ def render_tab_berth(selected_port, ship_dict):
                 k=bk,
                 color="slategrey",
                 opacity=0.6,
-                name="Struttura Banchina 3D",
+                name="Struttura Banchina (Z=0)",
             )
         )
 
-        # 2. Nave 2D: Superficie Piatta sul piano Z=0 (Mesh3d Piatta)
+        # 2. Nave 2D sopraelevata a quota Z = ship_z_elevation
         ship_x_mesh = [-loa / 2, loa / 2, loa / 2, -loa / 2]
         ship_y_mesh = [-beam / 2, -beam / 2, beam / 2, beam / 2]
-        ship_z_mesh = [0, 0, 0, 0]
+        ship_z_mesh = [
+            ship_z_elevation,
+            ship_z_elevation,
+            ship_z_elevation,
+            ship_z_elevation,
+        ]
 
         fig.add_trace(
             go.Mesh3d(
@@ -229,15 +235,15 @@ def render_tab_berth(selected_port, ship_dict):
                 j=[1, 2],
                 k=[2, 3],
                 color="navy",
-                opacity=0.5,
-                name="Sagoma Nave 2D (Piano Z=0)",
+                opacity=0.45,
+                name=f"Piano Nave (+{ship_z_elevation:.1f}m)",
             )
         )
 
-        # Contorno 2D per evidenziare il profilo della nave
+        # Contorno 2D perimetro nave alla quota sopraelevata
         ship_x_line = [-loa / 2, loa / 2, loa / 2, -loa / 2, -loa / 2]
         ship_y_line = [-beam / 2, -beam / 2, beam / 2, beam / 2, -beam / 2]
-        ship_z_line = [0, 0, 0, 0, 0]
+        ship_z_line = [ship_z_elevation] * 5
 
         fig.add_trace(
             go.Scatter3d(
@@ -245,12 +251,12 @@ def render_tab_berth(selected_port, ship_dict):
                 y=ship_y_line,
                 z=ship_z_line,
                 mode="lines",
-                name="Contorno Nave",
+                name="Perimetro Nave",
                 line=dict(color="blue", width=4),
             )
         )
 
-        # 3. Observation Platforms (Riferimenti di Prua e Poppa)
+        # 3. Observation Platforms sulla nave alla quota Z sopraelevata
         plat_fwd_x = (loa / 2.0) - OFFSET_PLATFORM_FWD_M
         plat_aft_x = (-loa / 2.0) + OFFSET_PLATFORM_AFT_M
 
@@ -258,7 +264,7 @@ def render_tab_berth(selected_port, ship_dict):
             go.Scatter3d(
                 x=[plat_fwd_x, plat_aft_x],
                 y=[0, 0],
-                z=[freeboard, freeboard],
+                z=[ship_z_elevation, ship_z_elevation],
                 mode="markers+text",
                 name="Observation Platforms",
                 text=["Obs Fwd", "Obs Aft"],
@@ -267,14 +273,17 @@ def render_tab_berth(selected_port, ship_dict):
             )
         )
 
-        # 4. Bitte in 3D (Coordinate X, Y, Z Calcolate)
+        # 4. Bitte sulla banchina (Quota Z=0 / relative a banchina)
         fig.add_trace(
             go.Scatter3d(
                 x=df_bollards["X_Coordinata_m"],
                 y=df_bollards["Y_Coordinata_m"],
-                z=df_bollards["Z_Altezza_m"],
+                z=[0.0]
+                * len(
+                    df_bollards
+                ),  # Posizionate sul piano banchina a quota 0
                 mode="markers+text",
-                name="Bitte Banchina (3D)",
+                name="Bitte Banchina (Z=0)",
                 text=df_bollards["bollard_id"],
                 textposition="bottom center",
                 marker=dict(size=7, color="red", symbol="square"),
