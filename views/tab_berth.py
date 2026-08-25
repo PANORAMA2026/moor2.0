@@ -1,13 +1,15 @@
 """
 views/tab_berth.py
 Modulo per la gestione del layout di banchina e modellazione 3D volumetrica della nave.
-Costruisce lo scafo 3D (Mesh3d), la sovrastruttura, la banchina e posiziona le bitte.
+Costruisce lo scafo 3D (Mesh3d), la sovrastruttura, la banchina, le bitte e i cavi d'ormeggio.
 """
 
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+
+from core.line_mechanics import calculate_line_geometry
 
 # Offset fisso delle piattaforme di osservazione rispetto agli estremi
 OFFSET_PLATFORM_FWD_M = 25.0
@@ -259,6 +261,7 @@ def render_tab_berth(selected_port, ship_dict):
 
         fig = go.Figure()
 
+        # Genera e aggiunge la geometria della nave
         ship_traces = generate_detailed_3d_ship(ship_dict)
         for trace in ship_traces:
             fig.add_trace(trace)
@@ -267,6 +270,7 @@ def render_tab_berth(selected_port, ship_dict):
         beam = ship_dict.get("Beam", 37.20)
         berth_y = (beam / 2.0) + 6.4
 
+        # Aggiunge la Banchina
         fig.add_trace(
             go.Mesh3d(
                 x=[
@@ -299,11 +303,12 @@ def render_tab_berth(selected_port, ship_dict):
             )
         )
 
+        # Aggiunge le Bitte
         fig.add_trace(
             go.Scatter3d(
                 x=df_bollards["X_Coordinata_m"],
                 y=df_bollards["Y_Coordinata_m"],
-                z=[0.0] * len(df_bollards),
+                z=df_bollards["Z_Altezza_m"],
                 mode="markers+text",
                 name="Bitte Banchina",
                 text=df_bollards["bollard_id"],
@@ -312,18 +317,40 @@ def render_tab_berth(selected_port, ship_dict):
             )
         )
 
+        # Calcola e Disegna i Cavi d'Ormeggio se presenti in session_state
+        if "lines_inventory" in st.session_state and not st.session_state.lines_inventory.empty:
+            geom_df = calculate_line_geometry(
+                st.session_state.lines_inventory,
+                df_bollards,
+                loa=loa
+            )
+            if not geom_df.empty:
+                for _, line in geom_df.iterrows():
+                    fig.add_trace(
+                        go.Scatter3d(
+                            x=[line["chock_x_m"], line["bollard_x_m"]],
+                            y=[line["chock_y_m"], line["bollard_y_m"]],
+                            z=[line["chock_z_m"], line["bollard_z_m"]],
+                            mode="lines",
+                            line=dict(color="orange", width=4),
+                            name=f"Cavo {line.get('line_id', '')}",
+                            showlegend=False
+                        )
+                    )
+
+        # Configurazione del Layout e Centratura della Telecamera attorno a (0,0,0)
         fig.update_layout(
             scene=dict(
-                xaxis_title="X / Lunghezza (m)",
-                yaxis_title="Y / Larghezza (m)",
-                zaxis_title="Z / Altezza (m)",
+                xaxis=dict(range=[-loa / 2.0 - 40, loa / 2.0 + 40], title="X / Longitudinale (m)"),
+                yaxis=dict(range=[-beam, berth_y + 20], title="Y / Trasversale (m)"),
+                zaxis=dict(range=[-12, 50], title="Z / Verticale (m)"),
                 aspectmode="data",
                 camera=dict(
-                    eye=dict(x=-1.6, y=-1.6, z=1.2),
-                    center=dict(x=0, y=0, z=10),
+                    center=dict(x=0, y=0, z=0),  # Mantiene il perno di rotazione perfettamente centrato
+                    eye=dict(x=1.3, y=-1.3, z=0.9),
                 ),
             ),
-            height=620,
+            height=650,
             margin=dict(l=0, r=0, b=0, t=30),
         )
 
