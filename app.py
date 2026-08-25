@@ -11,7 +11,6 @@ import sys
 import pandas as pd
 import requests
 import streamlit as st
-import pandas as pd
 
 # Assicura che la directory radice sia nel PATH di sistema
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -51,7 +50,7 @@ st.set_page_config(
 # =============================================================================
 # 1. INIZIALIZZAZIONE DATABASE & SESSION STATE
 # =============================================================================
-DB_PATH = "openmooring.db"
+DB_PATH = DB_FILE_PATH
 
 if "db_conn" not in st.session_state:
     st.session_state.db_conn = sqlite3.connect(
@@ -82,27 +81,28 @@ if "certificates_db" not in st.session_state:
         },
     ])
 
+# Coordinate X traslate per far coincidere il centro nave con X = 0 (LOA = 323.44m => Bow = +161.7m, Stern = -161.7m)
 if "mooring_stations" not in st.session_state:
     st.session_state.mooring_stations = {
         "Prua (Forward Station)": pd.DataFrame([
             {
                 "winch_id": "W1",
                 "chock_id": "C1",
-                "chock_x_m": 150.0,
+                "chock_x_m": 155.0,
                 "chock_y_m": 2.0,
                 "assigned_line_id": "1",
             },
             {
                 "winch_id": "W2",
                 "chock_id": "C2",
-                "chock_x_m": 150.0,
+                "chock_x_m": 155.0,
                 "chock_y_m": -2.0,
                 "assigned_line_id": "2",
             },
             {
                 "winch_id": "W3",
                 "chock_id": "C3",
-                "chock_x_m": 138.0,
+                "chock_x_m": 140.0,
                 "chock_y_m": 18.0,
                 "assigned_line_id": "3",
             },
@@ -125,14 +125,14 @@ if "mooring_stations" not in st.session_state:
             {
                 "winch_id": "W6",
                 "chock_id": "C6",
-                "chock_x_m": -138.0,
+                "chock_x_m": -140.0,
                 "chock_y_m": 18.0,
                 "assigned_line_id": "6",
             },
             {
                 "winch_id": "W7",
                 "chock_id": "C7",
-                "chock_x_m": -150.0,
+                "chock_x_m": -155.0,
                 "chock_y_m": 0.0,
                 "assigned_line_id": "7",
             },
@@ -148,7 +148,7 @@ if "lines_inventory" not in st.session_state:
             "station_id": "Prua (Forward Station)",
             "winch_id": "W1",
             "cert_id": "CERT-HMPE-2025-01",
-            "chock_x_m": 150.0,
+            "chock_x_m": 155.0,
             "chock_y_m": 2.0,
             "chock_z_m": 12.0,
             "material": "HMPE",
@@ -168,7 +168,7 @@ if "lines_inventory" not in st.session_state:
             "station_id": "Prua (Forward Station)",
             "winch_id": "W2",
             "cert_id": "CERT-HMPE-2025-01",
-            "chock_x_m": 150.0,
+            "chock_x_m": 155.0,
             "chock_y_m": -2.0,
             "chock_z_m": 12.0,
             "material": "HMPE",
@@ -188,7 +188,7 @@ if "lines_inventory" not in st.session_state:
             "station_id": "Prua (Forward Station)",
             "winch_id": "W3",
             "cert_id": "CERT-HMPE-2025-02",
-            "chock_x_m": 138.0,
+            "chock_x_m": 140.0,
             "chock_y_m": 18.0,
             "chock_z_m": 10.0,
             "material": "HMPE",
@@ -248,7 +248,7 @@ if "lines_inventory" not in st.session_state:
             "station_id": "Poppa (Aft Station)",
             "winch_id": "W6",
             "cert_id": "CERT-HMPE-2025-02",
-            "chock_x_m": -138.0,
+            "chock_x_m": -140.0,
             "chock_y_m": 18.0,
             "chock_z_m": 10.0,
             "material": "HMPE",
@@ -268,7 +268,7 @@ if "lines_inventory" not in st.session_state:
             "station_id": "Poppa (Aft Station)",
             "winch_id": "W7",
             "cert_id": "CERT-HMPE-2025-02",
-            "chock_x_m": -150.0,
+            "chock_x_m": -155.0,
             "chock_y_m": 0.0,
             "chock_z_m": 12.0,
             "material": "HMPE",
@@ -472,7 +472,7 @@ with tab_3d_editor:
 
 active_bollards_df = st.session_state.ports_bollards[selected_port]
 geom_df = calculate_line_geometry(
-    st.session_state.lines_inventory, active_bollards_df
+    st.session_state.lines_inventory, active_bollards_df, loa=DEFAULT_SHIP["LOA"]
 )
 
 # -----------------------------------------------------------------------------
