@@ -7,6 +7,10 @@ Definizione delle costanti globali dell'applicazione.
 OFFSET_PLATFORM_FWD_M = 25.0
 OFFSET_PLATFORM_AFT_M = 14.0
 
+# Fattori di conversione Unità di Misura (Kilonewton e Tonnellate metriche)
+KN_TO_TONS = 0.1019716    # 1 kN = ~0.102 tonnellate (t o MT)
+TONS_TO_KN = 9.80665      # 1 tonnellata = 9.80665 kN
+
 # Dati di default nave
 DEFAULT_SHIP = {
     "Name": "Nave Passeggeri",
