@@ -1,7 +1,8 @@
 """
 views/tab_berth.py
-Modulo avanzato per la gestione del layout di banchina e visualizzazione 3D completa della nave.
-Sfrutta tutti i dati geometrici e propulsivi centralizzati in DEFAULT_SHIP.
+Modulo per la gestione del layout di banchina e modellazione 3D volumetrica della nave.
+Atinge ai dati centralizzati della nave (DEFAULT_SHIP) per costruire lo scafo 3D (Mesh3d),
+la sovrastruttura, la banchina e posizionare le bitte secondo i rilevamenti laser.
 """
 
 import numpy as np
@@ -34,8 +35,7 @@ def calculate_bollard_coordinates(
 
 
 def generate_detailed_3d_ship(ship_dict):
-    """Genera la struttura 3D dettagliata della nave utilizzando tutti i parametri disponibili."""
-    # Estrazione parametri principali
+    """Genera lo scafo volumetrico 3D (Mesh3d) e la sovrastruttura tridimensionale della nave."""
     loa = ship_dict.get("LOA", 323.44)
     beam_hull = ship_dict.get("Beam", 37.20)
     beam_max = ship_dict.get("Beam_Max", 49.40)
@@ -48,216 +48,135 @@ def generate_detailed_3d_ship(ship_dict):
 
     loa_half = loa / 2.0
     beam_half = beam_hull / 2.0
-    deck_main_z = freeboard  # Altezza ponte principale rispetto al galleggiamento
+    deck_z = freeboard  # Quota ponte principale (m)
+    bottom_z = -draft  # Quota chiglia (m)
 
     traces = []
 
     # ----------------------------------------------------
-    # 1. CARENA E IMPERMEABILE SUBACQUEO (Pescaggio)
+    # 1. SCAFO VOLUMETRICO 3D (SOLIDO MESH3D)
     # ----------------------------------------------------
-    hull_sub_x = [
-        -loa_half * 0.95,
-        loa_half * 0.75,
-        loa_half * 0.9,
-        loa_half * 0.75,
-        -loa_half * 0.95,
-        -loa_half * 0.95,
-    ]
-    hull_sub_y = [
-        -beam_half * 0.9,
-        -beam_half * 0.9,
-        0,
-        beam_half * 0.9,
-        beam_half * 0.9,
-        -beam_half * 0.9,
-    ]
-    hull_sub_z = [-draft] * len(hull_sub_x)
-
-    traces.append(
-        go.Scatter3d(
-            x=hull_sub_x,
-            y=hull_sub_y,
-            z=hull_sub_z,
-            mode="lines",
-            line=dict(color="darkred", width=5),
-            name=f"Carena / Pescaggio ({draft}m)",
-        )
-    )
-
-    # Bulbo di Prua (Bulbous Bow)
-    traces.append(
-        go.Scatter3d(
-            x=[loa_half * 0.85, loa_half * 0.98, loa_half * 0.85],
-            y=[0, 0, 0],
-            z=[-draft, -draft * 0.5, 0],
-            mode="lines+markers",
-            line=dict(color="crimson", width=6),
-            marker=dict(size=4, color="crimson"),
-            name="Bulbo di Prua",
-        )
-    )
-
-    # ----------------------------------------------------
-    # 2. SCAFO PRINCIPALE (Ponte di Coperta & Bordo Libero)
-    # ----------------------------------------------------
-    hull_x = [
+    # Vertici (0..4 ponte superiore, 5..9 chiglia inferiore)
+    x_v = [
         -loa_half,
         loa_half * 0.7,
         loa_half,
         loa_half * 0.7,
         -loa_half,
         -loa_half,
+        loa_half * 0.7,
+        loa_half,
+        loa_half * 0.7,
+        -loa_half,
     ]
-    hull_y = [
+    y_v = [
         -beam_half,
         -beam_half,
         0,
         beam_half,
         beam_half,
         -beam_half,
+        -beam_half,
+        0,
+        beam_half,
+        beam_half,
     ]
-    hull_z = [deck_main_z] * len(hull_x)
+    z_v = [deck_z] * 5 + [bottom_z] * 5
+
+    # Triangolazione delle facce verticali e orizzontali
+    i_faces = [0, 0, 0, 0, 5, 5, 0, 1, 1, 2, 2, 3, 3, 4]
+    j_faces = [1, 2, 3, 4, 6, 7, 5, 6, 2, 7, 3, 8, 4, 9]
+    k_faces = [2, 3, 4, 1, 7, 8, 1, 2, 7, 3, 8, 4, 9, 5]
 
     traces.append(
-        go.Scatter3d(
-            x=hull_x,
-            y=hull_y,
-            z=hull_z,
-            mode="lines",
-            line=dict(color="navy", width=7),
-            name=f"Scafo Fuori Acqua (Bordo Libero {freeboard}m)",
+        go.Mesh3d(
+            x=x_v,
+            y=y_v,
+            z=z_v,
+            i=i_faces,
+            j=j_faces,
+            k=k_faces,
+            color="navy",
+            opacity=0.85,
+            name="Scafo Solido 3D",
         )
     )
 
     # ----------------------------------------------------
-    # 3. SOVRASTRUTTURA PONTI PASSEGGERI (Hotel Block)
+    # 2. SOVRASTRUTTURA PONTI 3D (VOLUME PASSEGGERI)
     # ----------------------------------------------------
-    # Blocco Inferiore (Ponti Cabine)
-    super_lower_x = [
-        -loa_half * 0.88,
+    sup_z_bottom = deck_z
+    sup_z_top = 35.0
+    x_s = [
+        -loa_half * 0.85,
         loa_half * 0.65,
         loa_half * 0.65,
-        -loa_half * 0.88,
-        -loa_half * 0.88,
+        -loa_half * 0.85,
+        -loa_half * 0.85,
+        loa_half * 0.65,
+        loa_half * 0.65,
+        -loa_half * 0.85,
     ]
-    super_lower_y = [
-        -beam_half * 0.95,
-        -beam_half * 0.95,
-        beam_half * 0.95,
-        beam_half * 0.95,
-        -beam_half * 0.95,
+    y_s = [
+        -beam_half * 0.9,
+        -beam_half * 0.9,
+        beam_half * 0.9,
+        beam_half * 0.9,
+        -beam_half * 0.9,
+        -beam_half * 0.9,
+        beam_half * 0.9,
+        beam_half * 0.9,
     ]
-    super_lower_z = [18.0] * 5
+    z_s = [sup_z_bottom] * 4 + [sup_z_top] * 4
 
     traces.append(
-        go.Scatter3d(
-            x=super_lower_x,
-            y=super_lower_y,
-            z=super_lower_z,
-            mode="lines",
-            line=dict(color="royalblue", width=4),
-            name="Ponti Passeggeri (Inferiori)",
-        )
-    )
-
-    # Blocco Superiore (Lido & Ponti Solarium)
-    super_upper_x = [
-        -loa_half * 0.75,
-        loa_half * 0.55,
-        loa_half * 0.55,
-        -loa_half * 0.75,
-        -loa_half * 0.75,
-    ]
-    super_upper_y = [
-        -beam_half * 0.85,
-        -beam_half * 0.85,
-        beam_half * 0.85,
-        beam_half * 0.85,
-        -beam_half * 0.85,
-    ]
-    super_upper_z = [38.0] * 5
-
-    traces.append(
-        go.Scatter3d(
-            x=super_upper_x,
-            y=super_upper_y,
-            z=super_upper_z,
-            mode="lines",
-            line=dict(color="steelblue", width=4),
-            name="Ponte Lido & Solarium",
+        go.Mesh3d(
+            x=x_s,
+            y=y_s,
+            z=z_s,
+            i=[0, 0, 0, 1, 2, 3, 4, 4, 0, 1, 2, 3],
+            j=[1, 2, 4, 5, 6, 7, 5, 6, 3, 2, 6, 7],
+            k=[2, 3, 5, 6, 7, 4, 6, 7, 4, 5, 1, 0],
+            color="royalblue",
+            opacity=0.75,
+            name="Sovrastruttura Ponti 3D",
         )
     )
 
     # ----------------------------------------------------
-    # 4. PLANCIA DI COMANDO E ALETTE SPORGENTI (Beam Max)
+    # 3. PLANCIA DI COMANDO & ALETTE (BEAM MAX 49.4m)
     # ----------------------------------------------------
-    bridge_x_pos = loa_half - bridge_bow
-    wing_y_half = beam_max / 2.0
+    bridge_x = loa_half - bridge_bow
+    wing_y = beam_max / 2.0
 
-    # Linea Alette di Plancia
     traces.append(
         go.Scatter3d(
-            x=[bridge_x_pos, bridge_x_pos],
-            y=[-wing_y_half, wing_y_half],
+            x=[bridge_x, bridge_x],
+            y=[-wing_y, wing_y],
             z=[bridge_eye_h, bridge_eye_h],
             mode="lines+markers",
-            line=dict(color="darkred", width=8),
+            line=dict(color="red", width=8),
             marker=dict(size=6, color="red"),
-            name=f"Plancia & Alette ({beam_max}m - Eye Height {bridge_eye_h}m)",
-        )
-    )
-
-    # Struttura Vetrata della Plancia
-    traces.append(
-        go.Scatter3d(
-            x=[
-                bridge_x_pos,
-                bridge_x_pos + 3.0,
-                bridge_x_pos,
-                bridge_x_pos,
-            ],
-            y=[-wing_y_half, 0, wing_y_half, -wing_y_half],
-            z=[bridge_eye_h, bridge_eye_h + 1.5, bridge_eye_h, bridge_eye_h],
-            mode="lines",
-            line=dict(color="cyan", width=3),
-            name="Vetrata Plancia",
+            name=f"Plancia & Alette ({beam_max}m)",
         )
     )
 
     # ----------------------------------------------------
-    # 5. FUMAIOLO & ALBERO ANTENNE (Air Draft)
+    # 4. FUMAIOLO & OBSERVATION PLATFORMS
     # ----------------------------------------------------
-    funnel_z_top = air_draft_funnel - draft
-    mast_z_top = air_draft_mast - draft
-
-    # Fumaiolo Caratteristico
+    funnel_z = air_draft_funnel - draft
     traces.append(
         go.Scatter3d(
             x=[-15, 5, -5, -25, -15],
             y=[0, 0, 0, 0, 0],
-            z=[38.0, 38.0, funnel_z_top, funnel_z_top, 38.0],
+            z=[sup_z_top, sup_z_top, funnel_z, funnel_z, sup_z_top],
             mode="lines",
-            line=dict(color="crimson", width=9),
-            name=f"Fumaiolo (Air Draft {air_draft_funnel}m)",
+            line=dict(color="crimson", width=8),
+            name=f"Fumaiolo ({air_draft_funnel}m)",
         )
     )
 
-    # Albero Antenne (Main Mast)
-    traces.append(
-        go.Scatter3d(
-            x=[bridge_x_pos - 10, bridge_x_pos - 10],
-            y=[0, 0],
-            z=[38.0, mast_z_top],
-            mode="lines+markers",
-            line=dict(color="gold", width=5),
-            marker=dict(size=4, color="gold"),
-            name=f"Albero Antenne (Air Draft {air_draft_mast}m)",
-        )
-    )
-
-    # ----------------------------------------------------
-    # 6. PLATFORMS DI OSSERVAZIONE (Obs Fwd & Obs Aft)
-    # ----------------------------------------------------
+    # Marker Observation Platforms (-25m Fwd, -14m Aft)
     plat_fwd_x = loa_half - OFFSET_PLATFORM_FWD_M
     plat_aft_x = -loa_half + OFFSET_PLATFORM_AFT_M
 
@@ -265,44 +184,15 @@ def generate_detailed_3d_ship(ship_dict):
         go.Scatter3d(
             x=[plat_fwd_x, plat_aft_x],
             y=[0, 0],
-            z=[deck_main_z + 2.0, deck_main_z + 2.0],
+            z=[deck_z + 2.0, deck_z + 2.0],
             mode="markers+text",
             name="Observation Platforms",
-            text=[f"Obs Fwd (-{OFFSET_PLATFORM_FWD_M}m)", f"Obs Aft (-{OFFSET_PLATFORM_AFT_M}m)"],
+            text=[
+                f"Obs Fwd (-{OFFSET_PLATFORM_FWD_M}m)",
+                f"Obs Aft (-{OFFSET_PLATFORM_AFT_M}m)",
+            ],
             textposition="top center",
-            marker=dict(size=9, color="gold", symbol="diamond"),
-        )
-    )
-
-    # ----------------------------------------------------
-    # 7. MANOVRA E PROPULSIONE (Thrusters & Azipods)
-    # ----------------------------------------------------
-    # Bow Thrusters (3 Tunnel a prua)
-    thruster_x = [loa_half * 0.68, loa_half * 0.72, loa_half * 0.76]
-    for i, tx in enumerate(thruster_x):
-        traces.append(
-            go.Scatter3d(
-                x=[tx, tx],
-                y=[-beam_half * 0.8, beam_half * 0.8],
-                z=[-draft * 0.6, -draft * 0.6],
-                mode="lines",
-                line=dict(color="orange", width=4, dash="dot"),
-                name=f"Bow Thruster #{i+1}" if i == 0 else "",
-                showlegend=(i == 0),
-            )
-        )
-
-    # Azipods (2 Unità orientabili a poppa)
-    azipod_x = -loa_half * 0.85
-    traces.append(
-        go.Scatter3d(
-            x=[azipod_x, azipod_x, azipod_x, azipod_x],
-            y=[-beam_half * 0.4, -beam_half * 0.4, beam_half * 0.4, beam_half * 0.4],
-            z=[-draft, -draft - 2.5, -draft, -draft - 2.5],
-            mode="lines+markers",
-            line=dict(color="purple", width=6),
-            marker=dict(size=6, color="purple"),
-            name=f"2x Azipods ({ship_dict.get('Azipods_Power_kW', 33000)} kW)",
+            marker=dict(size=10, color="gold", symbol="diamond"),
         )
     )
 
@@ -370,11 +260,11 @@ def render_tab_berth(selected_port, ship_dict):
             st.table(w_df)
 
     with col_map:
-        st.subheader("🧊 Modellazione 3D Completa")
+        st.subheader("🧊 Modellazione 3D Volumetrica")
 
         fig = go.Figure()
 
-        # 1. Tracciamento Modello Dettagliato Nave 3D
+        # 1. Tracciamento Modello Dettagliato Nave 3D Volumetrica
         ship_traces = generate_detailed_3d_ship(ship_dict)
         for trace in ship_traces:
             fig.add_trace(trace)
@@ -416,7 +306,7 @@ def render_tab_berth(selected_port, ship_dict):
             )
         )
 
-        # 3. Positionamento Bitte Banchina
+        # 3. Posizionamento Bitte Banchina
         fig.add_trace(
             go.Scatter3d(
                 x=df_bollards["X_Coordinata_m"],
