@@ -34,6 +34,19 @@ def init_db(lines_inventory_df: pd.DataFrame = None):
         )
     """)
 
+# Aggiungi questa tabella all'interno della funzione init_db() in db_manager.py:  
+cursor.execute("""
+    CREATE TABLE IF NOT EXISTS mooring_stations (
+        station_id TEXT PRIMARY KEY,
+        station_name TEXT,
+        component_type TEXT, -- 'WINCH', 'BASKET', 'CHOCK'
+        pos_x REAL,
+        pos_y REAL,
+        assigned_line_id TEXT,
+        FOREIGN KEY (assigned_line_id) REFERENCES line_inventory (line_id)
+    )
+""")
+
     # Tabella Storico Monitoraggio Tensioni in Banchina
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS tension_logs (
