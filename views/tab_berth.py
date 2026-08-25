@@ -1,8 +1,7 @@
 """
 views/tab_berth.py
 Modulo per la gestione del layout di banchina e modellazione 3D volumetrica della nave.
-Atinge ai dati centralizzati della nave (DEFAULT_SHIP) per costruire lo scafo 3D (Mesh3d),
-la sovrastruttura, la banchina e posizionare le bitte secondo i rilevamenti laser.
+Costruisce lo scafo 3D (Mesh3d), la sovrastruttura, la banchina e posiziona le bitte.
 """
 
 import numpy as np
@@ -10,7 +9,9 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from config.constants import OFFSET_PLATFORM_AFT_M, OFFSET_PLATFORM_FWD_M
+# Offset fisso delle piattaforme di osservazione rispetto agli estremi
+OFFSET_PLATFORM_FWD_M = 25.0
+OFFSET_PLATFORM_AFT_M = 14.0
 
 
 def calculate_bollard_coordinates(
@@ -23,10 +24,10 @@ def calculate_bollard_coordinates(
     z_m = -1.0 * (dist_inc * np.sin(slope_rad))
 
     if position_type == "Prua":
-        x_platform = (ship_loa / 2.0) - OFFSET_PLATFORM_FWD_M  # 25m da prua
+        x_platform = (ship_loa / 2.0) - OFFSET_PLATFORM_FWD_M
         x_m = x_platform - dist_horiz
     else:
-        x_platform = (-ship_loa / 2.0) + OFFSET_PLATFORM_AFT_M  # 14m da poppa
+        x_platform = (-ship_loa / 2.0) + OFFSET_PLATFORM_AFT_M
         x_m = x_platform + dist_horiz
 
     y_m = (ship_beam / 2.0) + 6.4
@@ -42,7 +43,6 @@ def generate_detailed_3d_ship(ship_dict):
     draft = ship_dict.get("Draft", 8.25)
     freeboard = ship_dict.get("Freeboard", 2.65)
     air_draft_funnel = ship_dict.get("Air_Draft_Funnel", 61.75)
-    air_draft_mast = ship_dict.get("Air_Draft_Mast", 63.25)
     bridge_bow = ship_dict.get("Bridge_To_Bow", 39.50)
     bridge_eye_h = ship_dict.get("Bridge_Eye_Height", 26.40)
 
@@ -56,7 +56,6 @@ def generate_detailed_3d_ship(ship_dict):
     # ----------------------------------------------------
     # 1. SCAFO VOLUMETRICO 3D (SOLIDO MESH3D)
     # ----------------------------------------------------
-    # Vertici (0..4 ponte superiore, 5..9 chiglia inferiore)
     x_v = [
         -loa_half,
         loa_half * 0.7,
@@ -83,7 +82,6 @@ def generate_detailed_3d_ship(ship_dict):
     ]
     z_v = [deck_z] * 5 + [bottom_z] * 5
 
-    # Triangolazione delle facce verticali e orizzontali
     i_faces = [0, 0, 0, 0, 5, 5, 0, 1, 1, 2, 2, 3, 3, 4]
     j_faces = [1, 2, 3, 4, 6, 7, 5, 6, 2, 7, 3, 8, 4, 9]
     k_faces = [2, 3, 4, 1, 7, 8, 1, 2, 7, 3, 8, 4, 9, 5]
@@ -103,7 +101,7 @@ def generate_detailed_3d_ship(ship_dict):
     )
 
     # ----------------------------------------------------
-    # 2. SOVRASTRUTTURA PONTI 3D (VOLUME PASSEGGERI)
+    # 2. SOVRASTRUTTURA PONTI 3D
     # ----------------------------------------------------
     sup_z_bottom = deck_z
     sup_z_top = 35.0
@@ -144,7 +142,7 @@ def generate_detailed_3d_ship(ship_dict):
     )
 
     # ----------------------------------------------------
-    # 3. PLANCIA DI COMANDO & ALETTE (BEAM MAX 49.4m)
+    # 3. PLANCIA DI COMANDO & ALETTE (BEAM MAX)
     # ----------------------------------------------------
     bridge_x = loa_half - bridge_bow
     wing_y = beam_max / 2.0
@@ -176,7 +174,6 @@ def generate_detailed_3d_ship(ship_dict):
         )
     )
 
-    # Marker Observation Platforms (-25m Fwd, -14m Aft)
     plat_fwd_x = loa_half - OFFSET_PLATFORM_FWD_M
     plat_aft_x = -loa_half + OFFSET_PLATFORM_AFT_M
 
@@ -209,7 +206,6 @@ def render_tab_berth(selected_port, ship_dict):
 
     df_bollards = st.session_state.ports_bollards[selected_port].copy()
 
-    # Ricalcolo coordinate bitte basato sugli offset
     for idx, row in df_bollards.iterrows():
         pos = row.get("Posizione", "Prua")
         d_inc = float(row.get("Dist_Inclinata_m", 15.0))
@@ -250,7 +246,6 @@ def render_tab_berth(selected_port, ship_dict):
             st.success("Layout e coordinate ricalcolate!")
             st.rerun()
 
-        # Tabella Carico Vento
         if "Wind_Load_Table" in ship_dict:
             st.markdown("**🌬️ Carico Vento Stimato dalla Curva Tecnica:**")
             w_df = pd.DataFrame(
@@ -264,12 +259,10 @@ def render_tab_berth(selected_port, ship_dict):
 
         fig = go.Figure()
 
-        # 1. Tracciamento Modello Dettagliato Nave 3D Volumetrica
         ship_traces = generate_detailed_3d_ship(ship_dict)
         for trace in ship_traces:
             fig.add_trace(trace)
 
-        # 2. Modellazione Banchina 3D (Banchina parallela a dritta)
         loa = ship_dict.get("LOA", 323.44)
         beam = ship_dict.get("Beam", 37.20)
         berth_y = (beam / 2.0) + 6.4
@@ -306,7 +299,6 @@ def render_tab_berth(selected_port, ship_dict):
             )
         )
 
-        # 3. Posizionamento Bitte Banchina
         fig.add_trace(
             go.Scatter3d(
                 x=df_bollards["X_Coordinata_m"],
@@ -320,7 +312,6 @@ def render_tab_berth(selected_port, ship_dict):
             )
         )
 
-        # Impostazioni Camera e Layout Prospettico
         fig.update_layout(
             scene=dict(
                 xaxis_title="X / Lunghezza (m)",
