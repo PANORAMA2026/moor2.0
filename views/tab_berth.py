@@ -9,7 +9,11 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from core.line_mechanics import calculate_line_geometry
+# Import sicuro del calcolo geometria cavi
+try:
+    from core.line_mechanics import calculate_line_geometry
+except ImportError:
+    calculate_line_geometry = None
 
 # Offset fisso delle piattaforme di osservazione rispetto agli estremi
 OFFSET_PLATFORM_FWD_M = 25.0
@@ -261,7 +265,7 @@ def render_tab_berth(selected_port, ship_dict):
 
         fig = go.Figure()
 
-        # Genera e aggiunge la geometria della nave
+        # 1. Tracce Nave
         ship_traces = generate_detailed_3d_ship(ship_dict)
         for trace in ship_traces:
             fig.add_trace(trace)
@@ -270,7 +274,7 @@ def render_tab_berth(selected_port, ship_dict):
         beam = ship_dict.get("Beam", 37.20)
         berth_y = (beam / 2.0) + 6.4
 
-        # Aggiunge la Banchina
+        # 2. Traccia Banchina
         fig.add_trace(
             go.Mesh3d(
                 x=[
@@ -303,7 +307,7 @@ def render_tab_berth(selected_port, ship_dict):
             )
         )
 
-        # Aggiunge le Bitte
+        # 3. Traccia Bitte
         fig.add_trace(
             go.Scatter3d(
                 x=df_bollards["X_Coordinata_m"],
@@ -317,36 +321,47 @@ def render_tab_berth(selected_port, ship_dict):
             )
         )
 
-        # Calcola e Disegna i Cavi d'Ormeggio se presenti in session_state
-        if "lines_inventory" in st.session_state and not st.session_state.lines_inventory.empty:
-            geom_df = calculate_line_geometry(
-                st.session_state.lines_inventory,
-                df_bollards,
-                loa=loa
-            )
-            if not geom_df.empty:
-                for _, line in geom_df.iterrows():
-                    fig.add_trace(
-                        go.Scatter3d(
-                            x=[line["chock_x_m"], line["bollard_x_m"]],
-                            y=[line["chock_y_m"], line["bollard_y_m"]],
-                            z=[line["chock_z_m"], line["bollard_z_m"]],
-                            mode="lines",
-                            line=dict(color="orange", width=4),
-                            name=f"Cavo {line.get('line_id', '')}",
-                            showlegend=False
-                        )
-                    )
+        # 4. Traccia Cavi d'Ormeggio (Isolata e protetta da errori)
+        if (
+            calculate_line_geometry is not None
+            and "lines_inventory" in st.session_state
+            and isinstance(st.session_state.lines_inventory, pd.DataFrame)
+            and not st.session_state.lines_inventory.empty
+        ):
+            try:
+                geom_df = calculate_line_geometry(
+                    st.session_state.lines_inventory,
+                    df_bollards,
+                    loa=loa
+                )
+                if geom_df is not None and not geom_df.empty:
+                    required_cols = {"chock_x_m", "chock_y_m", "chock_z_m", "bollard_x_m", "bollard_y_m", "bollard_z_m"}
+                    if required_cols.issubset(geom_df.columns):
+                        for _, line in geom_df.iterrows():
+                            fig.add_trace(
+                                go.Scatter3d(
+                                    x=[line["chock_x_m"], line["bollard_x_m"]],
+                                    y=[line["chock_y_m"], line["bollard_y_m"]],
+                                    z=[line["chock_z_m"], line["bollard_z_m"]],
+                                    mode="lines",
+                                    line=dict(color="orange", width=4),
+                                    name=f"Cavo {line.get('line_id', '')}",
+                                    showlegend=False,
+                                )
+                            )
+            except Exception:
+                # In caso di errore sui cavi, evita di far fallire l'intero grafico 3D
+                pass
 
-        # Configurazione del Layout e Centratura della Telecamera attorno a (0,0,0)
+        # 5. Configurazione Layout e Telecamera
         fig.update_layout(
             scene=dict(
-                xaxis=dict(range=[-loa / 2.0 - 40, loa / 2.0 + 40], title="X / Longitudinale (m)"),
-                yaxis=dict(range=[-beam, berth_y + 20], title="Y / Trasversale (m)"),
-                zaxis=dict(range=[-12, 50], title="Z / Verticale (m)"),
+                xaxis=dict(title="X / Longitudinale (m)"),
+                yaxis=dict(title="Y / Trasversale (m)"),
+                zaxis=dict(title="Z / Verticale (m)"),
                 aspectmode="data",
                 camera=dict(
-                    center=dict(x=0, y=0, z=0),  # Mantiene il perno di rotazione perfettamente centrato
+                    center=dict(x=0, y=0, z=0),
                     eye=dict(x=1.3, y=-1.3, z=0.9),
                 ),
             ),
