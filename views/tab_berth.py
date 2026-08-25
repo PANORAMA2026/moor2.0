@@ -1,193 +1,199 @@
 """
 views/tab_berth.py
-Layout banchina, bitte e calcolo da piattaforma osservazione (telemetro).
+Modulo per la gestione del layout di banchina e posizionamento bitte
+tramite telemetro (Distanza e Pendenza da Observation Platform).
 """
 
-import math
+import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+
 from config.constants import OFFSET_PLATFORM_AFT_M, OFFSET_PLATFORM_FWD_M
 
 
-def render_tab_berth(selected_port, ship_dict):
-    st.header(f"🗺️ Layout Banchina & Bitte: {selected_port}")
-    st.info(
-        "📐 **Misurazione da Piattaforme d'Osservazione (Rangefinder):**\n"
-        f"• **Observation Platform Prua:** posizionata a **{OFFSET_PLATFORM_FWD_M} m** dall'estrema prua.\n"
-        f"• **Observation Platform Poppa:** posizionata a **{OFFSET_PLATFORM_AFT_M} m** dall'estrema poppa.\n"
-        "Inserisci la **Distanza Inclinata (m)** e la **Pendenza (°)** rilevate con il telemetro."
-    )
+def calculate_bollard_coordinates(
+    position_type, dist_inc, slope_deg, ship_loa, ship_beam
+):
+    """Calcola le coordinate X, Y, Z della bitta partendo da Distanza e Pendenza
 
-    loa = ship_dict["LOA"]
-    beam = ship_dict["Beam"]
+    misurate dalle Observation Platform di Prua / Poppa.
+    """
+    slope_rad = np.radians(slope_deg)
 
-    st.subheader("⚙️ Orientamento Banchina")
-    berth_heading = st.number_input(
-        "Orientamento Banchina / Berth True Heading (° True)",
-        min_value=0.0,
-        max_value=360.0,
-        value=float(st.session_state.port_headings.get(selected_port, 135.0)),
-        step=1.0,
-        key=f"heading_input_{selected_port}",
-    )
-    st.session_state.port_headings[selected_port] = berth_heading
+    # 1. Distanza orizzontale e offset verticale Z
+    dist_horiz = dist_inc * np.cos(slope_rad)
+    z_m = -1.0 * (dist_inc * np.sin(slope_rad))
 
-    st.divider()
-
-    df_bollards = st.session_state.ports_bollards[selected_port]
-
-    st.subheader("➕ Aggiungi Nuova Bitta tramite Rilevamento Telemetro")
-    c_add1, c_add2, c_add3, c_add4, c_add5, c_add6, c_add7 = st.columns(7)
-
-    new_b_id = c_add1.text_input("ID Bitta", f"B{len(df_bollards) + 1}")
-    new_pos = c_add2.selectbox(
-        "Piattaforma Misura",
-        ["Prua (21m fwd)", "Poppa (14m aft)"],
-    )
-    new_dist_inc = c_add3.number_input(
-        "Dist. Inclinata (m)", min_value=0.0, value=15.0, step=0.5
-    )
-    new_pendenza = c_add4.number_input(
-        "Pendenza (°)", min_value=-60.0, max_value=60.0, value=0.0, step=1.0
-    )
-    new_y = c_add5.number_input("Dist. Banchina Y (m)", value=25.0, step=0.5)
-    new_z = c_add6.number_input("Altezza Z (m)", value=-3.0, step=0.5)
-    new_swl = c_add7.number_input("SWL Bitta (t)", value=150, step=10)
-
-    dist_horiz = new_dist_inc * math.cos(math.radians(new_pendenza))
-
-    if "Prua" in new_pos:
-        x_platform = (loa / 2.0) - OFFSET_PLATFORM_FWD_M
-        x_abs_calc = x_platform - dist_horiz
-        zone_label = "Prua"
+    # 2. Coordinata X basata sulle piattaforme di osservazione
+    if position_type == "Prua":
+        # Platform Prua = LOA/2 - OFFSET_PLATFORM_FWD_M (21m)
+        x_platform = (ship_loa / 2.0) - OFFSET_PLATFORM_FWD_M
+        x_m = x_platform - dist_horiz
     else:
-        x_platform = -(loa / 2.0) + OFFSET_PLATFORM_AFT_M
-        x_abs_calc = x_platform + dist_horiz
-        zone_label = "Poppa"
+        # Platform Poppa = -LOA/2 + OFFSET_PLATFORM_AFT_M (14m)
+        x_platform = (-ship_loa / 2.0) + OFFSET_PLATFORM_AFT_M
+        x_m = x_platform + dist_horiz
 
+    # 3. Coordinata Y (distanza fissa filo banchina/bitta dal centro nave)
+    y_m = (ship_beam / 2.0) + 6.4
+
+    return round(dist_horiz, 2), round(x_m, 2), round(y_m, 2), round(z_m, 2)
+
+
+def render_tab_berth(selected_port, ship_dict):
+    st.header(f"🗺️ Layout Banchina & Bitte — {selected_port}")
     st.caption(
-        f"💡 **Calcolo Anteprima:** Distanza Orizzontale = **{dist_horiz:.2f} m** | Coordinata X calcolata = **{x_abs_calc:.2f} m**"
+        "📐 **Telemetro Laser:** Inserisci solo Distanza e Pendenza. "
+        "Le coordinate $X, Y, Z$ vengono calcolate automaticamente dalle Observation Platform."
     )
 
-    if st.button("➕ Registra Bitta in Banchina"):
-        new_row = {
-            "bollard_id": new_b_id,
-            "Posizione": zone_label,
-            "Dist_Inclinata_m": new_dist_inc,
-            "Pendenza_deg": new_pendenza,
-            "Dist_Orizzontale_m": round(dist_horiz, 2),
-            "X_Coordinata_m": round(x_abs_calc, 2),
-            "Y_Coordinata_m": new_y,
-            "Z_Altezza_m": new_z,
-            "SWL_Bitta_t": new_swl,
-            "Stato": "Attivo",
-        }
-        st.session_state.ports_bollards[selected_port] = pd.concat(
-            [df_bollards, pd.DataFrame([new_row])], ignore_index=True
-        )
-        st.success(f"Bitta {new_b_id} aggiunta con successo!")
-        st.rerun()
+    df_bollards = st.session_state.ports_bollards[selected_port].copy()
 
-    st.divider()
+    # Ricalcolo automatico di X, Y, Z per ogni bitta nel DataFrame
+    for idx, row in df_bollards.iterrows():
+        pos = row.get("Posizione", "Prua")
+        d_inc = float(row.get("Dist_Inclinata_m", 15.0))
+        p_deg = float(row.get("Pendenza_deg", 0.0))
 
-    df_curr = st.session_state.ports_bollards[selected_port].copy()
-
-    calc_dist_h, calc_x = [], []
-    for _, r in df_curr.iterrows():
-        d_inc = float(r.get("Dist_Inclinata_m", r.get("Dist_Estrema_m", 0.0)))
-        pend = float(r.get("Pendenza_deg", 0.0))
-        d_h = d_inc * math.cos(math.radians(pend))
-        calc_dist_h.append(round(d_h, 2))
-
-        pos = str(r.get("Posizione", "Prua"))
-        if "Prua" in pos:
-            x_plat = (loa / 2.0) - OFFSET_PLATFORM_FWD_M
-            calc_x.append(round(x_plat - d_h, 2))
-        else:
-            x_plat = -(loa / 2.0) + OFFSET_PLATFORM_AFT_M
-            calc_x.append(round(x_plat + d_h, 2))
-
-    df_curr["Dist_Orizzontale_m"] = calc_dist_h
-    df_curr["X_Coordinata_m"] = calc_x
-
-    col_ed_left, col_ed_right = st.columns([1, 1])
-
-    with col_ed_left:
-        st.subheader("📋 Tabella Bitte Banchina")
-        edited_bollards = st.data_editor(
-            df_curr,
-            num_rows="dynamic",
-            use_container_width=True,
-            key=f"editor_{selected_port}",
-        )
-        st.session_state.ports_bollards[selected_port] = edited_bollards
-
-    with col_ed_right:
-        st.subheader("🌐 Visualizzazione Layout 3D Banchina")
-
-        fig_setup = go.Figure()
-        s_x = [-loa / 2, loa / 2 - 30, loa / 2, loa / 2 - 30, -loa / 2, -loa / 2]
-        s_y = [-beam / 2, -beam / 2, 0, beam / 2, beam / 2, -beam / 2]
-        s_z = [10.0] * len(s_x)
-        fig_setup.add_trace(
-            go.Scatter3d(
-                x=s_x,
-                y=s_y,
-                z=s_z,
-                mode="lines",
-                line=dict(color="navy", width=5),
-                name="Scafo Nave",
-            )
+        d_horiz, x_calc, y_calc, z_calc = calculate_bollard_coordinates(
+            pos, d_inc, p_deg, ship_dict["LOA"], ship_dict["Beam"]
         )
 
-        plat_x = [(loa / 2.0) - OFFSET_PLATFORM_FWD_M, -(loa / 2.0) + OFFSET_PLATFORM_AFT_M]
-        plat_y = [beam / 2.0, beam / 2.0]
-        plat_z = [12.0, 12.0]
-        fig_setup.add_trace(
-            go.Scatter3d(
-                x=plat_x,
-                y=plat_y,
-                z=plat_z,
-                mode="markers+text",
-                marker=dict(size=10, color="crimson", symbol="diamond"),
-                text=["Obs. Platform Prua (21m)", "Obs. Platform Poppa (14m)"],
-                textposition="top center",
-                name="Piattaforme Rilevamento",
-            )
-        )
+        df_bollards.at[idx, "Dist_Orizzontale_m"] = d_horiz
+        df_bollards.at[idx, "X_Coordinata_m"] = x_calc
+        df_bollards.at[idx, "Y_Coordinata_m"] = y_calc
+        df_bollards.at[idx, "Z_Altezza_m"] = z_calc
+        df_bollards.at[idx, "bollard_x_m"] = x_calc
+        df_bollards.at[idx, "bollard_y_m"] = y_calc
+        df_bollards.at[idx, "bollard_z_m"] = z_calc
 
-        act_b = edited_bollards[edited_bollards["Stato"] == "Attivo"]
-        fig_setup.add_trace(
-            go.Scatter3d(
-                x=act_b["X_Coordinata_m"],
-                y=act_b["Y_Coordinata_m"],
-                z=act_b["Z_Altezza_m"],
-                mode="markers+text",
-                marker=dict(
-                    size=9,
-                    color=act_b["SWL_Bitta_t"],
-                    colorscale="Viridis",
-                    showscale=True,
+    # Editor semplificato: mostra e fa modificare SOLO Distanza e Pendenza
+    col_edit, col_map = st.columns([1, 1])
+
+    with col_edit:
+        st.subheader("📋 Inserimento Misure Telemetro")
+
+        edited_df = st.data_editor(
+            df_bollards[[
+                "bollard_id",
+                "Posizione",
+                "Dist_Inclinata_m",
+                "Pendenza_deg",
+                "SWL_Bitta_t",
+                "Stato",
+            ]],
+            column_config={
+                "bollard_id": st.column_config.TextColumn(
+                    "ID Bitta", disabled=True
                 ),
-                text=[
-                    f"{r['bollard_id']} ({r['Posizione']}: {r['Dist_Orizzontale_m']}m h-dist,"
-                    f" SWL:{r['SWL_Bitta_t']}t)"
-                    for _, r in act_b.iterrows()
-                ],
-                textposition="top center",
-                name="Bitte Banchina",
+                "Posizione": st.column_config.SelectboxColumn(
+                    "Stazione / Posizione",
+                    options=["Prua", "Poppa"],
+                    required=True,
+                ),
+                "Dist_Inclinata_m": st.column_config.NumberColumn(
+                    "Distanza Telemetro (m)",
+                    min_value=0.0,
+                    max_value=300.0,
+                    step=0.5,
+                    format="%.1f m",
+                ),
+                "Pendenza_deg": st.column_config.NumberColumn(
+                    "Pendenza (°)",
+                    min_value=-45.0,
+                    max_value=45.0,
+                    step=0.5,
+                    format="%.1f°",
+                ),
+                "SWL_Bitta_t": st.column_config.NumberColumn(
+                    "SWL (ton)", min_value=10, max_value=300, step=5
+                ),
+                "Stato": st.column_config.SelectboxColumn(
+                    "Stato", options=["Attivo", "Inattivo"]
+                ),
+            },
+            hide_index=True,
+            use_container_width=True,
+        )
+
+        # Salva le modifiche nell'inventario di sessione
+        if st.button("💾 Aggiorna Layout Bitte"):
+            # Applica nuovamente il calcolo per salvare le coordinate finali
+            for idx, row in edited_df.iterrows():
+                d_horiz, x_calc, y_calc, z_calc = calculate_bollard_coordinates(
+                    row["Posizione"],
+                    row["Dist_Inclinata_m"],
+                    row["Pendenza_deg"],
+                    ship_dict["LOA"],
+                    ship_dict["Beam"],
+                )
+                edited_df.at[idx, "Dist_Orizzontale_m"] = d_horiz
+                edited_df.at[idx, "X_Coordinata_m"] = x_calc
+                edited_df.at[idx, "Y_Coordinata_m"] = y_calc
+                edited_df.at[idx, "Z_Altezza_m"] = z_calc
+                edited_df.at[idx, "bollard_x_m"] = x_calc
+                edited_df.at[idx, "bollard_y_m"] = y_calc
+                edited_df.at[idx, "bollard_z_m"] = z_calc
+
+            st.session_state.ports_bollards[selected_port] = edited_df
+            st.success("Layout banchina aggiornato con successo!")
+            st.rerun()
+
+    # Mappa 2D del Layout Nave-Banchina
+    with col_map:
+        st.subheader("📍 Visualizzazione 2D Banchina")
+        fig = go.Figure()
+
+        # Profilo della Nave
+        loa = ship_dict["LOA"]
+        beam = ship_dict["Beam"]
+        ship_x = [-loa / 2, loa / 2, loa / 2, -loa / 2, -loa / 2]
+        ship_y = [-beam / 2, -beam / 2, beam / 2, beam / 2, -beam / 2]
+
+        fig.add_trace(
+            go.Scatter(
+                x=ship_x,
+                y=ship_y,
+                fill="toself",
+                name="Carnival Panorama",
+                line=dict(color="navy"),
             )
         )
 
-        fig_setup.update_layout(
-            scene=dict(
-                aspectmode="data",
-                xaxis_title="X (m)",
-                yaxis_title="Y (m)",
-                zaxis_title="Z (m)",
-            ),
-            margin=dict(l=0, r=0, b=0, t=30),
-            height=520,
+        # Observation Platforms
+        plat_fwd_x = (loa / 2) - OFFSET_PLATFORM_FWD_M
+        plat_aft_x = (-loa / 2) + OFFSET_PLATFORM_AFT_M
+
+        fig.add_trace(
+            go.Scatter(
+                x=[plat_fwd_x, plat_aft_x],
+                y=[0, 0],
+                mode="markers+text",
+                name="Observation Platforms",
+                text=["Obs Fwd (21m)", "Obs Aft (14m)"],
+                textposition="top center",
+                marker=dict(size=10, color="orange", symbol="star"),
+            )
         )
-        st.plotly_chart(fig_setup, use_container_width=True)
+
+        # Posizione delle Bitte Calcolate
+        fig.add_trace(
+            go.Scatter(
+                x=df_bollards["X_Coordinata_m"],
+                y=df_bollards["Y_Coordinata_m"],
+                mode="markers+text",
+                name="Bitte Banchina",
+                text=df_bollards["bollard_id"],
+                textposition="bottom center",
+                marker=dict(size=12, color="red", symbol="square"),
+            )
+        )
+
+        fig.update_layout(
+            xaxis_title="X (m dall'ordinata maestra)",
+            yaxis_title="Y (m dal centro nave)",
+            height=450,
+            showlegend=True,
+        )
+        st.plotly_chart(fig, use_container_width=True)
