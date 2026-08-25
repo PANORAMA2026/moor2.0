@@ -1,6 +1,7 @@
 """
 app.py
 Punto di ingresso principale della suite OpenMooring MEG4 Pro.
+Configurazione blindata in default con i dati da config/constants.py.
 """
 
 from datetime import datetime
@@ -36,11 +37,10 @@ from utils.pdf_parser import extract_text_from_pdf, parse_certificate_text
 from views.tab_berth import render_tab_berth
 from views.tab_history import render_tab_history
 from views.tab_plans import render_tab_plans
-from views.tab_ship_inventory import render_tab_ship_inventory
 
 # Configurazione della pagina Streamlit
 st.set_page_config(
-    page_title="OpenMooring MEG4 Pro - Multi-Port & Certificate Manager",
+    page_title="OpenMooring MEG4 Pro - Carnival Panorama",
     layout="wide",
 )
 
@@ -84,29 +84,29 @@ if "mooring_stations" not in st.session_state:
             {
                 "winch_id": "W1",
                 "chock_id": "C1",
-                "chock_x_m": 80.0,
-                "chock_y_m": 20.0,
+                "chock_x_m": 150.0,
+                "chock_y_m": 2.0,
                 "assigned_line_id": "1",
             },
             {
                 "winch_id": "W2",
                 "chock_id": "C2",
-                "chock_x_m": 80.0,
-                "chock_y_m": 80.0,
+                "chock_x_m": 150.0,
+                "chock_y_m": -2.0,
                 "assigned_line_id": "2",
             },
             {
                 "winch_id": "W3",
                 "chock_id": "C3",
-                "chock_x_m": 60.0,
-                "chock_y_m": 50.0,
+                "chock_x_m": 138.0,
+                "chock_y_m": 18.0,
                 "assigned_line_id": "3",
             },
             {
                 "winch_id": "W4",
                 "chock_id": "C4",
-                "chock_x_m": 40.0,
-                "chock_y_m": 50.0,
+                "chock_x_m": 110.0,
+                "chock_y_m": 18.0,
                 "assigned_line_id": "4",
             },
         ]),
@@ -114,22 +114,22 @@ if "mooring_stations" not in st.session_state:
             {
                 "winch_id": "W5",
                 "chock_id": "C5",
-                "chock_x_m": 40.0,
-                "chock_y_m": 50.0,
+                "chock_x_m": -110.0,
+                "chock_y_m": 18.0,
                 "assigned_line_id": "5",
             },
             {
                 "winch_id": "W6",
                 "chock_id": "C6",
-                "chock_x_m": 60.0,
-                "chock_y_m": 50.0,
+                "chock_x_m": -138.0,
+                "chock_y_m": 18.0,
                 "assigned_line_id": "6",
             },
             {
                 "winch_id": "W7",
                 "chock_id": "C7",
-                "chock_x_m": 80.0,
-                "chock_y_m": 50.0,
+                "chock_x_m": -150.0,
+                "chock_y_m": 0.0,
                 "assigned_line_id": "7",
             },
         ]),
@@ -304,8 +304,14 @@ if "port_headings" not in st.session_state:
 init_db(st.session_state.lines_inventory)
 
 # =============================================================================
-# 2. BARRA LATERALE METEO
+# 2. BARRA LATERALE METEO & DATI NAVE
 # =============================================================================
+st.sidebar.title("🚢 Carnival Panorama")
+st.sidebar.caption(
+    f"LOA: {DEFAULT_SHIP['LOA']}m | Beam: {DEFAULT_SHIP['Beam']}m | Draft: {DEFAULT_SHIP['Draft']}m"
+)
+st.sidebar.divider()
+
 st.sidebar.header("🌐 Condizioni Meteo-Marine")
 meteo_mode = st.sidebar.radio(
     "Modalità Meteo:",
@@ -367,10 +373,9 @@ dir_curr = st.sidebar.slider("Direzione Corrente (deg)", 0, 360, 0)
 # =============================================================================
 # 3. INTERFACCIA PRINCIPALE E TABS
 # =============================================================================
-st.title("⚓ OpenMooring - MEG4 Pro Suite")
+st.title("⚓ OpenMooring MEG4 Pro — Carnival Panorama")
 
 (
-    tab_setup,
     tab_certs,
     tab_stations,
     tab_3d_editor,
@@ -378,32 +383,16 @@ st.title("⚓ OpenMooring - MEG4 Pro Suite")
     tab_polar,
     tab_maint,
 ) = st.tabs([
-    "🚢 1. Dati Nave & Inventario",
-    "📜 2. Certificati Cavi (PDF Drag & Drop)",
-    "🏗️ 3. Pianetti Mooring Stations",
-    "🗺️ 4. Layout Banchina & Bitte",
-    "📊 5. Simulazione Tensioni",
-    "🌀 6. Inviluppo Polare",
-    "📈 7. Storico & Usura Cavi",
+    "📜 1. Certificati Cavi (PDF Drag & Drop)",
+    "🏗️ 2. Pianetti Mooring Stations",
+    "🗺️ 3. Layout Banchina & Bitte",
+    "📊 4. Simulazione Tensioni",
+    "🌀 5. Inviluppo Polare",
+    "📈 6. Storico & Usura Cavi",
 ])
 
 # -----------------------------------------------------------------------------
-# TAB 1: DATI NAVE E CAVI
-# -----------------------------------------------------------------------------
-with tab_setup:
-    render_tab_ship_inventory()
-
-    ship_dict = {
-        "LOA": st.session_state.get("loa", DEFAULT_SHIP["LOA"]),
-        "Beam": st.session_state.get("beam", DEFAULT_SHIP["Beam"]),
-        "Draft": DEFAULT_SHIP["Draft"],
-        "AFW": st.session_state.get("afw", DEFAULT_SHIP["AFW"]),
-        "ALW": st.session_state.get("alw", DEFAULT_SHIP["ALW"]),
-        "ALC": DEFAULT_SHIP["ALC"],
-    }
-
-# -----------------------------------------------------------------------------
-# TAB 2: CERTIFICATI CAVI
+# TAB 1: CERTIFICATI CAVI
 # -----------------------------------------------------------------------------
 with tab_certs:
     st.header("📜 Modulo Certificati Cavi & Drag and Drop PDF")
@@ -466,16 +455,16 @@ with tab_certs:
         )
 
 # -----------------------------------------------------------------------------
-# TAB 3: MOORING STATIONS & PIANETTI
+# TAB 2: MOORING STATIONS & PIANETTI
 # -----------------------------------------------------------------------------
 with tab_stations:
     render_tab_plans()
 
 # -----------------------------------------------------------------------------
-# TAB 4: LAYOUT BANCHINA & BITTE (TELEMETRO)
+# TAB 3: LAYOUT BANCHINA & BITTE (TELEMETRO)
 # -----------------------------------------------------------------------------
 with tab_3d_editor:
-    render_tab_berth(selected_port, ship_dict)
+    render_tab_berth(selected_port, DEFAULT_SHIP)
 
 active_bollards_df = st.session_state.ports_bollards[selected_port]
 geom_df = calculate_line_geometry(
@@ -483,7 +472,7 @@ geom_df = calculate_line_geometry(
 )
 
 # -----------------------------------------------------------------------------
-# TAB 5: SIMULAZIONE TENSIONI
+# TAB 4: SIMULAZIONE TENSIONI
 # -----------------------------------------------------------------------------
 with tab_sim:
     if geom_df.empty:
@@ -497,10 +486,10 @@ with tab_sim:
             dir_wind,
             v_curr,
             dir_curr,
-            ship_dict["AFW"],
-            ship_dict["ALW"],
-            ship_dict["ALC"],
-            ship_dict["LOA"],
+            DEFAULT_SHIP["AFW"],
+            DEFAULT_SHIP["ALW"],
+            DEFAULT_SHIP["ALC"],
+            DEFAULT_SHIP["LOA"],
         )
         results_df = solve_line_tensions_3d(geom_df, forces)
 
@@ -533,7 +522,7 @@ with tab_sim:
             st.success("Sessione salvata nello storico usura!")
 
 # -----------------------------------------------------------------------------
-# TAB 6: INVILUPPO POLARE
+# TAB 5: INVILUPPO POLARE
 # -----------------------------------------------------------------------------
 with tab_polar:
     st.subheader("Inviluppo Polare dei Limiti Operativi del Vento (0-360°)")
@@ -541,17 +530,17 @@ with tab_polar:
         with st.spinner("Calcolo dinamico in corso..."):
             angles, max_winds = calculate_wind_operability_envelope(
                 geom_df,
-                ship_dict["AFW"],
-                ship_dict["ALW"],
-                ship_dict["ALC"],
-                ship_dict["LOA"],
+                DEFAULT_SHIP["AFW"],
+                DEFAULT_SHIP["ALW"],
+                DEFAULT_SHIP["ALC"],
+                DEFAULT_SHIP["LOA"],
                 v_curr=v_curr,
                 dir_curr=dir_curr,
             )
             st.success("Calcolo inviluppo completato!")
 
 # -----------------------------------------------------------------------------
-# TAB 7: STORICO & USURA CAVI
+# TAB 6: STORICO & USURA CAVI
 # -----------------------------------------------------------------------------
 with tab_maint:
     render_tab_history()
