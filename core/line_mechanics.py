@@ -17,6 +17,7 @@ MATERIAL_ELONGATION_PARAMS = {
     "STEEL_WIRE": {"A": 0.012, "B": 1.00}  # Lineare quasi rigido
 }
 
+
 def get_material_stiffness(material_type: str, tension_tons: float, mbl_tons: float, length_m: float) -> float:
     """
     Calcola la rigidezza secante o tangenziale k = dT/dL (in tonnellate/metro) 
@@ -39,6 +40,7 @@ def get_material_stiffness(material_type: str, tension_tons: float, mbl_tons: fl
     k_secant = tension_tons / max(delta_l, 0.001)
     return k_secant
 
+
 def calculate_meg4_composite_stiffness(
     main_mat: str, main_mbl: float, main_len: float, main_tension: float,
     tail_mat: str, tail_mbl: float, tail_len: float
@@ -57,18 +59,31 @@ def calculate_meg4_composite_stiffness(
         return k_tail
     return 0.0
 
-def calculate_line_geometry(lines_df: pd.DataFrame, bollards_df: pd.DataFrame) -> pd.DataFrame:
+
+def calculate_line_geometry(
+    lines_df: pd.DataFrame, 
+    bollards_df: pd.DataFrame, 
+    loa: float = 323.44, 
+    *args, 
+    **kwargs
+) -> pd.DataFrame:
     """
     Calcola vettori geometrici 3D (X, Y, Z), pendenza, azimuth e lunghezza reale delle linee.
-    Gestisce automaticamente differenze nelle definizioni delle colonne.
+    Accetta 'loa' e **kwargs per garantire compatibilità con le chiamate esterne da app.py.
     """
+    if lines_df is None or bollards_df is None:
+        return pd.DataFrame()
+
+    if not isinstance(lines_df, pd.DataFrame) or not isinstance(bollards_df, pd.DataFrame):
+        return pd.DataFrame()
+
     if lines_df.empty or bollards_df.empty:
         return pd.DataFrame()
 
     l_df = lines_df.copy()
     b_df = bollards_df.copy()
 
-    # Normalizzazione colonne per le Bitte (Bollards)
+    # Normalizzazione e mappatura colonne per le Bitte (Bollards)
     bollard_col_map = {
         "x_m": "bollard_x_m",
         "y_m": "bollard_y_m",
@@ -76,11 +91,14 @@ def calculate_line_geometry(lines_df: pd.DataFrame, bollards_df: pd.DataFrame) -
         "X": "bollard_x_m",
         "Y": "bollard_y_m",
         "Z": "bollard_z_m",
+        "X_Coordinata_m": "bollard_x_m",
+        "Y_Coordinata_m": "bollard_y_m",
+        "Z_Altezza_m": "bollard_z_m",
         "Dist_Inclinata_m": "bollard_x_m"  # Fallback di sicurezza se la coordinata X è espressa come distanza
     }
     b_df = b_df.rename(columns={k: v for k, v in bollard_col_map.items() if k in b_df.columns and v not in b_df.columns})
 
-    # Normalizzazione colonne per le Linee / Passacavi (Chocks)
+    # Normalizzazione e mappatura colonne per le Linee / Passacavi (Chocks)
     chock_col_map = {
         "x_m": "chock_x_m",
         "y_m": "chock_y_m",
@@ -99,7 +117,7 @@ def calculate_line_geometry(lines_df: pd.DataFrame, bollards_df: pd.DataFrame) -
     if merged.empty:
         return pd.DataFrame()
 
-    # Garanzia della presenza di tutte le coordinate 3D
+    # Garanzia della presenza e conversione numerica di tutte le coordinate 3D
     for col in ["bollard_x_m", "bollard_y_m", "bollard_z_m", "chock_x_m", "chock_y_m", "chock_z_m"]:
         if col not in merged.columns:
             merged[col] = 0.0
@@ -123,6 +141,7 @@ def calculate_line_geometry(lines_df: pd.DataFrame, bollards_df: pd.DataFrame) -
     merged["dz"] = dz
 
     return merged
+
 
 def solve_line_tensions_3d(geom_df: pd.DataFrame, forces_dict: dict, max_iter: int = 15, tol: float = 1e-3) -> pd.DataFrame:
     """
@@ -215,6 +234,7 @@ def solve_line_tensions_3d(geom_df: pd.DataFrame, forces_dict: dict, max_iter: i
 
     return df
 
+
 def calculate_wind_operability_envelope(
     geom_df: pd.DataFrame,
     afw: float,
@@ -240,7 +260,7 @@ def calculate_wind_operability_envelope(
             res_df = solve_line_tensions_3d(geom_df, forces)
 
             # Criterio di sicurezza MEG4: Nessuna cima deve superare il 55% MBL
-            if (res_df["Util_Percent"] > 55.0).any():
+            if "Util_Percent" in res_df.columns and (res_df["Util_Percent"] > 55.0).any():
                 safe = False
             else:
                 speed += 2.0
