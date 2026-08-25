@@ -1,7 +1,7 @@
 """
 views/tab_berth.py
-Modulo per la gestione del layout di banchina con:
-- Nave in 2D (Sagoma piana sul piano di galleggiamento Z=0)
+Modulo per la gestione del layout di banchina:
+- Nave in 2D (Perimetro/Sagoma piana sul piano di galleggiamento Z=0)
 - Banchina in 3D (Solido banchina + bitte tridimensionali)
 - Calcolo automatico X, Y, Z dalle Observation Platform (Prua/Poppa)
 """
@@ -42,7 +42,7 @@ def calculate_bollard_coordinates(
 
 
 def build_3d_dock_mesh(x_min, x_max, y_front, width_y=15.0, depth_z=5.0):
-    """Crea una struttura volumetrica 3D (Mesh3d) della banchina banchinata."""
+    """Crea una struttura volumetrica 3D (Mesh3d) della banchina."""
     y_back = y_front + width_y
     z_top = 0.0
     z_bottom = -depth_z
@@ -182,7 +182,7 @@ def render_tab_berth(selected_port, ship_dict):
             st.success("Layout aggiornato con successo!")
             st.rerun()
 
-    # --- SCENA 3D (Banchina 3D + Nave 2D) ---
+    # --- SCENA 3D (Banchina 3D + Nave 2D Corretta) ---
     with col_map:
         st.subheader("🧊 Vista 3D: Banchina Tridimensionale & Nave 2D")
 
@@ -215,24 +215,42 @@ def render_tab_berth(selected_port, ship_dict):
             )
         )
 
-        # 2. Nave 2D (Sagoma sul piano Z=0)
-        ship_x2d = [-loa / 2, loa / 2, loa / 2, -loa / 2, -loa / 2]
-        ship_y2d = [-beam / 2, -beam / 2, beam / 2, beam / 2, -beam / 2]
-        ship_z2d = [0, 0, 0, 0, 0]
+        # 2. Nave 2D: Superficie Piatta sul piano Z=0 (Mesh3d Piatta)
+        ship_x_mesh = [-loa / 2, loa / 2, loa / 2, -loa / 2]
+        ship_y_mesh = [-beam / 2, -beam / 2, beam / 2, beam / 2]
+        ship_z_mesh = [0, 0, 0, 0]
 
         fig.add_trace(
-            go.Scatter3d(
-                x=ship_x2d,
-                y=ship_y2d,
-                z=ship_z2d,
-                mode="lines",
-                fill="toself",
+            go.Mesh3d(
+                x=ship_x_mesh,
+                y=ship_y_mesh,
+                z=ship_z_mesh,
+                i=[0, 0],
+                j=[1, 2],
+                k=[2, 3],
+                color="navy",
+                opacity=0.5,
                 name="Sagoma Nave 2D (Piano Z=0)",
-                line=dict(color="navy", width=5),
             )
         )
 
-        # 3. Observation Platforms 2D (Riferimenti sulle stazioni di Prua e Poppa)
+        # Contorno 2D per evidenziare il profilo della nave
+        ship_x_line = [-loa / 2, loa / 2, loa / 2, -loa / 2, -loa / 2]
+        ship_y_line = [-beam / 2, -beam / 2, beam / 2, beam / 2, -beam / 2]
+        ship_z_line = [0, 0, 0, 0, 0]
+
+        fig.add_trace(
+            go.Scatter3d(
+                x=ship_x_line,
+                y=ship_y_line,
+                z=ship_z_line,
+                mode="lines",
+                name="Contorno Nave",
+                line=dict(color="blue", width=4),
+            )
+        )
+
+        # 3. Observation Platforms (Riferimenti di Prua e Poppa)
         plat_fwd_x = (loa / 2.0) - OFFSET_PLATFORM_FWD_M
         plat_aft_x = (-loa / 2.0) + OFFSET_PLATFORM_AFT_M
 
@@ -263,7 +281,6 @@ def render_tab_berth(selected_port, ship_dict):
             )
         )
 
-        # Configurazione telecamera e assi
         fig.update_layout(
             scene=dict(
                 xaxis_title="X (m - Longitudinale)",
