@@ -25,7 +25,7 @@ def get_material_stiffness(material_type: str, tension_tons: float, mbl_tons: fl
     if length_m <= 0 or mbl_tons <= 0:
         return 0.0
     
-    mat_key = material_type.upper().strip()
+    mat_key = str(material_type).upper().strip() if pd.notna(material_type) else "HMPE"
     params = MATERIAL_ELONGATION_PARAMS.get(mat_key, MATERIAL_ELONGATION_PARAMS["HMPE"])
     
     # Rapporto di carico / pretensione minima di guardia (1% MBL)
@@ -35,7 +35,7 @@ def get_material_stiffness(material_type: str, tension_tons: float, mbl_tons: fl
     elongation_ratio = params["A"] * (load_ratio ** params["B"])
     delta_l = length_m * elongation_ratio
     
-    # Rigidezza secante kN/m convertita in tonnellate/m
+    # Rigidezza secante convertita in tonnellate/m
     k_secant = tension_tons / max(delta_l, 0.001)
     return k_secant
 
@@ -60,11 +60,53 @@ def calculate_meg4_composite_stiffness(
 def calculate_line_geometry(lines_df: pd.DataFrame, bollards_df: pd.DataFrame) -> pd.DataFrame:
     """
     Calcola vettori geometrici 3D (X, Y, Z), pendenza, azimuth e lunghezza reale delle linee.
+    Gestisce automaticamente differenze nelle definizioni delle colonne.
     """
-    merged = lines_df.merge(bollards_df, on="bollard_id", how="inner")
+    if lines_df.empty or bollards_df.empty:
+        return pd.DataFrame()
+
+    l_df = lines_df.copy()
+    b_df = bollards_df.copy()
+
+    # Normalizzazione colonne per le Bitte (Bollards)
+    bollard_col_map = {
+        "x_m": "bollard_x_m",
+        "y_m": "bollard_y_m",
+        "z_m": "bollard_z_m",
+        "X": "bollard_x_m",
+        "Y": "bollard_y_m",
+        "Z": "bollard_z_m",
+        "Dist_Inclinata_m": "bollard_x_m"  # Fallback di sicurezza se la coordinata X è espressa come distanza
+    }
+    b_df = b_df.rename(columns={k: v for k, v in bollard_col_map.items() if k in b_df.columns and v not in b_df.columns})
+
+    # Normalizzazione colonne per le Linee / Passacavi (Chocks)
+    chock_col_map = {
+        "x_m": "chock_x_m",
+        "y_m": "chock_y_m",
+        "z_m": "chock_z_m",
+        "X": "chock_x_m",
+        "Y": "chock_y_m",
+        "Z": "chock_z_m"
+    }
+    l_df = l_df.rename(columns={k: v for k, v in chock_col_map.items() if k in l_df.columns and v not in l_df.columns})
+
+    # Verifica presenza colonna di aggancio
+    if "bollard_id" not in l_df.columns or "bollard_id" not in b_df.columns:
+        return pd.DataFrame()
+
+    merged = l_df.merge(b_df, on="bollard_id", how="inner", suffixes=("_line", "_bollard"))
     if merged.empty:
         return pd.DataFrame()
 
+    # Garanzia della presenza di tutte le coordinate 3D
+    for col in ["bollard_x_m", "bollard_y_m", "bollard_z_m", "chock_x_m", "chock_y_m", "chock_z_m"]:
+        if col not in merged.columns:
+            merged[col] = 0.0
+        else:
+            merged[col] = pd.to_numeric(merged[col], errors="coerce").fillna(0.0)
+
+    # Calcolo delta coordinate
     dx = merged["bollard_x_m"] - merged["chock_x_m"]
     dy = merged["bollard_y_m"] - merged["chock_y_m"]
     dz = merged["bollard_z_m"] - merged["chock_z_m"]
@@ -95,12 +137,18 @@ def solve_line_tensions_3d(geom_df: pd.DataFrame, forces_dict: dict, max_iter: i
         df["Util_Percent"] = []
         return df
 
+    # Controllo presenza MBL
+    if "mbl_tons" not in df.columns:
+        df["mbl_tons"] = 100.0
+    else:
+        df["mbl_tons"] = pd.to_numeric(df["mbl_tons"], errors="coerce").fillna(100.0)
+
     # Vettore forze esterne aggregate [Fx, Fy, Mz]
     f_ext = np.array([
         forces_dict.get("Fx_total_t", 0.0),
         forces_dict.get("Fy_total_t", 0.0),
         forces_dict.get("Mz_total_tm", 0.0)
-    ])
+    ], dtype=float)
 
     # Inizializzazione tensioni al pretensionamento standard MEG4 (10% MBL)
     tensions = df["mbl_tons"].values * 0.10
@@ -109,12 +157,13 @@ def solve_line_tensions_3d(geom_df: pd.DataFrame, forces_dict: dict, max_iter: i
     for iteration in range(max_iter):
         k_global = np.zeros((3, 3))
         b_vectors = []
+        k_eq_list = []
 
         for idx, row in df.iterrows():
             rad_az = np.radians(row.get("azimuth_deg", 0.0))
             rad_inc = np.radians(row.get("incline_deg", 0.0))
-            x_c = row.get("chock_x_m", 0.0)
-            y_c = row.get("chock_y_m", 0.0)
+            x_c = float(row.get("chock_x_m", 0.0))
+            y_c = float(row.get("chock_y_m", 0.0))
 
             # Vettore direzionale
             bx = np.cos(rad_inc) * np.cos(rad_az)
@@ -126,14 +175,15 @@ def solve_line_tensions_3d(geom_df: pd.DataFrame, forces_dict: dict, max_iter: i
             # Calcolo rigidezza non lineare sulla tensione dello step corrente
             mat_main = row.get("material", "HMPE")
             mat_tail = row.get("tail_material", "NYLON")
-            mbl = row.get("mbl_tons", 100.0)
-            l_main = row.get("length_m", 30.0)
-            l_tail = row.get("tail_length_m", 11.0)
+            mbl = float(row.get("mbl_tons", 100.0))
+            l_main = float(row.get("length_m", 30.0))
+            l_tail = float(row.get("tail_length_m", 11.0))
 
             k_eq = calculate_meg4_composite_stiffness(
                 mat_main, mbl, l_main, tensions[idx],
                 mat_tail, mbl, l_tail
             )
+            k_eq_list.append(k_eq)
 
             k_global += k_eq * np.outer(b_vec, b_vec)
 
@@ -143,12 +193,11 @@ def solve_line_tensions_3d(geom_df: pd.DataFrame, forces_dict: dict, max_iter: i
         except np.linalg.LinAlgError:
             displacements = np.zeros(3)
 
-        # Aggiornamento tensioni con limite inferiore (cime in bando non lavorano a compressione)
+        # Aggiornamento tensioni (cime in bando non lavorano a compressione)
         new_tensions = np.zeros(num_lines)
         for i in range(num_lines):
             delta_l = np.dot(b_vectors[i], displacements)
-            # Pretensione + Delta tensione elastica
-            updated_t = (df.iloc[i]["mbl_tons"] * 0.10) + (k_eq * delta_l)
+            updated_t = (df.iloc[i]["mbl_tons"] * 0.10) + (k_eq_list[i] * delta_l)
             new_tensions[i] = max(0.0, updated_t)
 
         # Controllo convergenza
