@@ -6,10 +6,8 @@ Predisposto per validazione Lloyd's Register.
 
 import numpy as np
 import pandas as pd
-from config.constants import KN_TO_TONS
 
 # Parametri curve di allungamento MEG4 (% Elongation = A * (T / MBL)^B)
-# Dati tipici di targa costruttori certificati (es. Samson, Lankhorst, Katradis)
 MATERIAL_ELONGATION_PARAMS = {
     "HMPE": {"A": 0.025, "B": 0.85},       # Molto rigido
     "POLYESTER": {"A": 0.070, "B": 0.75},  # Flessibilità media
@@ -20,8 +18,7 @@ MATERIAL_ELONGATION_PARAMS = {
 
 def get_material_stiffness(material_type: str, tension_tons: float, mbl_tons: float, length_m: float) -> float:
     """
-    Calcola la rigidezza secante o tangenziale k = dT/dL (in tonnellate/metro) 
-    in base alla tensione attuale e al materiale (curve non lineari MEG4).
+    Calcola la rigidezza tangenziale k_tan = dT/dL (ton/m) in base alla tensione attuale (MEG4).
     """
     if length_m <= 0 or mbl_tons <= 0:
         return 0.0
@@ -29,16 +26,16 @@ def get_material_stiffness(material_type: str, tension_tons: float, mbl_tons: fl
     mat_key = str(material_type).upper().strip() if pd.notna(material_type) else "HMPE"
     params = MATERIAL_ELONGATION_PARAMS.get(mat_key, MATERIAL_ELONGATION_PARAMS["HMPE"])
     
-    # Rapporto di carico / pretensione minima di guardia (1% MBL)
+    # Rapporto di carico minimo di guardia (1% MBL) per evitare divisioni per zero
     load_ratio = max(tension_tons / mbl_tons, 0.01)
     
-    # Allungamento relativo ε = A * (T/MBL)^B
-    elongation_ratio = params["A"] * (load_ratio ** params["B"])
-    delta_l = length_m * elongation_ratio
+    # Derivata tangenziale della curva non lineare T(eps)
+    # k_tan = (MBL / length) * (1 / (A * B)) * (load_ratio ** (1 - B))
+    a = params["A"]
+    b = params["B"]
     
-    # Rigidezza secante convertita in tonnellate/m
-    k_secant = tension_tons / max(delta_l, 0.001)
-    return k_secant
+    k_tangent = (mbl_tons / length_m) * (1.0 / (a * b)) * (load_ratio ** (1.0 - b))
+    return max(k_tangent, 0.1)
 
 
 def calculate_meg4_composite_stiffness(
@@ -46,7 +43,8 @@ def calculate_meg4_composite_stiffness(
     tail_mat: str, tail_mbl: float, tail_len: float
 ) -> float:
     """
-    Calcola la rigidezza equivalente non lineare di una linea composta (Cavo + Tail).
+    Calcola la rigidezza equivalente di una linea composta (Cavo + Tail in serie).
+    1 / K_eq = 1 / K_main + 1 / K_tail
     """
     k_main = get_material_stiffness(main_mat, main_tension, main_mbl, main_len) if main_len > 0 else 0.0
     k_tail = get_material_stiffness(tail_mat, main_tension, tail_mbl, tail_len) if tail_len > 0 else 0.0
@@ -68,8 +66,7 @@ def calculate_line_geometry(
     **kwargs
 ) -> pd.DataFrame:
     """
-    Calcola vettori geometrici 3D (X, Y, Z), pendenza, azimuth e lunghezza reale delle linee.
-    Accetta 'loa' e **kwargs per garantire compatibilità con le chiamate esterne da app.py.
+    Calcola i vettori geometrici 3D (dx, dy, dz), pendenza, azimuth e lunghezza reale delle linee.
     """
     if lines_df is None or bollards_df is None:
         return pd.DataFrame()
@@ -83,33 +80,21 @@ def calculate_line_geometry(
     l_df = lines_df.copy()
     b_df = bollards_df.copy()
 
-    # Normalizzazione e mappatura colonne per le Bitte (Bollards)
+    # Normalizzazione mappatura bitte
     bollard_col_map = {
-        "x_m": "bollard_x_m",
-        "y_m": "bollard_y_m",
-        "z_m": "bollard_z_m",
-        "X": "bollard_x_m",
-        "Y": "bollard_y_m",
-        "Z": "bollard_z_m",
-        "X_Coordinata_m": "bollard_x_m",
-        "Y_Coordinata_m": "bollard_y_m",
-        "Z_Altezza_m": "bollard_z_m",
-        "Dist_Inclinata_m": "bollard_x_m"  # Fallback di sicurezza se la coordinata X è espressa come distanza
+        "x_m": "bollard_x_m", "y_m": "bollard_y_m", "z_m": "bollard_z_m",
+        "X": "bollard_x_m", "Y": "bollard_y_m", "Z": "bollard_z_m",
+        "X_Coordinata_m": "bollard_x_m", "Y_Coordinata_m": "bollard_y_m", "Z_Altezza_m": "bollard_z_m"
     }
     b_df = b_df.rename(columns={k: v for k, v in bollard_col_map.items() if k in b_df.columns and v not in b_df.columns})
 
-    # Normalizzazione e mappatura colonne per le Linee / Passacavi (Chocks)
+    # Normalizzazione mappatura passacavi
     chock_col_map = {
-        "x_m": "chock_x_m",
-        "y_m": "chock_y_m",
-        "z_m": "chock_z_m",
-        "X": "chock_x_m",
-        "Y": "chock_y_m",
-        "Z": "chock_z_m"
+        "x_m": "chock_x_m", "y_m": "chock_y_m", "z_m": "chock_z_m",
+        "X": "chock_x_m", "Y": "chock_y_m", "Z": "chock_z_m"
     }
     l_df = l_df.rename(columns={k: v for k, v in chock_col_map.items() if k in l_df.columns and v not in l_df.columns})
 
-    # Verifica presenza colonna di aggancio
     if "bollard_id" not in l_df.columns or "bollard_id" not in b_df.columns:
         return pd.DataFrame()
 
@@ -117,14 +102,13 @@ def calculate_line_geometry(
     if merged.empty:
         return pd.DataFrame()
 
-    # Garanzia della presenza e conversione numerica di tutte le coordinate 3D
     for col in ["bollard_x_m", "bollard_y_m", "bollard_z_m", "chock_x_m", "chock_y_m", "chock_z_m"]:
         if col not in merged.columns:
             merged[col] = 0.0
         else:
             merged[col] = pd.to_numeric(merged[col], errors="coerce").fillna(0.0)
 
-    # Calcolo delta coordinate
+    # Vettore banchina -> nave
     dx = merged["bollard_x_m"] - merged["chock_x_m"]
     dy = merged["bollard_y_m"] - merged["chock_y_m"]
     dz = merged["bollard_z_m"] - merged["chock_z_m"]
@@ -143,10 +127,9 @@ def calculate_line_geometry(
     return merged
 
 
-def solve_line_tensions_3d(geom_df: pd.DataFrame, forces_dict: dict, max_iter: int = 15, tol: float = 1e-3) -> pd.DataFrame:
+def solve_line_tensions_3d(geom_df: pd.DataFrame, forces_dict: dict, max_iter: int = 20, tol: float = 1e-3) -> pd.DataFrame:
     """
-    Risolutore iterativo Newton-Raphson per il bilancio di ormeggio 3D non lineare (MEG4).
-    Calcola lo spostamento della nave e la distribuzione reale del carico su ogni cima.
+    Risolutore Newton-Raphson 3D con rigidezza tangenziale non lineare e gestione cavi in bando.
     """
     df = geom_df.copy()
     num_lines = len(df)
@@ -156,23 +139,20 @@ def solve_line_tensions_3d(geom_df: pd.DataFrame, forces_dict: dict, max_iter: i
         df["Util_Percent"] = []
         return df
 
-    # Controllo presenza MBL
     if "mbl_tons" not in df.columns:
         df["mbl_tons"] = 100.0
     else:
         df["mbl_tons"] = pd.to_numeric(df["mbl_tons"], errors="coerce").fillna(100.0)
 
-    # Vettore forze esterne aggregate [Fx, Fy, Mz]
     f_ext = np.array([
         forces_dict.get("Fx_total_t", 0.0),
         forces_dict.get("Fy_total_t", 0.0),
         forces_dict.get("Mz_total_tm", 0.0)
     ], dtype=float)
 
-    # Inizializzazione tensioni al pretensionamento standard MEG4 (10% MBL)
+    # Pretensionamento iniziale (10% MBL secondo MEG4)
     tensions = df["mbl_tons"].values * 0.10
-    
-    # Loop iterativo per la rigidezza tangenziale / non lineare
+
     for iteration in range(max_iter):
         k_global = np.zeros((3, 3))
         b_vectors = []
@@ -184,49 +164,52 @@ def solve_line_tensions_3d(geom_df: pd.DataFrame, forces_dict: dict, max_iter: i
             x_c = float(row.get("chock_x_m", 0.0))
             y_c = float(row.get("chock_y_m", 0.0))
 
-            # Vettore direzionale
+            # Vettore direzionale tridimensionale
             bx = np.cos(rad_inc) * np.cos(rad_az)
             by = np.cos(rad_inc) * np.sin(rad_az)
             bm = x_c * by - y_c * bx
             b_vec = np.array([bx, by, bm])
             b_vectors.append(b_vec)
 
-            # Calcolo rigidezza non lineare sulla tensione dello step corrente
-            mat_main = row.get("material", "HMPE")
-            mat_tail = row.get("tail_material", "NYLON")
-            mbl = float(row.get("mbl_tons", 100.0))
-            l_main = float(row.get("length_m", 30.0))
-            l_tail = float(row.get("tail_length_m", 11.0))
+            # Se il cavo è in bando (tensione = 0), non contribuisce alla rigidezza globale
+            if tensions[idx] <= 0.0:
+                k_eq = 0.0
+            else:
+                mat_main = row.get("material", "HMPE")
+                mat_tail = row.get("tail_material", "NYLON")
+                mbl = float(row.get("mbl_tons", 100.0))
+                l_main = float(row.get("length_m", 30.0))
+                l_tail = float(row.get("tail_length_m", 11.0))
 
-            k_eq = calculate_meg4_composite_stiffness(
-                mat_main, mbl, l_main, tensions[idx],
-                mat_tail, mbl, l_tail
-            )
+                k_eq = calculate_meg4_composite_stiffness(
+                    mat_main, mbl, l_main, tensions[idx],
+                    mat_tail, mbl, l_tail
+                )
+
             k_eq_list.append(k_eq)
-
             k_global += k_eq * np.outer(b_vec, b_vec)
 
-        # Risoluzione spostamento nave u = [dx, dy, dpsi]
+        # Regolarizzazione per evitare singolarità della matrice
+        k_global += np.eye(3) * 1e-6
+
         try:
             displacements = np.linalg.solve(k_global, f_ext)
         except np.linalg.LinAlgError:
-            displacements = np.zeros(3)
+            break
 
-        # Aggiornamento tensioni (cime in bando non lavorano a compressione)
+        # Aggiornamento tensioni (nessuna resistenza a compressione)
         new_tensions = np.zeros(num_lines)
         for i in range(num_lines):
             delta_l = np.dot(b_vectors[i], displacements)
             updated_t = (df.iloc[i]["mbl_tons"] * 0.10) + (k_eq_list[i] * delta_l)
             new_tensions[i] = max(0.0, updated_t)
 
-        # Controllo convergenza
         if np.max(np.abs(new_tensions - tensions)) < tol:
             tensions = new_tensions
             break
-        
+
         tensions = new_tensions
 
-    # Calcolo percentuali MBL finali
     utils = [(t / mbl) * 100.0 if mbl > 0 else 0.0 for t, mbl in zip(tensions, df["mbl_tons"])]
 
     df["Tension_tons"] = np.round(tensions, 2)
@@ -259,7 +242,6 @@ def calculate_wind_operability_envelope(
             )
             res_df = solve_line_tensions_3d(geom_df, forces)
 
-            # Criterio di sicurezza MEG4: Nessuna cima deve superare il 55% MBL
             if "Util_Percent" in res_df.columns and (res_df["Util_Percent"] > 55.0).any():
                 safe = False
             else:
