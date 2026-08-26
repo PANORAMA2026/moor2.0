@@ -8,18 +8,55 @@ import plotly.express as px
 import streamlit as st
 
 
+def ensure_table_exists(conn):
+    """Crea la tabella 'line_history' se non esiste ancora nel database."""
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS line_history (
+                line_id TEXT PRIMARY KEY,
+                line_name TEXT,
+                cert_id TEXT,
+                accumulated_hours REAL DEFAULT 0.0,
+                high_load_hours REAL DEFAULT 0.0,
+                max_design_hours REAL DEFAULT 2000.0,
+                fatigue_index REAL DEFAULT 0.0
+            )
+        """)
+        conn.commit()
+    except Exception as e:
+        st.warning(f"Errore durante l'inizializzazione del database: {e}")
+
+
 def get_lines_health_status():
-    if "db_conn" not in st.session_state:
+    if "db_conn" not in st.session_state or st.session_state.db_conn is None:
         return pd.DataFrame()
 
     conn = st.session_state.db_conn
-    df = pd.read_sql_query("SELECT * FROM line_history", conn)
+    ensure_table_exists(conn)
+
+    try:
+        df = pd.read_sql_query("SELECT * FROM line_history", conn)
+    except Exception as e:
+        st.warning(f"Impossibile leggere i dati storici dal database: {e}")
+        return pd.DataFrame()
 
     if df.empty:
         return df
 
     health_percent = []
     recommendations = []
+
+    # Garanzia presenza colonne minime richieste per il calcolo
+    for col, default_val in [
+        ("max_design_hours", 2000.0),
+        ("accumulated_hours", 0.0),
+        ("fatigue_index", 0.0),
+    ]:
+        if col not in df.columns:
+            df[col] = default_val
+        else:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(default_val)
 
     for _, row in df.iterrows():
         max_h = (
@@ -53,6 +90,11 @@ def render_tab_history():
 
     health_df = get_lines_health_status()
     if not health_df.empty:
+        # Se mancano colonne opzionali per la visualizzazione le inizializza vuote
+        for col in ["line_name", "line_id", "cert_id", "high_load_hours"]:
+            if col not in health_df.columns:
+                health_df[col] = "-"
+
         fig_health = px.bar(
             health_df,
             x="line_name",
@@ -78,7 +120,8 @@ def render_tab_history():
                 "high_load_hours",
                 "Health_Percent",
                 "Recommendation",
-            ]]
+            ]],
+            use_container_width=True,
         )
     else:
         st.info("Nessun dato di storico ancora registrato nel database.")
