@@ -9,23 +9,24 @@ import streamlit as st
 
 
 def ensure_table_exists(conn):
-    """Crea la tabella 'line_history' se non esiste ancora nel database."""
+    """Crea la tabella 'line_history' se non esiste usando executescript per evitare errori SQL."""
     try:
         cursor = conn.cursor()
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS line_history (
-                line_id TEXT PRIMARY KEY,
-                line_name TEXT,
-                cert_id TEXT,
-                accumulated_hours REAL DEFAULT 0.0,
-                high_load_hours REAL DEFAULT 0.0,
-                max_design_hours REAL DEFAULT 2000.0,
-                fatigue_index REAL DEFAULT 0.0
-            )
-        """)
+        schema_sql = """
+        CREATE TABLE IF NOT EXISTS line_history (
+            line_id TEXT PRIMARY KEY,
+            line_name TEXT,
+            cert_id TEXT,
+            accumulated_hours REAL DEFAULT 0.0,
+            high_load_hours REAL DEFAULT 0.0,
+            max_design_hours REAL DEFAULT 2000.0,
+            fatigue_index REAL DEFAULT 0.0
+        );
+        """
+        cursor.executescript(schema_sql)
         conn.commit()
     except Exception as e:
-        st.warning(f"Errore durante l'inizializzazione del database: {e}")
+        st.sidebar.warning(f"Note DB: {e}")
 
 
 def get_lines_health_status():
@@ -33,35 +34,41 @@ def get_lines_health_status():
         return pd.DataFrame()
 
     conn = st.session_state.db_conn
+
+    # Garanzia della presenza della tabella nel database
     ensure_table_exists(conn)
 
+    # Esecuzione query in sicurezza
     try:
         df = pd.read_sql_query("SELECT * FROM line_history", conn)
-    except Exception as e:
-        st.warning(f"Impossibile leggere i dati storici dal database: {e}")
+    except Exception:
+        # Se la tabella è vuota o inaccessibile restituisce dataframe vuoto senza crash
         return pd.DataFrame()
 
     if df.empty:
         return df
 
+    # Inizializzazione colonne mancanti con valori di default
+    default_cols = {
+        "max_design_hours": 2000.0,
+        "accumulated_hours": 0.0,
+        "fatigue_index": 0.0,
+        "line_name": "Line",
+        "line_id": "-",
+        "cert_id": "-",
+        "high_load_hours": 0.0
+    }
+    for col, default_val in default_cols.items():
+        if col not in df.columns:
+            df[col] = default_val
+        elif col in ["max_design_hours", "accumulated_hours", "fatigue_index"]:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(default_val)
+
     health_percent = []
     recommendations = []
 
-    # Garanzia presenza colonne minime richieste per il calcolo
-    for col, default_val in [
-        ("max_design_hours", 2000.0),
-        ("accumulated_hours", 0.0),
-        ("fatigue_index", 0.0),
-    ]:
-        if col not in df.columns:
-            df[col] = default_val
-        else:
-            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(default_val)
-
     for _, row in df.iterrows():
-        max_h = (
-            row["max_design_hours"] if row["max_design_hours"] > 0 else 2000.0
-        )
+        max_h = row["max_design_hours"] if row["max_design_hours"] > 0 else 2000.0
         hours_used_pct = (row["accumulated_hours"] / max_h) * 100.0
         fatigue_pct = (row["fatigue_index"] / 300.0) * 100.0
         wear_pct = max(hours_used_pct, fatigue_pct)
@@ -70,13 +77,9 @@ def get_lines_health_status():
         health_percent.append(remaining_health)
 
         if remaining_health <= 20.0:
-            recommendations.append(
-                "🚨 SOSTITUZIONE IMMINENTE: Cavo a fine vita utile!"
-            )
+            recommendations.append("🚨 SOSTITUZIONE IMMINENTE: Cavo a fine vita utile!")
         elif remaining_health <= 40.0:
-            recommendations.append(
-                "⚠️ ISPEZIONE: Valutare rotazione testa-coda (End-for-End)."
-            )
+            recommendations.append("⚠️ ISPEZIONE: Valutare rotazione testa-coda (End-for-End).")
         else:
             recommendations.append("✅ IDONEO: Condizioni operative regolari.")
 
@@ -89,12 +92,8 @@ def render_tab_history():
     st.header("📈 Registro Storico Usura & Suggerimento Sostituzione Cavi")
 
     health_df = get_lines_health_status()
-    if not health_df.empty:
-        # Se mancano colonne opzionali per la visualizzazione le inizializza vuote
-        for col in ["line_name", "line_id", "cert_id", "high_load_hours"]:
-            if col not in health_df.columns:
-                health_df[col] = "-"
 
+    if not health_df.empty:
         fig_health = px.bar(
             health_df,
             x="line_name",
@@ -111,17 +110,17 @@ def render_tab_history():
         )
         st.plotly_chart(fig_health, use_container_width=True)
 
-        st.dataframe(
-            health_df[[
-                "line_id",
-                "line_name",
-                "cert_id",
-                "accumulated_hours",
-                "high_load_hours",
-                "Health_Percent",
-                "Recommendation",
-            ]],
-            use_container_width=True,
-        )
+        cols_to_display = [
+            "line_id",
+            "line_name",
+            "cert_id",
+            "accumulated_hours",
+            "high_load_hours",
+            "Health_Percent",
+            "Recommendation",
+        ]
+        available_cols = [c for c in cols_to_display if c in health_df.columns]
+
+        st.dataframe(health_df[available_cols], use_container_width=True)
     else:
         st.info("Nessun dato di storico ancora registrato nel database.")
