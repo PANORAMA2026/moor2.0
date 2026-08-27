@@ -1,10 +1,10 @@
 """
 views/tab_plans.py
-Pianetti Mooring Station con posizionamento interattivo tramite click, 
-tracciamento in tempo reale delle coordinate ed eliminazione elementi.
+Pianetti Mooring Station con persistenza totale su disco (immagini e layout).
 """
 
 import io
+import os
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
@@ -14,6 +14,8 @@ from database.db_manager import (
     get_line_history,
     save_mooring_station_components,
     get_mooring_station_components,
+    save_station_image_file,
+    get_station_image_path,
 )
 
 
@@ -40,7 +42,7 @@ def render_tab_plans():
         st.warning("Nessuna stazione trovata.")
         return
 
-    # Sincronizzazione con DB se la sessione corrente è vuota
+    # Sincronizzazione automatica dal DB se la sessione corrente è vuota
     db_saved_comp = get_mooring_station_components(station_sel)
     if not db_saved_comp.empty and st.session_state.mooring_stations[station_sel].empty:
         formatted_df = pd.DataFrame({
@@ -55,18 +57,30 @@ def render_tab_plans():
     st_df = st.session_state.mooring_stations[station_sel]
     lines_df = get_line_history()
 
-    # 2. Upload dell'Immagine Pianetta
+    # 2. Gestione e Caricamento dell'Immagine Persistente
+    saved_img_path = get_station_image_path(station_sel)
+
     uploaded_image = st.file_uploader(
-        f"📷 Carica Pianetta (PNG/JPG) per: {station_sel}",
+        f"📷 Carica/Sostituisci Pianetta per: {station_sel}",
         type=["png", "jpg", "jpeg"],
         key=f"uploader_{station_sel}"
     )
 
     bg_img = None
     img_width, img_height = 800, 500
+
     if uploaded_image is not None:
-        bg_img = Image.open(uploaded_image)
+        # Se l'utente carica un nuovo file, salvalo su disco e DB
+        file_bytes = uploaded_image.getvalue()
+        _, ext = os.path.splitext(uploaded_image.name)
+        saved_img_path = save_station_image_file(station_sel, file_bytes, ext)
+        st.success("Immagine pianetta salvata permanentemente nel database!")
+
+    # Caricamento dell'immagine registrata su disco
+    if saved_img_path and os.path.exists(saved_img_path):
+        bg_img = Image.open(saved_img_path)
         img_width, img_height = bg_img.size
+        st.caption(f"📁 Immagine registrata in uso: `{saved_img_path}`")
 
     # 3. Costruzione Grafico Interattivo Plotly
     fig = go.Figure()
@@ -87,13 +101,13 @@ def render_tab_plans():
             )
         )
 
-    # TRACCIA INVISIBILE: Fondamentale per forzare Plotly a mostrare le coordinate del cursore ovunque
+    # Traccia invisibile per tracciare le coordinate del cursore a schermo
     fig.add_trace(
         go.Scatter(
             x=[0, img_width, img_width, 0, 0],
             y=[0, 0, img_height, img_height, 0],
             fill="toself",
-            fillcolor="rgba(255,255,255,0)",  # Trasparente
+            fillcolor="rgba(255,255,255,0)",
             line=dict(color="rgba(255,255,255,0)"),
             hoverinfo="x+y",
             name="Sfondo Pianetta",
@@ -102,7 +116,7 @@ def render_tab_plans():
         )
     )
 
-    # Disegno dei punti salvati sulla pianetta
+    # Rendering dei punti posizionati sulla pianetta
     if not st_df.empty:
         colors = {"WINCH": "#FF4B4B", "BASKET": "#FFA500", "CHOCK": "#00C853"}
         
@@ -122,7 +136,6 @@ def render_tab_plans():
                 )
             )
 
-    # Impostazione assi con SPIKES (mirino a croce che segue il cursore)
     fig.update_xaxes(
         range=[0, img_width], showgrid=False, title="Coordinata X (px)",
         showspikes=True, spikemode="across", spikesnap="cursor", spikecolor="gray", spikethickness=1
@@ -142,11 +155,9 @@ def render_tab_plans():
     st.markdown("---")
     col_chart, col_form = st.columns([2, 1])
 
-    # Rilevamento Click sull'Immagine
     with col_chart:
         click_event = st.plotly_chart(fig, use_container_width=True, on_select="rerun", selection_mode="points")
 
-        # Gestione download HTML
         buffer = io.StringIO()
         fig.write_html(buffer, include_plotlyjs="cdn")
         st.download_button(
@@ -156,7 +167,7 @@ def render_tab_plans():
             mime="text/html",
         )
 
-    # Estrazione coordinate e identificazione dell'elemento cliccato
+    # Gestione delle azioni tramite click sul grafico
     clicked_x, clicked_y = 0.0, 0.0
     selected_comp_id = None
 
@@ -166,23 +177,19 @@ def render_tab_plans():
             pt = pts[0]
             clicked_x = float(pt.get("x", 0.0))
             clicked_y = float(pt.get("y", 0.0))
-            # Se la traccia cliccata ha un testo (quindi è un marker generato da noi e non il livello di sfondo)
             if "text" in pt and pt["text"]:
                 selected_comp_id = pt["text"]
 
-    # Pannello Laterale: Aggiunta o Eliminazione a seconda del click
     with col_form:
         if selected_comp_id:
-            # 🔴 MODALITÀ ELIMINAZIONE (Elemento Esistente Selezionato)
+            # Modalità Eliminazione Elemento
             st.error("🗑️ Elimina Elemento")
-            st.warning(f"Hai selezionato il componente: **{selected_comp_id}**")
+            st.warning(f"Selezionato: **{selected_comp_id}**")
             
             if st.button(f"Conferma Eliminazione {selected_comp_id}", use_container_width=True, type="primary"):
-                # Rimuovi l'elemento dal dataframe
                 st_df = st_df[st_df["comp_id"] != selected_comp_id]
                 st.session_state.mooring_stations[station_sel] = st_df
                 
-                # Salva il nuovo stato (senza l'elemento) nel database
                 db_components = [
                     {"id": row["comp_id"], "type": row["comp_type"], "x": row["pos_x"], "y": row["pos_y"], "line_id": row["assigned_line_id"]}
                     for _, row in st_df.iterrows()
@@ -191,14 +198,13 @@ def render_tab_plans():
                 st.rerun()
                 
         else:
-            # 🟢 MODALITÀ AGGIUNTA (Spazio Vuoto Selezionato)
+            # Modalità Inserimento Nuovo Elemento
             st.subheader("🎯 Aggiungi Componente")
             st.info(f"Coordinata Click: **X={clicked_x:.1f}, Y={clicked_y:.1f}**")
 
             comp_type = st.selectbox("Tipologia Elemento", ["WINCH", "BASKET", "CHOCK"])
             comp_id = st.text_input("Identificativo (es. W1, B2, C1)", f"{comp_type[0]}_{len(st_df)+1}")
 
-            # La cima si assegna solo a WINCH e BASKET
             line_options = ["Nessuna"]
             if not lines_df.empty and "line_id" in lines_df.columns:
                 line_options += lines_df["line_id"].tolist()
@@ -207,7 +213,7 @@ def render_tab_plans():
                 assigned_line = st.selectbox("Cima d'Ormeggio Associata", line_options)
             else:
                 assigned_line = "N/D"
-                st.caption("ℹ️ Ai CHOCK (Passacavi) non viene associata direttamente una cima.")
+                st.caption("ℹ️ Ai CHOCK non viene associata direttamente una cima.")
 
             if st.button("➕ Salva Elemento sul Pianetto", use_container_width=True):
                 new_row = pd.DataFrame([{
@@ -220,7 +226,6 @@ def render_tab_plans():
                 st_df = pd.concat([st_df, new_row], ignore_index=True)
                 st.session_state.mooring_stations[station_sel] = st_df
 
-                # Salvataggio immediato nel DB SQLite
                 db_components = [
                     {"id": row["comp_id"], "type": row["comp_type"], "x": row["pos_x"], "y": row["pos_y"], "line_id": row["assigned_line_id"]}
                     for _, row in st_df.iterrows()
@@ -229,7 +234,7 @@ def render_tab_plans():
                 st.success(f"Elemento {comp_id} aggiunto con successo!")
                 st.rerun()
 
-    # Tabella riepilogativa (può essere usata anche per modifiche rapide di massa)
+    # Tabella Modifica Rapida
     st.markdown("---")
     st.subheader(f"⚙️ Gestione Tabellare Componenti: {station_sel}")
     edited_df = st.data_editor(
