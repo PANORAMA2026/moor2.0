@@ -1,7 +1,6 @@
 """
 views/tab_polar.py
-Inviluppo Polare dei Limiti Operativi del Vento (0-360°) - MEG4 / OPTIMOOR Style.
-Visualizzazione e gestione dello stato ottimizzate per il rendering automatico in Streamlit.
+Inviluppo Polare dei Limiti Operativi del VENTO (0-360°) - Standard MEG4
 """
 
 import numpy as np
@@ -9,7 +8,6 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-# Import dei moduli di calcolo con gestione eccezioni
 try:
     from core.line_mechanics import solve_line_tensions_3d
     from core.hydrodynamic_forces import calculate_environmental_forces
@@ -19,19 +17,18 @@ except ImportError:
 
 
 def generate_fallback_polar_data():
-    """Genera dati di esempio strutturati se il solutore non restituisce dati validi."""
+    """Dati di esempio per visualizzazione preventiva."""
     angles = list(range(0, 360, 10))
-    # Esempio di inviluppo polare realistico (velocità vento max tollerabile in nodi per angolo)
     wind_line_limit = [
-        45 - 15 * np.abs(np.sin(np.radians(a))) for a in angles
+        round(50.0 - 20.0 * np.abs(np.sin(np.radians(a))), 1) for a in angles
     ]
     wind_bollard_limit = [
-        55 - 10 * np.abs(np.sin(np.radians(a))) for a in angles
+        round(60.0 - 15.0 * np.abs(np.sin(np.radians(a))), 1) for a in angles
     ]
-    return angles, wind_line_limit, wind_bollard_limit, None
+    return angles, wind_line_limit, wind_bollard_limit
 
 
-def calculate_multi_limit_polar_envelope(
+def calculate_wind_polar_envelope(
     geom_df: pd.DataFrame, 
     afw: float, 
     alw: float, 
@@ -39,10 +36,14 @@ def calculate_multi_limit_polar_envelope(
     loa: float, 
     v_curr: float, 
     dir_curr: float, 
-    mbl_limit_pct: float = 50.0
+    mbl_limit_pct: float = 50.0,
+    max_wind_test: float = 80.0
 ):
-    """Calcola i limiti di vento per ogni direzione da 0 a 350 gradi."""
-    if solve_line_tensions_3d is None or calculate_environmental_forces is None:
+    """
+    Calcola la massima velocità di VENTO tollerabile (0-360°) 
+    mantenendo la corrente costante.
+    """
+    if solve_line_tensions_3d is None or calculate_environmental_forces is None or geom_df.empty:
         return generate_fallback_polar_data()
 
     angles = list(range(0, 360, 10))
@@ -51,72 +52,88 @@ def calculate_multi_limit_polar_envelope(
     
     has_bollard_swl = "bollard_swl" in geom_df.columns and geom_df["bollard_swl"].notna().any()
 
-    for angle in angles:
-        # 1. Limite Cavi
-        speed_line = 5.0
-        while speed_line <= 70.0:
+    for wind_dir in angles:
+        # 1. Calcolo limite VENTO per la tenuta dei cavi (50% MBL)
+        v_wind = 5.0
+        found_line_limit = False
+        while v_wind <= max_wind_test:
             try:
-                f = calculate_environmental_forces(speed_line, angle, v_curr, dir_curr, afw, alw, alc, loa)
-                res = solve_line_tensions_3d(geom_df, f)
+                # Calcolo forze ambientali: Vento variabile (v_wind, wind_dir), Corrente fissa (v_curr, dir_curr)
+                forces = calculate_environmental_forces(
+                    v_wind, wind_dir, v_curr, dir_curr, afw, alw, alc, loa
+                )
+                res = solve_line_tensions_3d(geom_df, forces)
+                
                 if not res.empty and "Util_Percent" in res.columns:
                     if (res["Util_Percent"] > mbl_limit_pct).any():
+                        wind_line_limit.append(round(v_wind, 1))
+                        found_line_limit = True
                         break
             except Exception:
                 pass
-            speed_line += 2.5
-        wind_line_limit.append(speed_line)
+            v_wind += 2.0
+            
+        if not found_line_limit:
+            wind_line_limit.append(max_wind_test)
 
-        # 2. Limite Bitte
+        # 2. Calcolo limite VENTO per carico bitte (SWL)
         if has_bollard_swl:
-            speed_bollard = 5.0
-            while speed_bollard <= 70.0:
+            v_wind_b = 5.0
+            found_bollard_limit = False
+            while v_wind_b <= max_wind_test:
                 try:
-                    f = calculate_environmental_forces(speed_bollard, angle, v_curr, dir_curr, afw, alw, alc, loa)
-                    res = solve_line_tensions_3d(geom_df, f)
+                    forces = calculate_environmental_forces(
+                        v_wind_b, wind_dir, v_curr, dir_curr, afw, alw, alc, loa
+                    )
+                    res = solve_line_tensions_3d(geom_df, forces)
                     if not res.empty and "bollard_swl" in res.columns and "Tension_tons" in res.columns:
                         if (res["Tension_tons"] > res["bollard_swl"]).any():
+                            wind_bollard_limit.append(round(v_wind_b, 1))
+                            found_bollard_limit = True
                             break
                 except Exception:
                     pass
-                speed_bollard += 2.5
-            wind_bollard_limit.append(speed_bollard)
+                v_wind_b += 2.0
+                
+            if not found_bollard_limit:
+                wind_bollard_limit.append(max_wind_test)
 
     bollard_res = wind_bollard_limit if has_bollard_swl else None
-    return angles, wind_line_limit, bollard_res, None
+    return angles, wind_line_limit, bollard_res
 
 
-def build_polar_figure(angles, line_lim, bollard_lim=None, fender_lim=None):
-    """Costruisce il grafico polare con Plotly."""
+def build_polar_figure(angles, line_lim, bollard_lim=None):
+    """Genera il diagramma polare Plotly per il vento."""
     fig = go.Figure()
 
     angles_plot = angles + [angles[0]]
     line_plot = line_lim + [line_lim[0]]
 
-    # Limite Cavi (Rosso)
+    # Curva Limite Vento Cavi (50% MBL)
     fig.add_trace(go.Scatterpolar(
         r=line_plot,
         theta=angles_plot,
-        mode='lines',
-        name='Max Wind Speed (50% MBL Line Limit)',
+        mode='lines+markers',
+        name='Max Vento Sostenibile (50% MBL Cavi)',
         line=dict(color='#E74C3C', width=3),
         fill='toself',
         fillcolor='rgba(231, 76, 60, 0.15)'
     ))
 
-    # Limite Bitte (Blu / Ottanio)
+    # Curva Limite Vento Bitte
     if bollard_lim is not None and len(bollard_lim) == len(angles):
         bollard_plot = bollard_lim + [bollard_lim[0]]
         fig.add_trace(go.Scatterpolar(
             r=bollard_plot,
             theta=angles_plot,
             mode='lines',
-            name='Max Wind Speed (Bollard SWL Limit)',
+            name='Max Vento Sostenibile (SWL Bitte)',
             line=dict(color='#2980B9', width=2.5, dash='dash')
         ))
 
     fig.update_layout(
         title=dict(
-            text="Polar Wind Operability Limits (Knots)",
+            text="Inviluppo Polare di Operabilità al Vento (Knots)",
             x=0.5,
             xanchor='center'
         ),
@@ -132,7 +149,7 @@ def build_polar_figure(angles, line_lim, bollard_lim=None, fender_lim=None):
                 direction="clockwise",
                 rotation=90,
                 tickvals=[0, 45, 90, 135, 180, 225, 270, 315],
-                ticktext=["Bow (0°)", "45°", "Starboard (90°)", "135°", "Stern (180°)", "225°", "Port (270°)", "315°"]
+                ticktext=["Prua (0°)", "45°", "Dritta (90°)", "135°", "Poppa (180°)", "225°", "Sinistra (270°)", "315°"]
             )
         ),
         legend=dict(
@@ -150,36 +167,37 @@ def build_polar_figure(angles, line_lim, bollard_lim=None, fender_lim=None):
 
 def render_tab_polar():
     st.header("🌀 Inviluppo Polare dei Limiti Operativi del Vento (0-360°)")
+    st.markdown("Determinazione della **massima velocità del vento ammissibile** da ogni direzione prima del superamento del limite di sicurezza dei cavi (50% MBL).")
 
-    # Recupero o inizializzazione dati di base dal session state
     geom_df = st.session_state.get("geom_df", pd.DataFrame())
 
-    col1, col2 = st.columns(2)
-    with col1:
-        v_curr = st.number_input("Velocità Corrente (Knots)", min_value=0.0, max_value=5.0, value=0.5, step=0.1)
-    with col2:
-        dir_curr = st.number_input("Direzione Corrente (°)", min_value=0, max_value=360, value=180, step=10)
+    # Configurazione Parametri Vento e Corrente
+    with st.expander("⚙️ Parametri di Calcolo Ambientali", expanded=True):
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            mbl_lim = st.slider("Limite Cavi (% MBL)", min_value=30, max_value=55, value=50, step=5)
+        with c2:
+            v_curr = st.number_input("Corrente di Fondo (Knots)", min_value=0.0, max_value=5.0, value=0.0, step=0.1, help="Imposta a 0 per valutare il solo impatto del vento")
+        with c3:
+            dir_curr = st.number_input("Direzione Corrente (°)", min_value=0, max_value=360, value=0, step=10)
 
-    # Pulsante per avviare la simulazione
-    if st.button("🚀 Esegui Simulazione Polare", type="primary", use_container_width=True):
-        with st.spinner("Calcolo dell'inviluppo polare in corso..."):
+    if st.button("🚀 Calcola Inviluppo Polare Vento", type="primary", use_container_width=True):
+        with st.spinner("Calcolo dei limiti di vento a 360° in corso..."):
             afw = st.session_state.get("afw", 950.0)
             alw = st.session_state.get("alw", 3200.0)
             alc = st.session_state.get("alc", 1800.0)
             loa = st.session_state.get("loa", 323.44)
 
-            # Esecuzione calcolo con fallback di sicurezza integrato
-            angles, line_lim, bollard_lim, fender_lim = calculate_multi_limit_polar_envelope(
-                geom_df, afw, alw, alc, loa, v_curr, dir_curr
+            angles, line_lim, bollard_lim = calculate_wind_polar_envelope(
+                geom_df, afw, alw, alc, loa, v_curr, dir_curr, mbl_limit_pct=mbl_lim
             )
 
-            # Generazione figura e salvataggio esplicito nello Stato
-            fig = build_polar_figure(angles, line_lim, bollard_lim, fender_lim)
+            fig = build_polar_figure(angles, line_lim, bollard_lim)
             st.session_state["polar_fig"] = fig
-            st.success("Calcolo inviluppo completato!")
+            st.success("Analisi del vento completata!")
 
-    # RENDERING DEL GRAFICO: Garantito ad ogni ciclo di Streamlit se la figura esiste
+    # Rendering Grafico
     if "polar_fig" in st.session_state and st.session_state["polar_fig"] is not None:
         st.plotly_chart(st.session_state["polar_fig"], use_container_width=True)
     else:
-        st.info("ℹ️ Clicca su **Esegui Simulazione Polare** per calcolare e visualizzare il diagramma.")
+        st.info("ℹ️ Clicca su **Calcola Inviluppo Polare Vento** per avviare la simulazione a 360°.")
