@@ -22,6 +22,7 @@ except ImportError:
 def build_wind_vector_diagram(v_wind: float, dir_wind: float, max_mbl_pct: float):
     fig = go.Figure()
 
+    # Sagoma nave orientata con la prua in alto (+Y)
     ship_x = [0, 0.8, 1.0, 0.8, -0.8, -1.0, -0.8, 0]
     ship_y = [3.0, 2.2, -2.5, -3.0, -3.0, -2.5, 2.2, 3.0]
     
@@ -34,6 +35,7 @@ def build_wind_vector_diagram(v_wind: float, dir_wind: float, max_mbl_pct: float
         hoverinfo="skip"
     ))
 
+    # Calcolo provenienza vento: 0° = Prua (+Y), 90° = Dritta (+X), 180° = Poppa (-Y)
     rad = np.radians(dir_wind)
     dx = -3.5 * np.sin(rad)
     dy = -3.5 * np.cos(rad)
