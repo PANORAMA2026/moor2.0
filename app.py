@@ -313,7 +313,7 @@ if "port_headings" not in st.session_state:
 init_db(st.session_state.lines_inventory)
 
 # =============================================================================
-# 2. BARRA LATERALE METEO & DATI NAVE
+# 2. BARRA LATERALE METEO & POSIZIONAMENTO NAVE
 # =============================================================================
 st.sidebar.title("🚢 Carnival Panorama")
 st.sidebar.caption(
@@ -376,12 +376,22 @@ else:
     v_wind = float(st.sidebar.slider("Vento (knots)", 0, 80, 30, key="v_wind_slider"))
     dir_wind = float(st.sidebar.slider("Direzione Vento Relativa (°)", 0, 360, 45, key="dir_wind_slider"))
 
-# SALVATAGGIO ESPLICITO NEL SESSION STATE PER RENDERLO DISPONIBILE A TUTTI I MODULI
 st.session_state["v_wind"] = v_wind
 st.session_state["dir_wind"] = dir_wind
 
 v_curr = st.sidebar.slider("Corrente (knots)", 0.0, 4.0, 0.5)
 dir_curr = st.sidebar.slider("Direzione Corrente (deg)", 0, 360, 0)
+
+# INPUT OFFSET LONGITUDINALE FUGRO
+st.sidebar.divider()
+st.sidebar.header("📐 Posizionamento Nave")
+offset_fugro_m = st.sidebar.number_input(
+    "Offset from FUGRO position (m)",
+    value=0.0,
+    step=0.5,
+    help="Valore positivo: nave spostata verso Prua (+X). Valore negativo: verso Poppa (-X)."
+)
+st.session_state["offset_fugro_m"] = offset_fugro_m
 
 # =============================================================================
 # 3. INTERFACCIA PRINCIPALE E TABS
@@ -479,10 +489,13 @@ with tab_stations:
 with tab_3d_editor:
     render_tab_berth(selected_port, DEFAULT_SHIP)
 
-# Calcolo costante della geometria e salvataggio nello state per la Tab 4 e la Tab 5
+# Calcolo costante della geometria con OFFSET FUGRO e salvataggio nello state
 active_bollards_df = st.session_state.ports_bollards[selected_port]
 geom_df = calculate_line_geometry(
-    st.session_state.lines_inventory, active_bollards_df, loa=DEFAULT_SHIP["LOA"]
+    st.session_state.lines_inventory,
+    active_bollards_df,
+    loa=DEFAULT_SHIP["LOA"],
+    offset_fugro=offset_fugro_m
 )
 st.session_state["geom_df"] = geom_df
 
@@ -510,7 +523,7 @@ with tab_sim:
 
         st.subheader(
             f"Analisi Tensione Cavi: **{selected_port}** (Meteo: {v_wind} kts @"
-            f" {dir_wind}°)"
+            f" {dir_wind}° | Offset: {offset_fugro_m:+.2f}m)"
         )
         m1, m2, m3 = st.columns(3)
         m1.metric("Forza Longitudinale (Fx)", f"{forces['Fx_total_t']:.2f} t")
@@ -537,7 +550,7 @@ with tab_sim:
             st.success("Sessione salvata nello storico usura!")
 
 # -----------------------------------------------------------------------------
-# TAB 5: INVILUPPO POLARE (Con passaggio diretto delle variabili meteo)
+# TAB 5: INVILUPPO POLARE
 # -----------------------------------------------------------------------------
 with tab_polar:
     render_tab_polar(v_wind=v_wind, dir_wind=dir_wind)
