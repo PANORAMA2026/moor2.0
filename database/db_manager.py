@@ -1,6 +1,7 @@
 """
 database/db_manager.py
-Gestione della persistenza su DB SQLite per bitte, certificati, inventario e storico.
+Gestione della persistenza su DB SQLite per bitte, certificati, inventario,
+stazioni/pianetti e storico.
 """
 
 import sqlite3
@@ -74,6 +75,19 @@ def init_db(default_lines_df: pd.DataFrame = None):
         )
     """)
 
+    # Tabella Componenti Pianetti/Stazioni
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS station_components (
+            station_name TEXT,
+            component_id TEXT,
+            component_type TEXT,
+            x_pos REAL,
+            y_pos REAL,
+            line_id TEXT,
+            PRIMARY KEY (station_name, component_id)
+        )
+    """)
+
     # Tabella Storico Sessioni
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS mooring_history (
@@ -128,7 +142,6 @@ def load_port_bollards_from_db(port_name: str) -> pd.DataFrame:
         df_def["is_frozen"] = True
         return df_def
 
-    # Mappatura colonne per compatibilità vista
     df = df.rename(columns={
         "position_type": "Posizione",
         "dist_inclinata_m": "Dist_Inclinata_m",
@@ -182,6 +195,41 @@ def load_lines_inventory_from_db() -> pd.DataFrame:
     df = pd.read_sql_query("SELECT * FROM lines_inventory", conn)
     conn.close()
     return df
+
+
+# -----------------------------------------------------------------------------
+# OPERAZIONI PERSISTENTI PER PIANETTI / STAZIONI
+# -----------------------------------------------------------------------------
+def save_mooring_station_components(components_list: list, station_name: str):
+    """Salva la lista dei componenti di una stazione nel database."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM station_components WHERE station_name = ?", (station_name,))
+
+    for item in components_list:
+        cursor.execute("""
+            INSERT INTO station_components (station_name, component_id, component_type, x_pos, y_pos, line_id)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (
+            station_name, str(item.get("id")), str(item.get("type")),
+            float(item.get("x", 0.0)), float(item.get("y", 0.0)), str(item.get("line_id", "N/D"))
+        ))
+
+    conn.commit()
+    conn.close()
+
+
+def get_mooring_station_components(station_name: str) -> pd.DataFrame:
+    """Recupera i componenti d'ormeggio salvati per una determinata stazione."""
+    conn = get_connection()
+    df = pd.read_sql_query("SELECT * FROM station_components WHERE station_name = ?", conn, params=(station_name,))
+    conn.close()
+    return df
+
+
+def get_line_history() -> pd.DataFrame:
+    """Restituisce le linee censite per l'associazione nei pianetti."""
+    return load_lines_inventory_from_db()
 
 
 def log_mooring_session(results_df: pd.DataFrame, port_name: str):
