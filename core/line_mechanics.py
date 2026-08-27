@@ -30,7 +30,6 @@ def get_material_stiffness(material_type: str, tension_tons: float, mbl_tons: fl
     load_ratio = max(tension_tons / mbl_tons, 0.01)
     
     # Derivata tangenziale della curva non lineare T(eps)
-    # k_tan = (MBL / length) * (1 / (A * B)) * (load_ratio ** (1 - B))
     a = params["A"]
     b = params["B"]
     
@@ -62,11 +61,13 @@ def calculate_line_geometry(
     lines_df: pd.DataFrame, 
     bollards_df: pd.DataFrame, 
     loa: float = 323.44, 
+    offset_fugro: float = 0.0,
     *args, 
     **kwargs
 ) -> pd.DataFrame:
     """
-    Calcola i vettori geometrici 3D (dx, dy, dz), pendenza, azimuth e lunghezza reale delle linee.
+    Calcola i vettori geometrici 3D (dx, dy, dz), pendenza, azimuth e lunghezza reale delle linee,
+    applicando l'offset FUGRO (longitudinale) ai passacavi della nave.
     """
     if lines_df is None or bollards_df is None:
         return pd.DataFrame()
@@ -108,7 +109,10 @@ def calculate_line_geometry(
         else:
             merged[col] = pd.to_numeric(merged[col], errors="coerce").fillna(0.0)
 
-    # Vettore banchina -> nave
+    # APPLICAZIONE OFFSET LONGITUDINALE FUGRO AI CHOCKS DELLA NAVE
+    merged["chock_x_m"] = merged["chock_x_m"] + offset_fugro
+
+    # Vettore banchina -> nave (Bitte rimangono fisse)
     dx = merged["bollard_x_m"] - merged["chock_x_m"]
     dy = merged["bollard_y_m"] - merged["chock_y_m"]
     dz = merged["bollard_z_m"] - merged["chock_z_m"]
