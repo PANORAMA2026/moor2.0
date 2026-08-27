@@ -370,11 +370,15 @@ if meteo_mode == "Live API (Windy / Open-Meteo)":
         dir_wind = relative_wind_dir
     else:
         st.sidebar.error("Impossibile contattare il server meteo. Uso manuale.")
-        v_wind = st.sidebar.slider("Vento (knots)", 0, 80, 30)
-        dir_wind = st.sidebar.slider("Direzione Vento Relativa (°)", 0, 360, 45)
+        v_wind = float(st.sidebar.slider("Vento (knots)", 0, 80, 30, key="v_wind_slider"))
+        dir_wind = float(st.sidebar.slider("Direzione Vento Relativa (°)", 0, 360, 45, key="dir_wind_slider"))
 else:
-    v_wind = st.sidebar.slider("Vento (knots)", 0, 80, 30)
-    dir_wind = st.sidebar.slider("Direzione Vento Relativa (°)", 0, 360, 45)
+    v_wind = float(st.sidebar.slider("Vento (knots)", 0, 80, 30, key="v_wind_slider"))
+    dir_wind = float(st.sidebar.slider("Direzione Vento Relativa (°)", 0, 360, 45, key="dir_wind_slider"))
+
+# SALVATAGGIO ESPLICITO NEL SESSION STATE PER RENDERLO DISPONIBILE A TUTTI I MODULI
+st.session_state["v_wind"] = v_wind
+st.session_state["dir_wind"] = dir_wind
 
 v_curr = st.sidebar.slider("Corrente (knots)", 0.0, 4.0, 0.5)
 dir_curr = st.sidebar.slider("Direzione Corrente (deg)", 0, 360, 0)
@@ -533,10 +537,10 @@ with tab_sim:
             st.success("Sessione salvata nello storico usura!")
 
 # -----------------------------------------------------------------------------
-# TAB 5: INVILUPPO POLARE (Corretto per chiamare la vista dedicata)
+# TAB 5: INVILUPPO POLARE (Con passaggio diretto delle variabili meteo)
 # -----------------------------------------------------------------------------
 with tab_polar:
-    render_tab_polar()
+    render_tab_polar(v_wind=v_wind, dir_wind=dir_wind)
 
 # -----------------------------------------------------------------------------
 # TAB 6: STORICO & USURA CAVI
