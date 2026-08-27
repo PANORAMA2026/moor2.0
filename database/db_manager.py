@@ -1,190 +1,197 @@
 """
 database/db_manager.py
-
-Gestione della persistenza dati SQLite per OpenMooring MEG4 
-(linee, bitte, pianette mooring station, log usura e monitoraggio).
+Gestione della persistenza su DB SQLite per bitte, certificati, inventario e storico.
 """
 
-from datetime import datetime
 import sqlite3
 import pandas as pd
-from config.constants import DB_FILE_PATH
+from config.constants import DB_FILE_PATH, DEFAULT_BOLLARDS
 
 
-def init_db(lines_inventory_df: pd.DataFrame = None):
-    """Inizializza il database SQLite ricreando le tabelle se necessario ed esegue il seeding iniziale."""
-    conn = sqlite3.connect(DB_FILE_PATH)
+def get_connection():
+    conn = sqlite3.connect(DB_FILE_PATH, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def init_db(default_lines_df: pd.DataFrame = None):
+    """Inizializza il database SQLite creando le tabelle se non esistono."""
+    conn = get_connection()
     cursor = conn.cursor()
 
-    # Reset per aggiornare la struttura delle tabelle ed eliminare conflitti con vecchi schema
-    cursor.execute("DROP TABLE IF EXISTS line_inventory")
-    cursor.execute("DROP TABLE IF EXISTS tension_logs")
-    cursor.execute("DROP TABLE IF EXISTS mooring_stations")
-
-    # 1. Tabella Registro Linee & Usura Accumulata (con parametri materiali MEG4)
+    # Tabella Bitte Banchina (Persistente)
     cursor.execute("""
-        CREATE TABLE IF NOT EXISTS line_inventory (
-            line_id TEXT PRIMARY KEY,
-            line_name TEXT,
-            manufacturer TEXT,
-            material TEXT DEFAULT 'HMPE',
-            diameter_mm REAL,
-            mbl_tons REAL,
-            tail_material TEXT DEFAULT 'NYLON',
-            tail_length_m REAL DEFAULT 11.0,
-            hours_in_service REAL DEFAULT 0,
-            high_load_hours REAL DEFAULT 0,
-            fatigue_cycles INTEGER DEFAULT 0,
-            health_index REAL DEFAULT 100.0
+        CREATE TABLE IF NOT EXISTS port_bollards (
+            port_name TEXT,
+            bollard_id TEXT,
+            position_type TEXT,
+            dist_inclinata_m REAL,
+            pendenza_deg REAL,
+            dist_orizzontale_m REAL,
+            x_m REAL,
+            y_m REAL,
+            z_m REAL,
+            swl_t REAL,
+            stato TEXT,
+            PRIMARY KEY (port_name, bollard_id)
         )
     """)
 
-    # 2. Tabella Storico Monitoraggio Tensioni in Banchina
+    # Tabella Certificati Cavi
     cursor.execute("""
-        CREATE TABLE IF NOT EXISTS tension_logs (
+        CREATE TABLE IF NOT EXISTS certificates (
+            cert_id TEXT PRIMARY KEY,
+            manufacturer TEXT,
+            material TEXT,
+            diameter_mm REAL,
+            mbl_tons REAL,
+            standard TEXT,
+            issue_date TEXT
+        )
+    """)
+
+    # Tabella Inventario Linee
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS lines_inventory (
+            line_id TEXT PRIMARY KEY,
+            line_name TEXT,
+            line_type TEXT,
+            station_id TEXT,
+            winch_id TEXT,
+            cert_id TEXT,
+            chock_x_m REAL,
+            chock_y_m REAL,
+            chock_z_m REAL,
+            material TEXT,
+            diameter_mm REAL,
+            E_modulus_GPa REAL,
+            mbl_tons REAL,
+            tail_length_m REAL,
+            tail_diameter_mm REAL,
+            tail_E_modulus_GPa REAL,
+            tail_mbl_tons REAL,
+            bollard_id TEXT
+        )
+    """)
+
+    # Tabella Storico Sessioni
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS mooring_history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
             port_name TEXT,
             line_id TEXT,
-            line_name TEXT,
             tension_tons REAL,
-            pct_mbl REAL
-        )
-    """)
-
-    # 3. Tabella Mappatura Componenti Pianetta / Stazioni d'Ormeggio
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS mooring_stations (
-            component_id TEXT PRIMARY KEY,
-            station_name TEXT,
-            component_type TEXT,
-            pos_x REAL,
-            pos_y REAL,
-            assigned_line_id TEXT,
-            FOREIGN KEY (assigned_line_id) REFERENCES line_inventory (line_id)
+            util_percent REAL
         )
     """)
 
     conn.commit()
-
-    # Seeding iniziale del database
-    if lines_inventory_df is not None and not lines_inventory_df.empty:
-        cursor.execute("SELECT COUNT(*) FROM line_inventory")
-        if cursor.fetchone()[0] == 0:
-            for _, row in lines_inventory_df.iterrows():
-                cursor.execute(
-                    """
-                    INSERT OR IGNORE INTO line_inventory 
-                    (line_id, line_name, manufacturer, material, diameter_mm, mbl_tons, tail_material, tail_length_m)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        str(row.get("line_id", "")),
-                        str(row.get("line_name", "")),
-                        str(row.get("manufacturer", "Samson Rope")),
-                        str(row.get("material", "HMPE")),
-                        float(row.get("diameter_mm", 64)),
-                        float(row.get("mbl_tons", 105.0)),
-                        str(row.get("tail_material", "NYLON")),
-                        float(row.get("tail_length_m", 11.0)),
-                    ),
-                )
-            conn.commit()
-
     conn.close()
+
+
+# -----------------------------------------------------------------------------
+# OPERAZIONI PERSISTENTI PER LE BITTE DI BANCHINA
+# -----------------------------------------------------------------------------
+def save_port_bollards_to_db(port_name: str, bollards_df: pd.DataFrame):
+    """Salva o aggiorna le bitte di un determinato porto su SQLite."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM port_bollards WHERE port_name = ?", (port_name,))
+
+    for _, r in bollards_df.iterrows():
+        cursor.execute("""
+            INSERT INTO port_bollards (
+                port_name, bollard_id, position_type, dist_inclinata_m, pendenza_deg,
+                dist_orizzontale_m, x_m, y_m, z_m, swl_t, stato
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            port_name, str(r.get("bollard_id")), str(r.get("Posizione", "Prua")),
+            float(r.get("Dist_Inclinata_m", 0.0)), float(r.get("Pendenza_deg", 0.0)),
+            float(r.get("Dist_Orizzontale_m", 0.0)), float(r.get("X_Coordinata_m", 0.0)),
+            float(r.get("Y_Coordinata_m", 0.0)), float(r.get("Z_Altezza_m", 0.0)),
+            float(r.get("SWL_Bitta_t", 100.0)), str(r.get("Stato", "Disponibile"))
+        ))
+
+    conn.commit()
+    conn.close()
+
+
+def load_port_bollards_from_db(port_name: str) -> pd.DataFrame:
+    """Carica le bitte di un porto dal database. Se vuoto, carica il default."""
+    conn = get_connection()
+    df = pd.read_sql_query("SELECT * FROM port_bollards WHERE port_name = ?", conn, params=(port_name,))
+    conn.close()
+
+    if df.empty:
+        df_def = pd.DataFrame(DEFAULT_BOLLARDS)
+        df_def["is_frozen"] = True
+        return df_def
+
+    # Mappatura colonne per compatibilità vista
+    df = df.rename(columns={
+        "position_type": "Posizione",
+        "dist_inclinata_m": "Dist_Inclinata_m",
+        "pendenza_deg": "Pendenza_deg",
+        "dist_orizzontale_m": "Dist_Orizzontale_m",
+        "x_m": "X_Coordinata_m",
+        "y_m": "Y_Coordinata_m",
+        "z_m": "Z_Altezza_m",
+        "swl_t": "SWL_Bitta_t",
+        "stato": "Stato"
+    })
+    df["bollard_x_m"] = df["X_Coordinata_m"]
+    df["bollard_y_m"] = df["Y_Coordinata_m"]
+    df["bollard_z_m"] = df["Z_Altezza_m"]
+    df["is_frozen"] = True
+    return df
+
+
+# -----------------------------------------------------------------------------
+# OPERAZIONI PERSISTENTI PER CERTIFICATI E INVENTARIO
+# -----------------------------------------------------------------------------
+def save_certificate_to_db(cert_dict: dict):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT OR REPLACE INTO certificates (cert_id, manufacturer, material, diameter_mm, mbl_tons, standard, issue_date)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    """, (
+        cert_dict["cert_id"], cert_dict["manufacturer"], cert_dict["material"],
+        cert_dict["diameter_mm"], cert_dict["mbl_tons"], cert_dict["standard"], cert_dict["issue_date"]
+    ))
+    conn.commit()
+    conn.close()
+
+
+def load_certificates_from_db() -> pd.DataFrame:
+    conn = get_connection()
+    df = pd.read_sql_query("SELECT * FROM certificates", conn)
+    conn.close()
+    return df
+
+
+def save_lines_inventory_to_db(lines_df: pd.DataFrame):
+    conn = get_connection()
+    lines_df.to_sql("lines_inventory", conn, if_exists="replace", index=False)
+    conn.close()
+
+
+def load_lines_inventory_from_db() -> pd.DataFrame:
+    conn = get_connection()
+    df = pd.read_sql_query("SELECT * FROM lines_inventory", conn)
+    conn.close()
+    return df
 
 
 def log_mooring_session(results_df: pd.DataFrame, port_name: str):
-    """Registra i risultati di tensione di una sessione di simulazione/monitoraggio."""
-    if results_df is None or results_df.empty:
-        return
-
-    conn = sqlite3.connect(DB_FILE_PATH)
+    """Salva le tensioni misurate nello storico usura."""
+    conn = get_connection()
     cursor = conn.cursor()
-    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    for _, row in results_df.iterrows():
-        line_id = str(row.get("line_id", ""))
-        line_name = str(row.get("line_name", ""))
-        tension = float(row.get("Tension_tons", 0.0))
-        pct = float(row.get("Util_Percent", 0.0))
-
-        # Inserimento nei log di tensione
-        cursor.execute(
-            """
-            INSERT INTO tension_logs (timestamp, port_name, line_id, line_name, tension_tons, pct_mbl)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (now_str, port_name, line_id, line_name, tension, pct),
-        )
-
-        # Aggiornamento usura se il carico supera la soglia di guardia (> 45% MBL)
-        if pct > 45.0:
-            cursor.execute(
-                """
-                UPDATE line_inventory
-                SET high_load_hours = high_load_hours + 1.0,
-                    fatigue_cycles = fatigue_cycles + 1,
-                    health_index = MAX(0.0, health_index - 0.5)
-                WHERE line_id = ?
-                """,
-                (line_id,),
-            )
-        else:
-            cursor.execute(
-                """
-                UPDATE line_inventory
-                SET hours_in_service = hours_in_service + 1.0
-                WHERE line_id = ?
-                """,
-                (line_id,),
-            )
-
+    for _, r in results_df.iterrows():
+        cursor.execute("""
+            INSERT INTO mooring_history (port_name, line_id, tension_tons, util_percent)
+            VALUES (?, ?, ?, ?)
+        """, (port_name, str(r.get("line_id")), float(r.get("Tension_tons", 0)), float(r.get("Util_Percent", 0))))
     conn.commit()
     conn.close()
-
-
-def get_line_history() -> pd.DataFrame:
-    """Recupera lo storico di usura e ore di servizio di tutte le linee registrate."""
-    conn = sqlite3.connect(DB_FILE_PATH)
-    df = pd.read_sql_query("SELECT * FROM line_inventory", conn)
-    conn.close()
-    return df
-
-
-def save_mooring_station_components(components_list: list, station_name: str = "Forward Station"):
-    """Salva o aggiorna i componenti mappati sulla pianetta (winches, baskets, chocks)."""
-    if not components_list:
-        return
-
-    conn = sqlite3.connect(DB_FILE_PATH)
-    cursor = conn.cursor()
-
-    for comp in components_list:
-        cursor.execute(
-            """
-            INSERT OR REPLACE INTO mooring_stations 
-            (component_id, station_name, component_type, pos_x, pos_y, assigned_line_id)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (
-                str(comp.get("id", "")),
-                station_name,
-                str(comp.get("type", "")),
-                float(comp.get("x", 0.0)),
-                float(comp.get("y", 0.0)),
-                str(comp.get("line_id", "N/D")),
-            ),
-        )
-
-    conn.commit()
-    conn.close()
-
-
-def get_mooring_station_components(station_name: str = "Forward Station") -> pd.DataFrame:
-    """Recupera i componenti e le posizioni mappati per una determinata stazione d'ormeggio."""
-    conn = sqlite3.connect(DB_FILE_PATH)
-    query = "SELECT * FROM mooring_stations WHERE station_name = ?"
-    df = pd.read_sql_query(query, conn, params=(station_name,))
-    conn.close()
-    return df
