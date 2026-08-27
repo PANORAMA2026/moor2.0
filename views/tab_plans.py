@@ -46,6 +46,18 @@ def render_tab_plans():
         st.warning("Nessuna stazione trovata.")
         return
 
+    # Sincronizzazione automatica con il DB al primo caricamento della stazione
+    db_saved_comp = get_mooring_station_components(station_sel)
+    if not db_saved_comp.empty and st.session_state.mooring_stations[station_sel].empty:
+        formatted_df = pd.DataFrame({
+            "winch_id": db_saved_comp["component_id"],
+            "chock_id": db_saved_comp["component_id"].apply(lambda val: f"C_{val}"),
+            "chock_x_m": db_saved_comp["x_pos"],
+            "chock_y_m": db_saved_comp["y_pos"],
+            "assigned_line_id": db_saved_comp["line_id"]
+        })
+        st.session_state.mooring_stations[station_sel] = formatted_df
+
     st_df = st.session_state.mooring_stations[station_sel]
     lines_df = get_line_history()
 
@@ -73,7 +85,10 @@ def render_tab_plans():
         pos_x = st.slider("Coordinata X / Longitudinale", 0.0, 100.0, 50.0, step=0.5)
         pos_y = st.slider("Coordinata Y / Trasversale", 0.0, 100.0, 50.0, step=0.5)
 
-        line_options = ["Nessuna"] + lines_df["line_id"].tolist() if not lines_df.empty else ["Nessuna"]
+        line_options = ["Nessuna"]
+        if not lines_df.empty and "line_id" in lines_df.columns:
+            line_options += lines_df["line_id"].tolist()
+        
         assigned_line = st.selectbox("Cima d'Ormeggio Associata", line_options)
 
         if st.button("➕ Posiziona sulla Pianetta", use_container_width=True):
@@ -112,11 +127,24 @@ def render_tab_plans():
         )
         st.session_state.mooring_stations[station_sel] = edited_st
 
+        if st.button("💾 Salva Modifiche Tabelle su DB", key=f"save_tbl_{station_sel}"):
+            db_components = [
+                {
+                    "id": str(row.get("winch_id", "")),
+                    "type": "COMPONENT",
+                    "x": float(row.get("chock_x_m", 0.0)),
+                    "y": float(row.get("chock_y_m", 0.0)),
+                    "line_id": str(row.get("assigned_line_id", "N/D"))
+                }
+                for _, row in edited_st.iterrows()
+            ]
+            save_mooring_station_components(db_components, station_sel)
+            st.success("Pianetto aggiornato e registrato nel DB!")
+
     # 4. Rendering Grafico Plotly (con Sfondo Immagine Pianetta se presente)
     fig_st = go.Figure()
 
     if bg_img is not None:
-        img_w, img_h = bg_img.size
         fig_st.add_layout_image(
             dict(
                 source=bg_img,
@@ -139,7 +167,7 @@ def render_tab_plans():
                 y=edited_st["chock_y_m"],
                 mode="markers+text",
                 marker=dict(size=18, color="#FF4B4B", symbol="square"),
-                text=edited_st["winch_id"] + " (" + edited_st["chock_id"] + ")",
+                text=edited_st["winch_id"].astype(str) + " (" + edited_st["chock_id"].astype(str) + ")",
                 textposition="top center",
                 name="Winch / Basket / Chock",
                 hovertemplate="<b>%{text}</b><br>Cima Associata: %{customdata}<extra></extra>",
