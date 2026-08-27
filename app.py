@@ -29,7 +29,6 @@ from config.constants import (
 from core.hydrodynamic_forces import calculate_environmental_forces
 from core.line_mechanics import (
     calculate_line_geometry,
-    calculate_wind_operability_envelope,
     solve_line_tensions_3d,
 )
 
@@ -40,6 +39,7 @@ from utils.pdf_parser import extract_text_from_pdf, parse_certificate_text
 from views.tab_berth import render_tab_berth
 from views.tab_history import render_tab_history
 from views.tab_plans import render_tab_plans
+from views.tab_polar import render_tab_polar
 
 # Configurazione della pagina Streamlit
 st.set_page_config(
@@ -57,6 +57,12 @@ if "db_conn" not in st.session_state:
         DB_PATH, check_same_thread=False
     )
     st.session_state.db_conn.row_factory = sqlite3.Row
+
+# Inizializzazione variabili globali nave nello state per Tab Polare
+st.session_state["afw"] = DEFAULT_SHIP.get("AFW", 950.0)
+st.session_state["alw"] = DEFAULT_SHIP.get("ALW", 3200.0)
+st.session_state["alc"] = DEFAULT_SHIP.get("ALC", 1800.0)
+st.session_state["loa"] = DEFAULT_SHIP.get("LOA", 323.44)
 
 # Inizializzazione dati di default se non presenti in sessione
 if "certificates_db" not in st.session_state:
@@ -81,7 +87,6 @@ if "certificates_db" not in st.session_state:
         },
     ])
 
-# Coordinate X traslate per far coincidere il centro nave con X = 0 (LOA = 323.44m => Bow = +161.7m, Stern = -161.7m)
 if "mooring_stations" not in st.session_state:
     st.session_state.mooring_stations = {
         "Prua (Forward Station)": pd.DataFrame([
@@ -470,10 +475,12 @@ with tab_stations:
 with tab_3d_editor:
     render_tab_berth(selected_port, DEFAULT_SHIP)
 
+# Calcolo costante della geometria e salvataggio nello state per la Tab 4 e la Tab 5
 active_bollards_df = st.session_state.ports_bollards[selected_port]
 geom_df = calculate_line_geometry(
     st.session_state.lines_inventory, active_bollards_df, loa=DEFAULT_SHIP["LOA"]
 )
+st.session_state["geom_df"] = geom_df
 
 # -----------------------------------------------------------------------------
 # TAB 4: SIMULAZIONE TENSIONI
@@ -526,22 +533,10 @@ with tab_sim:
             st.success("Sessione salvata nello storico usura!")
 
 # -----------------------------------------------------------------------------
-# TAB 5: INVILUPPO POLARE
+# TAB 5: INVILUPPO POLARE (Corretto per chiamare la vista dedicata)
 # -----------------------------------------------------------------------------
 with tab_polar:
-    st.subheader("Inviluppo Polare dei Limiti Operativi del Vento (0-360°)")
-    if st.button("Esegui Simulazione Polare") and not geom_df.empty:
-        with st.spinner("Calcolo dinamico in corso..."):
-            angles, max_winds = calculate_wind_operability_envelope(
-                geom_df,
-                DEFAULT_SHIP["AFW"],
-                DEFAULT_SHIP["ALW"],
-                DEFAULT_SHIP["ALC"],
-                DEFAULT_SHIP["LOA"],
-                v_curr=v_curr,
-                dir_curr=dir_curr,
-            )
-            st.success("Calcolo inviluppo completato!")
+    render_tab_polar()
 
 # -----------------------------------------------------------------------------
 # TAB 6: STORICO & USURA CAVI
