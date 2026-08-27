@@ -1,12 +1,17 @@
 """
 database/db_manager.py
 Gestione della persistenza su DB SQLite per bitte, certificati, inventario,
-stazioni/pianetti e storico.
+stazioni/pianetti (inclusi percorsi immagini) e storico.
 """
 
+import os
 import sqlite3
 import pandas as pd
 from config.constants import DB_FILE_PATH, DEFAULT_BOLLARDS
+
+# Cartella per il salvataggio fisico delle immagini dei pianetti
+PLANS_DIR = os.path.join("assets", "planimetrie")
+os.makedirs(PLANS_DIR, exist_ok=True)
 
 
 def get_connection():
@@ -20,7 +25,7 @@ def init_db(default_lines_df: pd.DataFrame = None):
     conn = get_connection()
     cursor = conn.cursor()
 
-    # Tabella Bitte Banchina (Persistente)
+    # Tabella Bitte Banchina
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS port_bollards (
             port_name TEXT,
@@ -88,6 +93,14 @@ def init_db(default_lines_df: pd.DataFrame = None):
         )
     """)
 
+    # Tabella Metadati Stazioni (Immagini Pianetti Persistenti)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS station_metadata (
+            station_name TEXT PRIMARY KEY,
+            image_path TEXT
+        )
+    """)
+
     # Tabella Storico Sessioni
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS mooring_history (
@@ -108,7 +121,6 @@ def init_db(default_lines_df: pd.DataFrame = None):
 # OPERAZIONI PERSISTENTI PER LE BITTE DI BANCHINA
 # -----------------------------------------------------------------------------
 def save_port_bollards_to_db(port_name: str, bollards_df: pd.DataFrame):
-    """Salva o aggiorna le bitte di un determinato porto su SQLite."""
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("DELETE FROM port_bollards WHERE port_name = ?", (port_name,))
@@ -132,7 +144,6 @@ def save_port_bollards_to_db(port_name: str, bollards_df: pd.DataFrame):
 
 
 def load_port_bollards_from_db(port_name: str) -> pd.DataFrame:
-    """Carica le bitte di un porto dal database. Se vuoto, carica il default."""
     conn = get_connection()
     df = pd.read_sql_query("SELECT * FROM port_bollards WHERE port_name = ?", conn, params=(port_name,))
     conn.close()
@@ -198,8 +209,42 @@ def load_lines_inventory_from_db() -> pd.DataFrame:
 
 
 # -----------------------------------------------------------------------------
-# OPERAZIONI PERSISTENTI PER PIANETTI / STAZIONI
+# OPERAZIONI PERSISTENTI PER PIANETTI / STAZIONI & IMMAGINI
 # -----------------------------------------------------------------------------
+def save_station_image_file(station_name: str, file_bytes: bytes, file_ext: str) -> str:
+    """Salva il file immagine su disco fisso e memorizza il path nel DB."""
+    safe_name = station_name.replace(" ", "_").replace("(", "").replace(")", "").lower()
+    filename = f"plan_{safe_name}{file_ext}"
+    filepath = os.path.join(PLANS_DIR, filename)
+
+    with open(filepath, "wb") as f:
+        f.write(file_bytes)
+
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT OR REPLACE INTO station_metadata (station_name, image_path)
+        VALUES (?, ?)
+    """, (station_name, filepath))
+    conn.commit()
+    conn.close()
+
+    return filepath
+
+
+def get_station_image_path(station_name: str) -> str:
+    """Recupera il percorso del file immagine salvato su disco per la stazione."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT image_path FROM station_metadata WHERE station_name = ?", (station_name,))
+    row = cursor.fetchone()
+    conn.close()
+
+    if row and row["image_path"] and os.path.exists(row["image_path"]):
+        return row["image_path"]
+    return None
+
+
 def save_mooring_station_components(components_list: list, station_name: str):
     """Salva la lista dei componenti di una stazione nel database."""
     conn = get_connection()
@@ -228,12 +273,10 @@ def get_mooring_station_components(station_name: str) -> pd.DataFrame:
 
 
 def get_line_history() -> pd.DataFrame:
-    """Restituisce le linee censite per l'associazione nei pianetti."""
     return load_lines_inventory_from_db()
 
 
 def log_mooring_session(results_df: pd.DataFrame, port_name: str):
-    """Salva le tensioni misurate nello storico usura."""
     conn = get_connection()
     cursor = conn.cursor()
     for _, r in results_df.iterrows():
