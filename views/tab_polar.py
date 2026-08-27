@@ -22,7 +22,7 @@ except ImportError:
 def build_wind_vector_diagram(v_wind: float, dir_wind: float, max_mbl_pct: float):
     fig = go.Figure()
 
-    # Sagoma nave orientata con la prua in alto (+Y)
+    # Sagoma nave (Prua verso l'alto = +Y)
     ship_x = [0, 0.8, 1.0, 0.8, -0.8, -1.0, -0.8, 0]
     ship_y = [3.0, 2.2, -2.5, -3.0, -3.0, -2.5, 2.2, 3.0]
     
@@ -35,15 +35,20 @@ def build_wind_vector_diagram(v_wind: float, dir_wind: float, max_mbl_pct: float
         hoverinfo="skip"
     ))
 
-    # Calcolo provenienza vento: 0° = Prua (+Y), 90° = Dritta (+X), 180° = Poppa (-Y)
+    # POSIZIONAMENTO ORIGINE VENTO (ax, ay):
+    # 0° (Prua) -> Vento parte in alto (X=0, Y=+3.5) e punta verso (0,0)
+    # 90° (Dritta) -> Vento parte a destra (X=+3.5, Y=0) e punta verso (0,0)
+    # 180° (Poppa) -> Vento parte in basso (X=0, Y=-3.5) e punta verso (0,0)
+    # 270° (Sinistra) -> Vento parte a sinistra (X=-3.5, Y=0) e punta verso (0,0)
     rad = np.radians(dir_wind)
-    dx = -3.5 * np.sin(rad)
-    dy = -3.5 * np.cos(rad)
+    ax_pos = 3.5 * np.sin(rad)
+    ay_pos = 3.5 * np.cos(rad)
 
     color_status = "#E74C3C" if max_mbl_pct > 50.0 else ("#F39C12" if max_mbl_pct > 35.0 else "#2ECC71")
 
+    # Freccia che va da (ax, ay) verso la nave (0, 0)
     fig.add_annotation(
-        ax=dx, ay=dy,
+        ax=ax_pos, ay=ay_pos,
         x=0, y=0,
         xref="x", yref="y",
         axref="x", ayref="y",
