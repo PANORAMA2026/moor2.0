@@ -23,22 +23,28 @@ OFFSET_PLATFORM_AFT_M = 14.0
 def calculate_bollard_coordinates(
     position_type, dist_inc, slope_deg, ship_loa, ship_beam
 ):
-    """Calcola le coordinate X, Y, Z della bitta rispetto alle Observation Platforms."""
+    """
+    Calcola le coordinate X, Y, Z della bitta rispetto alle Observation Platforms.
+    Logica invertita su richiesta utente:
+      - Inserendo un numero POSITIVO (+): la bitta si sposta verso PRUA (+X)
+      - Inserendo un numero NEGATIVO (-): la bitta si sposta verso POPPA (-X)
+    """
     slope_rad = np.radians(slope_deg)
 
-    dist_horiz = dist_inc * np.cos(slope_rad)
-    z_m = -1.0 * (dist_inc * np.sin(slope_rad))
+    # Componente orizzontale preservando il segno di dist_inc
+    dist_horiz = np.sign(dist_inc) * (abs(dist_inc) * np.cos(slope_rad))
+    z_m = -1.0 * (abs(dist_inc) * np.sin(slope_rad))
 
     if position_type == "Prua":
         x_platform = (ship_loa / 2.0) - OFFSET_PLATFORM_FWD_M
-        x_m = x_platform - dist_horiz
     else:
         x_platform = (-ship_loa / 2.0) + OFFSET_PLATFORM_AFT_M
-        x_m = x_platform + dist_horiz
 
+    # Il segno positivo sposta verso Prua (+X), il segno negativo verso Poppa (-X)
+    x_m = x_platform + dist_horiz
     y_m = (ship_beam / 2.0) + 6.4
 
-    return round(dist_horiz, 2), round(x_m, 2), round(y_m, 2), round(z_m, 2)
+    return round(abs(dist_horiz), 2), round(x_m, 2), round(y_m, 2), round(z_m, 2)
 
 
 def generate_detailed_3d_ship(ship_dict):
@@ -233,6 +239,7 @@ def render_tab_berth(selected_port, ship_dict):
 
     with col_edit:
         st.subheader("📋 Telemetro Laser & Dati Carico Vento")
+        st.info("💡 **Offset Distance**: Usa numeri **positivi (+)** per spostare le bitte verso **Prua** e **negativi (-)** per spostarle verso **Poppa**.")
 
         edited_df = st.data_editor(
             df_bollards[[
@@ -350,7 +357,6 @@ def render_tab_berth(selected_port, ship_dict):
                                 )
                             )
             except Exception:
-                # In caso di errore sui cavi, evita di far fallire l'intero grafico 3D
                 pass
 
         # 5. Configurazione Layout e Telecamera
