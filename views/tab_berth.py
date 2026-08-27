@@ -1,7 +1,7 @@
 """
 views/tab_berth.py
-Gestione layout banchina, aggiunta dinamica bitte con riferimento differenziato Prua/Poppa,
-congelamento (Fixed Anchor Points) e Modellazione 3D.
+Gestione layout banchina separata in due stazioni (Prua e Poppa).
+Calcolo coordinate con segno algebrico (+ Prua / - Poppa) rispetto alle rispettive Observation Platforms.
 """
 
 import numpy as np
@@ -14,29 +14,32 @@ try:
 except ImportError:
     calculate_line_geometry = None
 
-OFFSET_PLATFORM_FWD_M = 27.5
+OFFSET_PLATFORM_FWD_M = 25.0
 OFFSET_PLATFORM_AFT_M = 14.0
 
 
 def calculate_bollard_coordinates(
-    position_type, dist_inc, slope_deg, ship_loa, ship_beam
+    position_type: str, dist_signed: float, slope_deg: float, ship_loa: float, ship_beam: float
 ):
     """
-    Calcola le coordinate X, Y, Z della bitta rispetto alle Observation Platforms.
-    - Prua: X_platform + dist_horiz (+X)
-    - Poppa: X_platform - dist_horiz (-X)
+    Calcola le coordinate X, Y, Z della bitta applicando il segno algebrico (+ Prua / - Poppa)
+    rispetto alla rispettiva Observation Platform.
+    
+    - Prua: X_fwd_platform = (LOA/2) - OFFSET_PLATFORM_FWD_M.  X_bitta = X_fwd_platform + dist_signed
+    - Poppa: X_aft_platform = -(LOA/2) + OFFSET_PLATFORM_AFT_M. X_bitta = X_aft_platform + dist_signed
     """
     slope_rad = np.radians(slope_deg)
-    dist_horiz = abs(dist_inc) * np.cos(slope_rad)
-    z_m = -1.0 * (abs(dist_inc) * np.sin(slope_rad))
+    # Proiezione orizzontale mantenendo il segno algebrico originale
+    dist_horiz = dist_signed * np.cos(slope_rad)
+    z_m = -1.0 * (abs(dist_signed) * np.sin(slope_rad))
 
     if position_type == "Prua":
         x_platform = (ship_loa / 2.0) - OFFSET_PLATFORM_FWD_M
-        x_m = x_platform + dist_horiz
     else:
         x_platform = (-ship_loa / 2.0) + OFFSET_PLATFORM_AFT_M
-        x_m = x_platform - dist_horiz
 
+    # Il segno positivo muove sempre verso Prua (+X), il negativo verso Poppa (-X)
+    x_m = x_platform + dist_horiz
     y_m = (ship_beam / 2.0) + 6.4
 
     return round(dist_horiz, 2), round(x_m, 2), round(y_m, 2), round(z_m, 2)
@@ -112,25 +115,25 @@ def generate_detailed_3d_ship(ship_dict, offset_fugro: float = 0.0):
 
 
 def render_tab_berth(selected_port, ship_dict):
-    st.header(f"🗺️ Layout Banchina & Bitte Fisse — {selected_port}")
+    st.header(f"🗺️ Layout Banchina — {selected_port}")
     
     offset_fugro = float(st.session_state.get("offset_fugro_m", 0.0))
     st.caption(
         f"🚢 **{ship_dict.get('Name')}** | LOA: **{ship_dict.get('LOA')}m** | "
-        f"Offset da pos. FUGRO: **{offset_fugro:+.2f} m**"
+        f"Offset FUGRO: **{offset_fugro:+.2f} m**"
     )
 
     df_bollards = st.session_state.ports_bollards[selected_port].copy()
 
-    # Ricalcola le coordinate se le bitte non sono congelate
+    # Ricalcola coordinate per bitte esistenti se non congelate
     for idx, row in df_bollards.iterrows():
         if not row.get("is_frozen", False):
             pos = row.get("Posizione", "Prua")
-            d_inc = float(row.get("Dist_Inclinata_m", 15.0))
+            d_signed = float(row.get("Dist_Inclinata_m", 0.0))
             p_deg = float(row.get("Pendenza_deg", 0.0))
 
             d_horiz, x_calc, y_calc, z_calc = calculate_bollard_coordinates(
-                pos, d_inc, p_deg, ship_dict["LOA"], ship_dict["Beam"]
+                pos, d_signed, p_deg, ship_dict["LOA"], ship_dict["Beam"]
             )
 
             df_bollards.at[idx, "Dist_Orizzontale_m"] = d_horiz
@@ -144,18 +147,21 @@ def render_tab_berth(selected_port, ship_dict):
     col_edit, col_map = st.columns([1.1, 1.1])
 
     with col_edit:
-        st.subheader("📋 Gestione Dynamic Bitte Banchina")
         st.info(
-            "📐 **Riferimenti Observation Platforms:**\n"
-            "- **Prua:** Distanza sommata verso prua (`+X`)\n"
-            "- **Poppa:** Distanza sottratta verso poppa (`-X`)\n\n"
-            "Puoi aggiungere/rimuovere righe con i pulsanti `+` e `🗑️`."
+            "📐 **Convenzione Segni Distanze:**\n"
+            "- **Valore Positivo (`> 0`):** Bitta posizionata verso **Prua** rispetto alla piattaforma.\n"
+            "- **Valore Negativo (`< 0`):** Bitta posizionata verso **Poppa** rispetto alla piattaforma."
         )
 
-        edited_df = st.data_editor(
-            df_bollards[[
+        # ---------------------------------------------------------------------
+        # SEZIONE 1: BITTE DI PRUA (FWD OBSERVATION PLATFORM)
+        # ---------------------------------------------------------------------
+        st.subheader("⚓ Stazione di Prua (Fwd Observation Platform)")
+        df_prua = df_bollards[df_bollards["Posizione"] == "Prua"].copy()
+        
+        edited_prua = st.data_editor(
+            df_prua[[
                 "bollard_id",
-                "Posizione",
                 "Dist_Inclinata_m",
                 "Pendenza_deg",
                 "SWL_Bitta_t",
@@ -164,37 +170,94 @@ def render_tab_berth(selected_port, ship_dict):
             num_rows="dynamic",
             hide_index=True,
             use_container_width=True,
+            key="editor_prua",
             column_config={
                 "bollard_id": st.column_config.TextColumn("ID Bitta", required=True),
-                "Posizione": st.column_config.SelectboxColumn("Posizione", options=["Prua", "Poppa"], default="Prua", required=True),
-                "Dist_Inclinata_m": st.column_config.NumberColumn("Dist. Inclinata (m)", default=15.0, min_value=0.0, step=0.5),
+                "Dist_Inclinata_m": st.column_config.NumberColumn("Dist. da Fwd Obs. (+Prua / -Poppa)", default=0.0, step=0.5),
                 "Pendenza_deg": st.column_config.NumberColumn("Pendenza (°)", default=0.0, step=1.0),
                 "SWL_Bitta_t": st.column_config.NumberColumn("SWL (t)", default=100.0, min_value=10.0),
                 "Stato": st.column_config.SelectboxColumn("Stato", options=["In Uso", "Disponibile", "Danneggiata"], default="Disponibile"),
             }
         )
 
-        if st.button("💾 Salva / Congela Layout Banchina", type="primary"):
+        st.divider()
+
+        # ---------------------------------------------------------------------
+        # SEZIONE 2: BITTE DI POPPA (AFT OBSERVATION PLATFORM)
+        # ---------------------------------------------------------------------
+        st.subheader("⚓ Stazione di Poppa (Aft Observation Platform)")
+        df_poppa = df_bollards[df_bollards["Posizione"] == "Poppa"].copy()
+
+        edited_poppa = st.data_editor(
+            df_poppa[[
+                "bollard_id",
+                "Dist_Inclinata_m",
+                "Pendenza_deg",
+                "SWL_Bitta_t",
+                "Stato",
+            ]],
+            num_rows="dynamic",
+            hide_index=True,
+            use_container_width=True,
+            key="editor_poppa",
+            column_config={
+                "bollard_id": st.column_config.TextColumn("ID Bitta", required=True),
+                "Dist_Inclinata_m": st.column_config.NumberColumn("Dist. da Aft Obs. (+Prua / -Poppa)", default=0.0, step=0.5),
+                "Pendenza_deg": st.column_config.NumberColumn("Pendenza (°)", default=0.0, step=1.0),
+                "SWL_Bitta_t": st.column_config.NumberColumn("SWL (t)", default=100.0, min_value=10.0),
+                "Stato": st.column_config.SelectboxColumn("Stato", options=["In Uso", "Disponibile", "Danneggiata"], default="Disponibile"),
+            }
+        )
+
+        # SALVATAGGIO E UNIFICAZIONE DEI DUE EDITOR
+        if st.button("💾 Salva Layout Completo Banchina", type="primary"):
             updated_rows = []
-            for idx, row in edited_df.iterrows():
-                b_id = str(row.get("bollard_id", f"B{idx+1}")).strip()
-                if not b_id:
-                    b_id = f"B{idx+1}"
-                
-                pos = row.get("Posizione", "Prua")
-                d_inc = float(row.get("Dist_Inclinata_m", 15.0) or 15.0)
+
+            # Elaborazione Bitte Prua
+            for idx, row in edited_prua.iterrows():
+                b_id = str(row.get("bollard_id", f"BP{idx+1}")).strip() or f"BP{idx+1}"
+                d_signed = float(row.get("Dist_Inclinata_m", 0.0) or 0.0)
                 p_deg = float(row.get("Pendenza_deg", 0.0) or 0.0)
                 swl = float(row.get("SWL_Bitta_t", 100.0) or 100.0)
                 stato = row.get("Stato", "Disponibile")
 
                 d_horiz, x_calc, y_calc, z_calc = calculate_bollard_coordinates(
-                    pos, d_inc, p_deg, ship_dict["LOA"], ship_dict["Beam"]
+                    "Prua", d_signed, p_deg, ship_dict["LOA"], ship_dict["Beam"]
                 )
 
                 updated_rows.append({
                     "bollard_id": b_id,
-                    "Posizione": pos,
-                    "Dist_Inclinata_m": d_inc,
+                    "Posizione": "Prua",
+                    "Dist_Inclinata_m": d_signed,
+                    "Pendenza_deg": p_deg,
+                    "Dist_Orizzontale_m": d_horiz,
+                    "X_Coordinata_m": x_calc,
+                    "Y_Coordinata_m": y_calc,
+                    "Z_Altezza_m": z_calc,
+                    "bollard_x_m": x_calc,
+                    "bollard_y_m": y_calc,
+                    "bollard_z_m": z_calc,
+                    "SWL_Bitta_t": swl,
+                    "Stato": stato,
+                    "is_frozen": True
+                })
+
+            # Elaborazione Bitte Poppa
+            for idx, row in edited_poppa.iterrows():
+                b_id = str(row.get("bollard_id", f"BA{idx+1}")).strip() or f"BA{idx+1}"
+                d_signed = float(row.get("Dist_Inclinata_m", 0.0) or 0.0)
+                p_deg = float(row.get("Pendenza_deg", 0.0) or 0.0)
+                swl = float(row.get("SWL_Bitta_t", 100.0) or 100.0)
+                stato = row.get("Stato", "Disponibile")
+
+                d_horiz, x_calc, y_calc, z_calc = calculate_bollard_coordinates(
+                    "Poppa", d_signed, p_deg, ship_dict["LOA"], ship_dict["Beam"]
+                )
+
+                updated_rows.append({
+                    "bollard_id": b_id,
+                    "Posizione": "Poppa",
+                    "Dist_Inclinata_m": d_signed,
                     "Pendenza_deg": p_deg,
                     "Dist_Orizzontale_m": d_horiz,
                     "X_Coordinata_m": x_calc,
@@ -210,7 +273,7 @@ def render_tab_berth(selected_port, ship_dict):
 
             final_df = pd.DataFrame(updated_rows)
             st.session_state.ports_bollards[selected_port] = final_df
-            st.success(f"Layout salvato! Registrate {len(final_df)} bitte fisse a terra.")
+            st.success(f"Layout aggiornato con successo! Inserite {len(final_df)} bitte fisse.")
             st.rerun()
 
     with col_map:
@@ -226,7 +289,7 @@ def render_tab_berth(selected_port, ship_dict):
         beam = ship_dict.get("Beam", 37.20)
         berth_y = (beam / 2.0) + 6.4
 
-        # 2. Banchina Fissa
+        # 2. Banchina
         fig.add_trace(
             go.Mesh3d(
                 x=[-loa * 0.65, loa * 0.65, loa * 0.65, -loa * 0.65, -loa * 0.65, loa * 0.65, loa * 0.65, -loa * 0.65],
@@ -239,7 +302,24 @@ def render_tab_berth(selected_port, ship_dict):
             )
         )
 
-        # 3. Bitte Fisse
+        # 3. Indicatori 3D per Observation Platforms
+        fwd_obs_x = (loa / 2.0) - OFFSET_PLATFORM_FWD_M
+        aft_obs_x = (-loa / 2.0) + OFFSET_PLATFORM_AFT_M
+
+        fig.add_trace(
+            go.Scatter3d(
+                x=[fwd_obs_x, aft_obs_x],
+                y=[berth_y, berth_y],
+                z=[0, 0],
+                mode="markers+text",
+                name="Observation Platforms",
+                text=["Fwd Obs Platform", "Aft Obs Platform"],
+                textposition="top center",
+                marker=dict(size=8, color="yellow", symbol="diamond"),
+            )
+        )
+
+        # 4. Bitte Fisse
         if not df_bollards.empty and "X_Coordinata_m" in df_bollards.columns:
             fig.add_trace(
                 go.Scatter3d(
@@ -247,14 +327,14 @@ def render_tab_berth(selected_port, ship_dict):
                     y=df_bollards["Y_Coordinata_m"],
                     z=df_bollards["Z_Altezza_m"],
                     mode="markers+text",
-                    name="Bitte Banchina (Fisse)",
+                    name="Bitte Banchina",
                     text=df_bollards["bollard_id"],
                     textposition="bottom center",
                     marker=dict(size=7, color="red", symbol="square"),
                 )
             )
 
-        # 4. Cavi Ricalcolati
+        # 5. Cavi
         if calculate_line_geometry is not None and "lines_inventory" in st.session_state:
             try:
                 geom_df = calculate_line_geometry(
