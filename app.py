@@ -1,7 +1,7 @@
 """
 app.py
 Punto di ingresso principale della suite OpenMooring MEG4 Pro.
-Configurazione blindata in default con i dati da config/constants.py.
+Configurazione blindata con sincronizzazione e persistenza SQLite automatica.
 """
 
 from datetime import datetime
@@ -21,8 +21,6 @@ from config.constants import (
     DEFAULT_BOLLARDS,
     DEFAULT_SHIP,
     PORT_COORDINATES,
-    OFFSET_PLATFORM_AFT_M,
-    OFFSET_PLATFORM_FWD_M,
 )
 
 # Import DIRETTO dai singoli file della cartella core
@@ -32,7 +30,15 @@ from core.line_mechanics import (
     solve_line_tensions_3d,
 )
 
-from database.db_manager import init_db, log_mooring_session
+from database.db_manager import (
+    init_db,
+    log_mooring_session,
+    load_port_bollards_from_db,
+    save_certificate_to_db,
+    load_certificates_from_db,
+    save_lines_inventory_to_db,
+    load_lines_inventory_from_db,
+)
 from utils.pdf_parser import extract_text_from_pdf, parse_certificate_text
 
 # Import delle viste (Tabs)
@@ -48,15 +54,10 @@ st.set_page_config(
 )
 
 # =============================================================================
-# 1. INIZIALIZZAZIONE DATABASE & SESSION STATE
+# 1. INIZIALIZZAZIONE DATABASE & CARICAMENTO PERSISTENTE
 # =============================================================================
-DB_PATH = DB_FILE_PATH
-
-if "db_conn" not in st.session_state:
-    st.session_state.db_conn = sqlite3.connect(
-        DB_PATH, check_same_thread=False
-    )
-    st.session_state.db_conn.row_factory = sqlite3.Row
+# Inizializza il database SQLite fisico e crea le tabelle se non esistono
+init_db()
 
 # Inizializzazione variabili globali nave nello state per Tab Polare
 st.session_state["afw"] = DEFAULT_SHIP.get("AFW", 950.0)
@@ -64,240 +65,202 @@ st.session_state["alw"] = DEFAULT_SHIP.get("ALW", 3200.0)
 st.session_state["alc"] = DEFAULT_SHIP.get("ALC", 1800.0)
 st.session_state["loa"] = DEFAULT_SHIP.get("LOA", 323.44)
 
-# Inizializzazione dati di default se non presenti in sessione
+# 1. CARICAMENTO PERSISTENTE CERTIFICATI
 if "certificates_db" not in st.session_state:
-    st.session_state.certificates_db = pd.DataFrame([
-        {
-            "cert_id": "CERT-HMPE-2025-01",
-            "manufacturer": "Samson Rope",
-            "material": "HMPE",
-            "diameter_mm": 64,
-            "mbl_tons": 105.0,
-            "standard": "MEG4 / DNV",
-            "issue_date": "2025-01-15",
-        },
-        {
-            "cert_id": "CERT-HMPE-2025-02",
-            "manufacturer": "Katradis",
-            "material": "HMPE",
-            "diameter_mm": 64,
-            "mbl_tons": 105.0,
-            "standard": "MEG4 / LRS",
-            "issue_date": "2025-02-10",
-        },
-    ])
-
-if "mooring_stations" not in st.session_state:
-    st.session_state.mooring_stations = {
-        "Prua (Forward Station)": pd.DataFrame([
+    db_certs = load_certificates_from_db()
+    if not db_certs.empty:
+        st.session_state.certificates_db = db_certs
+    else:
+        # Default iniziali se il DB è completamente vuoto
+        default_certs = [
             {
+                "cert_id": "CERT-HMPE-2025-01",
+                "manufacturer": "Samson Rope",
+                "material": "HMPE",
+                "diameter_mm": 64.0,
+                "mbl_tons": 105.0,
+                "standard": "MEG4 / DNV",
+                "issue_date": "2025-01-15",
+            },
+            {
+                "cert_id": "CERT-HMPE-2025-02",
+                "manufacturer": "Katradis",
+                "material": "HMPE",
+                "diameter_mm": 64.0,
+                "mbl_tons": 105.0,
+                "standard": "MEG4 / LRS",
+                "issue_date": "2025-02-10",
+            },
+        ]
+        for c in default_certs:
+            save_certificate_to_db(c)
+        st.session_state.certificates_db = load_certificates_from_db()
+
+# 2. CARICAMENTO PERSISTENTE INVENTARIO CAVI
+if "lines_inventory" not in st.session_state:
+    db_lines = load_lines_inventory_from_db()
+    if not db_lines.empty:
+        st.session_state.lines_inventory = db_lines
+    else:
+        default_lines = pd.DataFrame([
+            {
+                "line_id": "1",
+                "line_name": "Head Line 1",
+                "line_type": "Head",
+                "station_id": "Prua (Forward Station)",
                 "winch_id": "W1",
-                "chock_id": "C1",
+                "cert_id": "CERT-HMPE-2025-01",
                 "chock_x_m": 155.0,
                 "chock_y_m": 2.0,
-                "assigned_line_id": "1",
+                "chock_z_m": 12.0,
+                "material": "HMPE",
+                "diameter_mm": 64,
+                "E_modulus_GPa": 120,
+                "mbl_tons": 105.0,
+                "tail_length_m": 11.0,
+                "tail_diameter_mm": 72,
+                "tail_E_modulus_GPa": 6,
+                "tail_mbl_tons": 100.0,
+                "bollard_id": "B1",
             },
             {
+                "line_id": "2",
+                "line_name": "Head Line 2",
+                "line_type": "Head",
+                "station_id": "Prua (Forward Station)",
                 "winch_id": "W2",
-                "chock_id": "C2",
+                "cert_id": "CERT-HMPE-2025-01",
                 "chock_x_m": 155.0,
                 "chock_y_m": -2.0,
-                "assigned_line_id": "2",
+                "chock_z_m": 12.0,
+                "material": "HMPE",
+                "diameter_mm": 64,
+                "E_modulus_GPa": 120,
+                "mbl_tons": 105.0,
+                "tail_length_m": 11.0,
+                "tail_diameter_mm": 72,
+                "tail_E_modulus_GPa": 6,
+                "tail_mbl_tons": 100.0,
+                "bollard_id": "B1",
             },
             {
+                "line_id": "3",
+                "line_name": "Fwd Breast 1",
+                "line_type": "Fwd Breast",
+                "station_id": "Prua (Forward Station)",
                 "winch_id": "W3",
-                "chock_id": "C3",
+                "cert_id": "CERT-HMPE-2025-02",
                 "chock_x_m": 140.0,
                 "chock_y_m": 18.0,
-                "assigned_line_id": "3",
+                "chock_z_m": 10.0,
+                "material": "HMPE",
+                "diameter_mm": 64,
+                "E_modulus_GPa": 120,
+                "mbl_tons": 105.0,
+                "tail_length_m": 11.0,
+                "tail_diameter_mm": 72,
+                "tail_E_modulus_GPa": 6,
+                "tail_mbl_tons": 100.0,
+                "bollard_id": "B2",
             },
             {
+                "line_id": "4",
+                "line_name": "Fwd Spring 1",
+                "line_type": "Fwd Spring",
+                "station_id": "Prua (Forward Station)",
                 "winch_id": "W4",
-                "chock_id": "C4",
+                "cert_id": "CERT-HMPE-2025-02",
                 "chock_x_m": 110.0,
                 "chock_y_m": 18.0,
-                "assigned_line_id": "4",
+                "chock_z_m": 8.0,
+                "material": "HMPE",
+                "diameter_mm": 64,
+                "E_modulus_GPa": 120,
+                "mbl_tons": 105.0,
+                "tail_length_m": 0.0,
+                "tail_diameter_mm": 0,
+                "tail_E_modulus_GPa": 0,
+                "tail_mbl_tons": 0,
+                "bollard_id": "B3",
             },
-        ]),
-        "Poppa (Aft Station)": pd.DataFrame([
             {
+                "line_id": "5",
+                "line_name": "Aft Spring 1",
+                "line_type": "Aft Spring",
+                "station_id": "Poppa (Aft Station)",
                 "winch_id": "W5",
-                "chock_id": "C5",
+                "cert_id": "CERT-HMPE-2025-01",
                 "chock_x_m": -110.0,
                 "chock_y_m": 18.0,
-                "assigned_line_id": "5",
+                "chock_z_m": 8.0,
+                "material": "HMPE",
+                "diameter_mm": 64,
+                "E_modulus_GPa": 120,
+                "mbl_tons": 105.0,
+                "tail_length_m": 0.0,
+                "tail_diameter_mm": 0,
+                "tail_E_modulus_GPa": 0,
+                "tail_mbl_tons": 0,
+                "bollard_id": "B4",
             },
             {
+                "line_id": "6",
+                "line_name": "Aft Breast 1",
+                "line_type": "Aft Breast",
+                "station_id": "Poppa (Aft Station)",
                 "winch_id": "W6",
-                "chock_id": "C6",
+                "cert_id": "CERT-HMPE-2025-02",
                 "chock_x_m": -140.0,
                 "chock_y_m": 18.0,
-                "assigned_line_id": "6",
+                "chock_z_m": 10.0,
+                "material": "HMPE",
+                "diameter_mm": 64,
+                "E_modulus_GPa": 120,
+                "mbl_tons": 105.0,
+                "tail_length_m": 11.0,
+                "tail_diameter_mm": 72,
+                "tail_E_modulus_GPa": 6,
+                "tail_mbl_tons": 100.0,
+                "bollard_id": "B5",
             },
             {
+                "line_id": "7",
+                "line_name": "Stern Line 1",
+                "line_type": "Stern",
+                "station_id": "Poppa (Aft Station)",
                 "winch_id": "W7",
-                "chock_id": "C7",
+                "cert_id": "CERT-HMPE-2025-02",
                 "chock_x_m": -155.0,
                 "chock_y_m": 0.0,
-                "assigned_line_id": "7",
+                "chock_z_m": 12.0,
+                "material": "HMPE",
+                "diameter_mm": 64,
+                "E_modulus_GPa": 120,
+                "mbl_tons": 105.0,
+                "tail_length_m": 11.0,
+                "tail_diameter_mm": 72,
+                "tail_E_modulus_GPa": 6,
+                "tail_mbl_tons": 100.0,
+                "bollard_id": "B5",
             },
-        ]),
-    }
+        ])
+        save_lines_inventory_to_db(default_lines)
+        st.session_state.lines_inventory = load_lines_inventory_from_db()
 
-if "lines_inventory" not in st.session_state:
-    st.session_state.lines_inventory = pd.DataFrame([
-        {
-            "line_id": "1",
-            "line_name": "Head Line 1",
-            "line_type": "Head",
-            "station_id": "Prua (Forward Station)",
-            "winch_id": "W1",
-            "cert_id": "CERT-HMPE-2025-01",
-            "chock_x_m": 155.0,
-            "chock_y_m": 2.0,
-            "chock_z_m": 12.0,
-            "material": "HMPE",
-            "diameter_mm": 64,
-            "E_modulus_GPa": 120,
-            "mbl_tons": 105.0,
-            "tail_length_m": 11.0,
-            "tail_diameter_mm": 72,
-            "tail_E_modulus_GPa": 6,
-            "tail_mbl_tons": 100.0,
-            "bollard_id": "B1",
-        },
-        {
-            "line_id": "2",
-            "line_name": "Head Line 2",
-            "line_type": "Head",
-            "station_id": "Prua (Forward Station)",
-            "winch_id": "W2",
-            "cert_id": "CERT-HMPE-2025-01",
-            "chock_x_m": 155.0,
-            "chock_y_m": -2.0,
-            "chock_z_m": 12.0,
-            "material": "HMPE",
-            "diameter_mm": 64,
-            "E_modulus_GPa": 120,
-            "mbl_tons": 105.0,
-            "tail_length_m": 11.0,
-            "tail_diameter_mm": 72,
-            "tail_E_modulus_GPa": 6,
-            "tail_mbl_tons": 100.0,
-            "bollard_id": "B1",
-        },
-        {
-            "line_id": "3",
-            "line_name": "Fwd Breast 1",
-            "line_type": "Fwd Breast",
-            "station_id": "Prua (Forward Station)",
-            "winch_id": "W3",
-            "cert_id": "CERT-HMPE-2025-02",
-            "chock_x_m": 140.0,
-            "chock_y_m": 18.0,
-            "chock_z_m": 10.0,
-            "material": "HMPE",
-            "diameter_mm": 64,
-            "E_modulus_GPa": 120,
-            "mbl_tons": 105.0,
-            "tail_length_m": 11.0,
-            "tail_diameter_mm": 72,
-            "tail_E_modulus_GPa": 6,
-            "tail_mbl_tons": 100.0,
-            "bollard_id": "B2",
-        },
-        {
-            "line_id": "4",
-            "line_name": "Fwd Spring 1",
-            "line_type": "Fwd Spring",
-            "station_id": "Prua (Forward Station)",
-            "winch_id": "W4",
-            "cert_id": "CERT-HMPE-2025-02",
-            "chock_x_m": 110.0,
-            "chock_y_m": 18.0,
-            "chock_z_m": 8.0,
-            "material": "HMPE",
-            "diameter_mm": 64,
-            "E_modulus_GPa": 120,
-            "mbl_tons": 105.0,
-            "tail_length_m": 0.0,
-            "tail_diameter_mm": 0,
-            "tail_E_modulus_GPa": 0,
-            "tail_mbl_tons": 0,
-            "bollard_id": "B3",
-        },
-        {
-            "line_id": "5",
-            "line_name": "Aft Spring 1",
-            "line_type": "Aft Spring",
-            "station_id": "Poppa (Aft Station)",
-            "winch_id": "W5",
-            "cert_id": "CERT-HMPE-2025-01",
-            "chock_x_m": -110.0,
-            "chock_y_m": 18.0,
-            "chock_z_m": 8.0,
-            "material": "HMPE",
-            "diameter_mm": 64,
-            "E_modulus_GPa": 120,
-            "mbl_tons": 105.0,
-            "tail_length_m": 0.0,
-            "tail_diameter_mm": 0,
-            "tail_E_modulus_GPa": 0,
-            "tail_mbl_tons": 0,
-            "bollard_id": "B4",
-        },
-        {
-            "line_id": "6",
-            "line_name": "Aft Breast 1",
-            "line_type": "Aft Breast",
-            "station_id": "Poppa (Aft Station)",
-            "winch_id": "W6",
-            "cert_id": "CERT-HMPE-2025-02",
-            "chock_x_m": -140.0,
-            "chock_y_m": 18.0,
-            "chock_z_m": 10.0,
-            "material": "HMPE",
-            "diameter_mm": 64,
-            "E_modulus_GPa": 120,
-            "mbl_tons": 105.0,
-            "tail_length_m": 11.0,
-            "tail_diameter_mm": 72,
-            "tail_E_modulus_GPa": 6,
-            "tail_mbl_tons": 100.0,
-            "bollard_id": "B5",
-        },
-        {
-            "line_id": "7",
-            "line_name": "Stern Line 1",
-            "line_type": "Stern",
-            "station_id": "Poppa (Aft Station)",
-            "winch_id": "W7",
-            "cert_id": "CERT-HMPE-2025-02",
-            "chock_x_m": -155.0,
-            "chock_y_m": 0.0,
-            "chock_z_m": 12.0,
-            "material": "HMPE",
-            "diameter_mm": 64,
-            "E_modulus_GPa": 120,
-            "mbl_tons": 105.0,
-            "tail_length_m": 11.0,
-            "tail_diameter_mm": 72,
-            "tail_E_modulus_GPa": 6,
-            "tail_mbl_tons": 100.0,
-            "bollard_id": "B5",
-        },
-    ])
-
+# 3. CARICAMENTO PERSISTENTE BANCHINE E BITTE
 if "ports_bollards" not in st.session_state:
-    st.session_state.ports_bollards = {
-        "Long Beach Cruise Terminal": pd.DataFrame(DEFAULT_BOLLARDS),
-        "Mazatlan Pier 4/5": pd.DataFrame(DEFAULT_BOLLARDS),
-        "Mazatlan Pier 2/3": pd.DataFrame(DEFAULT_BOLLARDS),
-        "La Paz": pd.DataFrame(DEFAULT_BOLLARDS),
-        "Ensenada Pier #2": pd.DataFrame(DEFAULT_BOLLARDS),
-        "Puerto Vallarta Pier #1": pd.DataFrame(DEFAULT_BOLLARDS),
-        "Puerto Vallarta Pier #3": pd.DataFrame(DEFAULT_BOLLARDS),
-    }
+    st.session_state.ports_bollards = {}
+    ports_list = [
+        "Long Beach Cruise Terminal",
+        "Mazatlan Pier 4/5",
+        "Mazatlan Pier 2/3",
+        "La Paz",
+        "Ensenada Pier #2",
+        "Puerto Vallarta Pier #1",
+        "Puerto Vallarta Pier #3",
+    ]
+    for p in ports_list:
+        st.session_state.ports_bollards[p] = load_port_bollards_from_db(p)
 
 if "port_headings" not in st.session_state:
     st.session_state.port_headings = {
@@ -310,14 +273,13 @@ if "port_headings" not in st.session_state:
         "Puerto Vallarta Pier #3": 0.0,
     }
 
-init_db(st.session_state.lines_inventory)
-
 # =============================================================================
 # 2. BARRA LATERALE METEO & POSIZIONAMENTO NAVE
 # =============================================================================
 st.sidebar.title("🚢 Carnival Panorama")
 st.sidebar.caption(
-    f"LOA: {DEFAULT_SHIP['LOA']}m | Beam: {DEFAULT_SHIP['Beam']}m | Draft: {DEFAULT_SHIP['Draft']}m"
+    f"LOA: {DEFAULT_SHIP['LOA']}m | Beam: {DEFAULT_SHIP['Beam']}m | Draft:"
+    f" {DEFAULT_SHIP['Draft']}m"
 )
 st.sidebar.divider()
 
@@ -370,11 +332,27 @@ if meteo_mode == "Live API (Windy / Open-Meteo)":
         dir_wind = relative_wind_dir
     else:
         st.sidebar.error("Impossibile contattare il server meteo. Uso manuale.")
-        v_wind = float(st.sidebar.slider("Vento (knots)", 0, 80, 30, key="v_wind_slider"))
-        dir_wind = float(st.sidebar.slider("Direzione Vento Relativa (°)", 0, 360, 45, key="dir_wind_slider"))
+        v_wind = float(
+            st.sidebar.slider("Vento (knots)", 0, 80, 30, key="v_wind_slider")
+        )
+        dir_wind = float(
+            st.sidebar.slider(
+                "Direzione Vento Relativa (°)",
+                0,
+                360,
+                45,
+                key="dir_wind_slider",
+            )
+        )
 else:
-    v_wind = float(st.sidebar.slider("Vento (knots)", 0, 80, 30, key="v_wind_slider"))
-    dir_wind = float(st.sidebar.slider("Direzione Vento Relativa (°)", 0, 360, 45, key="dir_wind_slider"))
+    v_wind = float(
+        st.sidebar.slider("Vento (knots)", 0, 80, 30, key="v_wind_slider")
+    )
+    dir_wind = float(
+        st.sidebar.slider(
+            "Direzione Vento Relativa (°)", 0, 360, 45, key="dir_wind_slider"
+        )
+    )
 
 st.session_state["v_wind"] = v_wind
 st.session_state["dir_wind"] = dir_wind
@@ -389,7 +367,10 @@ offset_fugro_m = st.sidebar.number_input(
     "Offset from FUGRO position (m)",
     value=0.0,
     step=0.5,
-    help="Valore positivo: nave spostata verso Prua (+X). Valore negativo: verso Poppa (-X)."
+    help=(
+        "Valore positivo: nave spostata verso Prua (+X). Valore negativo: verso"
+        " Poppa (-X)."
+    ),
 )
 st.session_state["offset_fugro_m"] = offset_fugro_m
 
@@ -415,7 +396,7 @@ st.title("⚓ OpenMooring MEG4 Pro — Carnival Panorama")
 ])
 
 # -----------------------------------------------------------------------------
-# TAB 1: CERTIFICATI CAVI
+# TAB 1: CERTIFICATI CAVI (PERSISTENTE)
 # -----------------------------------------------------------------------------
 with tab_certs:
     st.header("📜 Modulo Certificati Cavi & Drag and Drop PDF")
@@ -455,22 +436,21 @@ with tab_certs:
                     "cert_id": new_cert_id,
                     "manufacturer": parsed["manufacturer"] or "Unknown",
                     "material": parsed["material"] or "HMPE",
-                    "diameter_mm": parsed["diameter_mm"] or 64,
-                    "mbl_tons": parsed["mbl_tons"] or 105.0,
+                    "diameter_mm": float(parsed["diameter_mm"] or 64.0),
+                    "mbl_tons": float(parsed["mbl_tons"] or 105.0),
                     "standard": parsed["standard"] or "MEG4",
                     "issue_date": datetime.now().strftime("%Y-%m-%d"),
                 }
-                st.session_state.certificates_db = pd.concat(
-                    [
-                        st.session_state.certificates_db,
-                        pd.DataFrame([new_cert]),
-                    ],
-                    ignore_index=True,
-                ).drop_duplicates(subset=["cert_id"], keep="last")
+                # Salvataggio immediato sul Database SQLite
+                save_certificate_to_db(new_cert)
+                st.session_state.certificates_db = load_certificates_from_db()
+                st.success(
+                    f"Certificato {new_cert_id} salvato con successo su DB!"
+                )
                 st.rerun()
 
     with c_col2:
-        st.subheader("📚 Database Certificati Registrati")
+        st.subheader("📚 Database Certificati Registrati (Fisso su DB)")
         st.dataframe(
             st.session_state.certificates_db,
             use_container_width=True,
@@ -495,7 +475,7 @@ geom_df = calculate_line_geometry(
     st.session_state.lines_inventory,
     active_bollards_df,
     loa=DEFAULT_SHIP["LOA"],
-    offset_fugro=offset_fugro_m
+    offset_fugro=offset_fugro_m,
 )
 st.session_state["geom_df"] = geom_df
 
