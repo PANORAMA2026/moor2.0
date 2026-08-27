@@ -1,6 +1,6 @@
 """
 views/tab_polar.py
-Dashboard Operativa Analisi Vento MEG4 - Sincronizzazione Reattiva Sidebar
+Dashboard Operativa Analisi Vento MEG4
 """
 
 import numpy as np
@@ -16,31 +16,12 @@ except ImportError:
     calculate_environmental_forces = None
 
 
-def get_active_weather_params():
-    """
-    Recupera i valori reali e aggiornati dagli widget della sidebar.
-    Cerca le chiavi esatte del session_state o applica il fallback sui valori attuali.
-    """
-    # Lettura diretta con priorità alle chiavi assegnate agli slider nella sidebar
-    v_wind = st.session_state.get("v_wind", 30.0)
-    dir_wind = st.session_state.get("dir_wind", 77.0)
-    
-    # Gestione fallback nel caso in cui la sidebar usi nomi di chiavi differenti
-    if "wind_speed" in st.session_state:
-        v_wind = st.session_state["wind_speed"]
-    if "wind_dir" in st.session_state:
-        dir_wind = st.session_state["wind_dir"]
-
-    return float(v_wind), float(dir_wind)
-
-
 # ==========================================
 # 1. VETTORE VENTO & NAVAGE TOP-DOWN
 # ==========================================
 def build_wind_vector_diagram(v_wind: float, dir_wind: float, max_mbl_pct: float):
     fig = go.Figure()
 
-    # Sagoma schematica nave
     ship_x = [0, 0.8, 1.0, 0.8, -0.8, -1.0, -0.8, 0]
     ship_y = [3.0, 2.2, -2.5, -3.0, -3.0, -2.5, 2.2, 3.0]
     
@@ -53,7 +34,6 @@ def build_wind_vector_diagram(v_wind: float, dir_wind: float, max_mbl_pct: float
         hoverinfo="skip"
     ))
 
-    # Direzione vettoriale vento (convenzione nautica: provenienza)
     rad = np.radians(dir_wind)
     dx = -3.5 * np.sin(rad)
     dy = -3.5 * np.cos(rad)
@@ -96,11 +76,10 @@ def build_lines_load_bar_chart(lines_df: pd.DataFrame, v_wind: float, dir_wind: 
     fig = go.Figure()
 
     if lines_df.empty or "Util_Percent" not in lines_df.columns:
-        # Fallback dinamico basato sui valori reali per simularne il carico
         base_factor = (v_wind / 30.0) ** 2
         dummy_lines = [f"Line {i+1}" for i in range(12)]
         dummy_loads = [
-            round(min(95.0, (15.0 + 30.0 * np.abs(np.sin(np.radians(dir_wind - i*15)))) * base_factor), 1)
+            round(min(98.0, (15.0 + 30.0 * np.abs(np.sin(np.radians(dir_wind - i*15)))) * base_factor), 1)
             for i in range(12)
         ]
         lines_df = pd.DataFrame({"Line_ID": dummy_lines, "Util_Percent": dummy_loads})
@@ -126,7 +105,6 @@ def build_lines_load_bar_chart(lines_df: pd.DataFrame, v_wind: float, dir_wind: 
         hovertemplate='Cavo: %{x}<br>Carico: %{y:.1f}% MBL<extra></extra>'
     ))
 
-    # Soglia limite MEG4 (50% MBL)
     fig.add_shape(
         type="line",
         x0=-0.5, x1=len(line_names) - 0.5,
@@ -168,7 +146,6 @@ def build_angular_risk_curve(v_wind: float, active_dir: float, geom_df: pd.DataF
             except Exception:
                 max_loads.append(0.0)
     else:
-        # Risposta analitica scalata sulla velocità reale
         base_factor = (v_wind / 30.0) ** 2
         max_loads = [round(min(98.0, (18.0 + 28.0 * np.abs(np.sin(np.radians(a - 20)))) * base_factor), 1) for a in angles]
 
@@ -183,13 +160,11 @@ def build_angular_risk_curve(v_wind: float, active_dir: float, geom_df: pd.DataF
         hovertemplate='Angolo Vento: %{x}°<br>Carico Max Cavo: %{y}% MBL<extra></extra>'
     ))
 
-    # Soglia Limite MEG4 (50%)
     fig.add_shape(
         type="line", x0=0, x1=360, y0=50, y1=50,
         line=dict(color="#FFD700", width=2, dash="dash")
     )
 
-    # Punto attivo sincronizzato
     idx_closest = min(range(len(angles)), key=lambda i: abs(angles[i] - active_dir))
     curr_load = max_loads[idx_closest]
 
@@ -229,11 +204,9 @@ def build_angular_risk_curve(v_wind: float, active_dir: float, geom_df: pd.DataF
 # ==========================================
 # RENDER PRINCIPALE
 # ==========================================
-def render_tab_polar():
+def render_tab_polar(v_wind=30.0, dir_wind=77.0):
     st.header("📊 Dashboard Operativa Vento MEG4")
 
-    # 1. Recupero istantaneo dei valori reattivi dalla sidebar
-    v_wind, dir_wind = get_active_weather_params()
     geom_df = st.session_state.get("geom_df", pd.DataFrame())
 
     afw = st.session_state.get("afw", 950.0)
@@ -241,7 +214,6 @@ def render_tab_polar():
     alc = st.session_state.get("alc", 1800.0)
     loa = st.session_state.get("loa", 323.44)
 
-    # 2. Calcolo reattivo in background ad ogni modifica della sidebar
     res_df = pd.DataFrame()
     if solve_line_tensions_3d and calculate_environmental_forces and not geom_df.empty:
         try:
@@ -252,7 +224,6 @@ def render_tab_polar():
 
     max_mbl = res_df["Util_Percent"].max() if not res_df.empty and "Util_Percent" in res_df.columns else 0.0
 
-    # 3. Rendering visivo continuo dei tre punti della dashboard
     col1, col2 = st.columns([1, 1.4])
     with col1:
         fig1 = build_wind_vector_diagram(v_wind, dir_wind, max_mbl)
