@@ -1,7 +1,7 @@
 """
 core/hydrodynamic_forces.py
-Calcolo Carichi Ambientali (Vento e Corrente) in conformità con OCIMF MEG4.
-Convenzione Angoli: 0° = Prua, 90° = Dritta, 180° = Poppa, 270° = Sinistra.
+Calcolo Carichi Ambientali (Vento e Corrente) OCIMF MEG4.
+Convenzione Angoli: 0° = PRUA, 90° = DRITTA, 180° = POPPA, 270° = SINISTRA.
 """
 
 import numpy as np
@@ -10,17 +10,20 @@ import numpy as np
 def get_ocimf_wind_coefficients(angle_deg: float) -> tuple:
     """
     Curve trasversali, longitudinali e di momento del vento OCIMF MEG4.
-    0° = Vento dal dritto di prua, 90° = Dal traverso di dritta, 180° = Dal dritto di poppa.
+    - 0° = Vento da Prua -> Cx negativo (spinge verso poppa).
+    - 90° = Vento da Dritta -> Cy positivo (spinge verso sinistra).
     """
     rad = np.radians(angle_deg)
     
-    # Cx: Coefficiente di forza longitudinale (negativo se spinge verso poppa dal dritto di prua)
+    # 0° (Prua) -> Cx = -0.55 (spinta verso poppa)
+    # 180° (Poppa) -> Cx = +0.55 (spinta verso prua)
     cx = -0.55 * np.cos(rad)
     
-    # Cy: Coefficiente di forza trasversale (positivo verso sinistra se il vento spinge da dritta)
+    # 90° (Dritta) -> Cy = +0.92 (spinta verso sinistra)
+    # 270° (Sinistra) -> Cy = -0.92 (spinta verso dritta)
     cy = 0.92 * np.sin(rad)
     
-    # Cxy: Coefficiente del momento di imbardata
+    # Momento d'imbardata
     cxy = 0.18 * np.sin(2 * rad)
     
     return cx, cy, cxy
@@ -28,7 +31,7 @@ def get_ocimf_wind_coefficients(angle_deg: float) -> tuple:
 
 def get_ocimf_current_coefficients(angle_deg: float, wd_d_ratio: float = 3.0) -> tuple:
     """
-    Coefficienti di corrente OCIMF con correzione per effetto acque basse (WD/Draft).
+    Coefficienti di corrente OCIMF con correzione per acque basse.
     """
     rad = np.radians(angle_deg)
     
@@ -58,7 +61,7 @@ def calculate_wind_forces(
     v_ms = wind_speed_knots * 0.514444
     rho_air = 1.225  # kg/m^3
     
-    # Pressione dinamica q_w in tonnellate forza per m^2
+    # Pressione dinamica q_w (ton/m^2)
     q_w = 0.5 * rho_air * (v_ms**2) / 9806.65
 
     cx, cy, cxy = get_ocimf_wind_coefficients(wind_angle_deg)
@@ -78,9 +81,9 @@ def calculate_current_forces(
     loa: float,
     wd_d_ratio: float = 3.0
 ) -> tuple:
-    """Calcola le componenti Fx, Fy, Mz della corrente secondo le formule OCIMF."""
+    """Calcola le componenti Fx, Fy, Mz della corrente."""
     v_ms = current_speed_knots * 0.514444
-    rho_water = 1025.0  # kg/m^3 (Acqua di mare)
+    rho_water = 1025.0  # kg/m^3
     
     q_c = 0.5 * rho_water * (v_ms**2) / 9806.65
 
@@ -109,7 +112,7 @@ def calculate_environmental_forces(
     draft: float = 8.25,
     wd_d_ratio: float = 3.0
 ) -> dict:
-    """Calcola le forze totali combinate (vento + corrente) in tonnellate e ton-metri."""
+    """Calcola le forze totali combinate (vento + corrente)."""
     fx_w, fy_w, mz_w = calculate_wind_forces(v_wind, dir_wind, alw, afw, loa)
     fx_c, fy_c, mz_c = calculate_current_forces(v_curr, dir_curr, beam, draft, loa, wd_d_ratio)
 
