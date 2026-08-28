@@ -6,7 +6,7 @@ campionamento ogni 30 minuti, trigger per variazione vento (+-6 kts) e storico c
 
 import streamlit as st
 import pandas as pd
-from services.auto_mooring_engine import process_automatic_mooring_logging
+from core.auto_mooring_engine import process_automatic_mooring_logging
 from database.db_manager import get_port_mooring_setups, get_line_history
 
 
