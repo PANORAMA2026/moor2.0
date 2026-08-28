@@ -54,6 +54,9 @@ st.set_page_config(
     layout="wide",
 )
 
+# Perche salviamo su disco
+CALENDAR_STORAGE_PATH = os.path.join(os.path.dirname(__file__), "database", "saved_schedule.parquet")
+
 # =============================================================================
 # 1. INIZIALIZZAZIONE DATABASE & CARICAMENTO PERSISTENTE
 # =============================================================================
@@ -285,21 +288,12 @@ st.sidebar.divider()
 # FUNZIONE PARSER DEDICATA PER EXCEL CALENDARIO
 def load_and_parse_itinerary(uploaded_file):
     df = pd.read_excel(uploaded_file)
-    
-    # Filtra giorni in mare o righe non ormeggiate senza ETA/ETD
     df_clean = df.dropna(subset=["ETA", "ETD", "Date"]).copy()
-    
-    # Estrae la data in formato YYYY-MM-DD
     df_clean["Date_Str"] = pd.to_datetime(df_clean["Date"]).dt.strftime("%Y-%m-%d")
-    
-    # Combina data + ora per ETA ed ETD
     df_clean["ETA_dt"] = pd.to_datetime(df_clean["Date_Str"] + " " + df_clean["ETA"].astype(str), errors="coerce")
     df_clean["ETD_dt"] = pd.to_datetime(df_clean["Date_Str"] + " " + df_clean["ETD"].astype(str), errors="coerce")
-    
-    # Gestisce ormeggi a cavallo della mezzanotte
     df_clean.loc[df_clean["ETD_dt"] < df_clean["ETA_dt"], "ETD_dt"] += pd.Timedelta(days=1)
     
-    # Mappa sul formato atteso dai moduli dell'app
     parsed_df = pd.DataFrame({
         "Port": df_clean["Location"],
         "Port_Code": df_clean["Port Code"],
@@ -310,16 +304,37 @@ def load_and_parse_itinerary(uploaded_file):
     })
     return parsed_df
 
-# UPLOADER ED ENGINE CALENDARIO PORT CALLS
+# INIZIALIZZAZIONE AUTOMATICA DA DISCO (SE PRESENTI DATI SALVATI)
+if "port_schedule" not in st.session_state:
+    if os.path.exists(CALENDAR_STORAGE_PATH):
+        try:
+            st.session_state["port_schedule"] = pd.read_parquet(CALENDAR_STORAGE_PATH)
+        except Exception:
+            st.session_state["port_schedule"] = pd.DataFrame()
+
+# UPLOADER E PERSISTENZA CALENDARIO NELLA SIDEBAR
 st.sidebar.header("📅 Port Call Schedule")
 schedule_file = st.sidebar.file_uploader("Carica Calendario Scali (.xlsx)", type=["xlsx", "xls"], key="schedule_uploader")
 
 if schedule_file is not None:
     try:
-        st.session_state["port_schedule"] = load_and_parse_itinerary(schedule_file)
-        st.sidebar.success("Calendario Scali caricato e processato!")
+        parsed_df = load_and_parse_itinerary(schedule_file)
+        st.session_state["port_schedule"] = parsed_df
+        # Salvataggio fisico su disco per persistenza tra riavvii
+        os.makedirs(os.path.dirname(CALENDAR_STORAGE_PATH), exist_ok=True)
+        parsed_df.to_parquet(CALENDAR_STORAGE_PATH)
+        st.sidebar.success("✅ Calendario caricato e salvato in memoria permanente!")
     except Exception as e:
         st.sidebar.error(f"Errore lettura Excel: {e}")
+
+# Stato e pulizia del calendario in memoria
+if "port_schedule" in st.session_state and not st.session_state["port_schedule"].empty:
+    st.sidebar.caption(f"💾 **Scali salvati in memoria:** {len(st.session_state['port_schedule'])}")
+    if st.sidebar.button("🗑️ Rimuovi Calendario Salvato"):
+        if os.path.exists(CALENDAR_STORAGE_PATH):
+            os.remove(CALENDAR_STORAGE_PATH)
+        st.session_state["port_schedule"] = pd.DataFrame()
+        st.rerun()
 
 # Rilevamento automatico stato porto corrente
 if "port_schedule" in st.session_state and not st.session_state["port_schedule"].empty:
