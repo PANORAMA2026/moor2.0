@@ -1,7 +1,7 @@
 """
 core/line_mechanics.py
 Motore fisico non-lineare conforme a OCIMF MEG4 per calcoli di ormeggio e rigidezza elastica.
-Predisposto per validazione Lloyd's Register.
+Include pretensionamento base al 10% MBL.
 """
 
 import numpy as np
@@ -17,9 +17,7 @@ MATERIAL_ELONGATION_PARAMS = {
 
 
 def get_material_stiffness(material_type: str, tension_tons: float, mbl_tons: float, length_m: float) -> float:
-    """
-    Calcola la rigidezza tangenziale k_tan = dT/dL (ton/m) in base alla tensione attuale (MEG4).
-    """
+    """Calcola la rigidezza tangenziale k_tan = dT/dL (ton/m) in base alla tensione attuale (MEG4)."""
     if length_m <= 0 or mbl_tons <= 0:
         return 0.0
     
@@ -29,7 +27,6 @@ def get_material_stiffness(material_type: str, tension_tons: float, mbl_tons: fl
     # Rapporto di carico minimo di guardia (1% MBL) per evitare divisioni per zero
     load_ratio = max(tension_tons / mbl_tons, 0.01)
     
-    # Derivata tangenziale della curva non lineare T(eps)
     a = params["A"]
     b = params["B"]
     
@@ -65,10 +62,7 @@ def calculate_line_geometry(
     *args, 
     **kwargs
 ) -> pd.DataFrame:
-    """
-    Calcola i vettori geometrici 3D (dx, dy, dz), pendenza, azimuth e lunghezza reale delle linee,
-    applicando l'offset FUGRO (longitudinale) ai passacavi della nave.
-    """
+    """Calcola vettori 3D, pendenza, azimuth, e coordinate con offset FUGRO."""
     if lines_df is None or bollards_df is None:
         return pd.DataFrame()
 
@@ -109,10 +103,9 @@ def calculate_line_geometry(
         else:
             merged[col] = pd.to_numeric(merged[col], errors="coerce").fillna(0.0)
 
-    # APPLICAZIONE OFFSET LONGITUDINALE FUGRO AI CHOCKS DELLA NAVE
+    # Applicazione Offset FUGRO ai passacavi nave
     merged["chock_x_m"] = merged["chock_x_m"] + offset_fugro
 
-    # Vettore banchina -> nave (Bitte rimangono fisse)
     dx = merged["bollard_x_m"] - merged["chock_x_m"]
     dy = merged["bollard_y_m"] - merged["chock_y_m"]
     dz = merged["bollard_z_m"] - merged["chock_z_m"]
@@ -131,9 +124,16 @@ def calculate_line_geometry(
     return merged
 
 
-def solve_line_tensions_3d(geom_df: pd.DataFrame, forces_dict: dict, max_iter: int = 20, tol: float = 1e-3) -> pd.DataFrame:
+def solve_line_tensions_3d(
+    geom_df: pd.DataFrame, 
+    forces_dict: dict, 
+    pretension_pct: float = 10.0, 
+    max_iter: int = 20, 
+    tol: float = 1e-3
+) -> pd.DataFrame:
     """
-    Risolutore Newton-Raphson 3D con rigidezza tangenziale non lineare e gestione cavi in bando.
+    Risolutore Newton-Raphson 3D MEG4. 
+    Applica una tensione iniziale fissa pari al % MBL (default 10%) anche a 0 vento.
     """
     df = geom_df.copy()
     num_lines = len(df)
@@ -154,8 +154,16 @@ def solve_line_tensions_3d(geom_df: pd.DataFrame, forces_dict: dict, max_iter: i
         forces_dict.get("Mz_total_tm", 0.0)
     ], dtype=float)
 
-    # Pretensionamento iniziale (10% MBL secondo MEG4)
-    tensions = df["mbl_tons"].values * 0.10
+    # PRETENSIONAMENTO INIZIALE (10% MBL fisso MEG4)
+    base_pretension = df["mbl_tons"].values * (pretension_pct / 100.0)
+    tensions = base_pretension.copy()
+
+    # Se le forze esterne sono tutte nulle (0 vento, 0 corrente), restituisce direttamente la pretensione iniziale
+    if np.allclose(f_ext, 0.0):
+        utils = (tensions / df["mbl_tons"].values) * 100.0
+        df["Tension_tons"] = np.round(tensions, 2)
+        df["Util_Percent"] = np.round(utils, 1)
+        return df
 
     for iteration in range(max_iter):
         k_global = np.zeros((3, 3))
@@ -168,14 +176,12 @@ def solve_line_tensions_3d(geom_df: pd.DataFrame, forces_dict: dict, max_iter: i
             x_c = float(row.get("chock_x_m", 0.0))
             y_c = float(row.get("chock_y_m", 0.0))
 
-            # Vettore direzionale tridimensionale
             bx = np.cos(rad_inc) * np.cos(rad_az)
             by = np.cos(rad_inc) * np.sin(rad_az)
             bm = x_c * by - y_c * bx
             b_vec = np.array([bx, by, bm])
             b_vectors.append(b_vec)
 
-            # Se il cavo è in bando (tensione = 0), non contribuisce alla rigidezza globale
             if tensions[idx] <= 0.0:
                 k_eq = 0.0
             else:
@@ -193,7 +199,6 @@ def solve_line_tensions_3d(geom_df: pd.DataFrame, forces_dict: dict, max_iter: i
             k_eq_list.append(k_eq)
             k_global += k_eq * np.outer(b_vec, b_vec)
 
-        # Regolarizzazione per evitare singolarità della matrice
         k_global += np.eye(3) * 1e-6
 
         try:
@@ -201,11 +206,11 @@ def solve_line_tensions_3d(geom_df: pd.DataFrame, forces_dict: dict, max_iter: i
         except np.linalg.LinAlgError:
             break
 
-        # Aggiornamento tensioni (nessuna resistenza a compressione)
         new_tensions = np.zeros(num_lines)
         for i in range(num_lines):
             delta_l = np.dot(b_vectors[i], displacements)
-            updated_t = (df.iloc[i]["mbl_tons"] * 0.10) + (k_eq_list[i] * delta_l)
+            # Somma del Delta carico al pretensionamento di base
+            updated_t = base_pretension[i] + (k_eq_list[i] * delta_l)
             new_tensions[i] = max(0.0, updated_t)
 
         if np.max(np.abs(new_tensions - tensions)) < tol:
@@ -224,14 +229,10 @@ def solve_line_tensions_3d(geom_df: pd.DataFrame, forces_dict: dict, max_iter: i
 
 def calculate_wind_operability_envelope(
     geom_df: pd.DataFrame,
-    afw: float,
-    alw: float,
-    alc: float,
-    loa: float,
-    v_curr: float = 0.0,
-    dir_curr: float = 0.0,
+    afw: float, alw: float, alc: float, loa: float,
+    v_curr: float = 0.0, dir_curr: float = 0.0
 ) -> tuple:
-    """Calcola l'inviluppo di operabilità a 360° secondo limiti di sicurezza MEG4 (Max 55% MBL)."""
+    """Calcola l'inviluppo di operabilità a 360° (limite 55% MBL)."""
     from core.hydrodynamic_forces import calculate_environmental_forces
 
     angles = list(range(0, 360, 10))
@@ -244,7 +245,7 @@ def calculate_wind_operability_envelope(
             forces = calculate_environmental_forces(
                 speed, angle, v_curr, dir_curr, afw, alw, alc, loa
             )
-            res_df = solve_line_tensions_3d(geom_df, forces)
+            res_df = solve_line_tensions_3d(geom_df, forces, pretension_pct=10.0)
 
             if "Util_Percent" in res_df.columns and (res_df["Util_Percent"] > 55.0).any():
                 safe = False
