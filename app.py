@@ -1,7 +1,7 @@
 """
 app.py
 Punto di ingresso principale della suite OpenMooring MEG4 Pro.
-Configurazione blindata con sincronizzazione e persistenza SQLite automatica.
+Configurazione blindata con sincronizzazione, caricamento Calendario nella Sidebar e Tab Automazione Ormeggio.
 """
 
 from datetime import datetime
@@ -46,6 +46,7 @@ from views.tab_berth import render_tab_berth
 from views.tab_history import render_tab_history
 from views.tab_plans import render_tab_plans
 from views.tab_polar import render_tab_polar
+from views.tab_mooring_engine import render_tab_mooring_engine
 
 # Configurazione della pagina Streamlit
 st.set_page_config(
@@ -56,7 +57,6 @@ st.set_page_config(
 # =============================================================================
 # 1. INIZIALIZZAZIONE DATABASE & CARICAMENTO PERSISTENTE
 # =============================================================================
-# Inizializza il database SQLite fisico e crea le tabelle se non esistono
 init_db()
 
 # Inizializzazione variabili globali nave nello state per Tab Polare
@@ -71,7 +71,6 @@ if "certificates_db" not in st.session_state:
     if not db_certs.empty:
         st.session_state.certificates_db = db_certs
     else:
-        # Default iniziali se il DB è completamente vuoto
         default_certs = [
             {
                 "cert_id": "CERT-HMPE-2025-01",
@@ -274,13 +273,45 @@ if "port_headings" not in st.session_state:
     }
 
 # =============================================================================
-# 2. BARRA LATERALE METEO & POSIZIONAMENTO NAVE
+# 2. BARRA LATERALE METEO, CALENDARIO SCALI & POSIZIONAMENTO NAVE
 # =============================================================================
 st.sidebar.title("🚢 Carnival Panorama")
 st.sidebar.caption(
     f"LOA: {DEFAULT_SHIP['LOA']}m | Beam: {DEFAULT_SHIP['Beam']}m | Draft:"
     f" {DEFAULT_SHIP['Draft']}m"
 )
+st.sidebar.divider()
+
+# NUOVO: UPLOADER ED ENGINE CALENDARIO PORT CALLS
+st.sidebar.header("📅 Port Call Schedule")
+schedule_file = st.sidebar.file_uploader("Carica Calendario Scali (.xlsx)", type=["xlsx", "xls"], key="schedule_uploader")
+
+if schedule_file is not None:
+    try:
+        df_sched = pd.read_excel(schedule_file)
+        df_sched["ETA"] = pd.to_datetime(df_sched["ETA"])
+        df_sched["ETD"] = pd.to_datetime(df_sched["ETD"])
+        st.session_state["port_schedule"] = df_sched
+        st.sidebar.success("Calendario Scali caricato con successo!")
+    except Exception as e:
+        st.sidebar.error(f"Errore lettura Excel: {e}")
+
+# Rilevamento automatico stato porto corrente
+if "port_schedule" in st.session_state and not st.session_state["port_schedule"].empty:
+    now_dt = datetime.now()
+    sched = st.session_state["port_schedule"]
+    active_port_df = sched[(sched["ETA"] <= now_dt) & (sched["ETD"] >= now_dt)]
+    
+    if not active_port_df.empty:
+        curr_row = active_port_df.iloc[0]
+        st.sidebar.info(
+            f"📍 **Porto Attuale:** {curr_row['Port']}\n\n"
+            f"⏱️ **ETA:** {curr_row['ETA'].strftime('%d/%m %H:%M')}\n\n"
+            f"⏱️ **ETD:** {curr_row['ETD'].strftime('%d/%m %H:%M')}"
+        )
+    else:
+        st.sidebar.caption("⚓ Nave in navigazione o nessun ormeggio attivo.")
+
 st.sidebar.divider()
 
 st.sidebar.header("🌐 Condizioni Meteo-Marine")
@@ -380,6 +411,7 @@ st.session_state["offset_fugro_m"] = offset_fugro_m
 st.title("⚓ OpenMooring MEG4 Pro — Carnival Panorama")
 
 (
+    tab_auto_engine,
     tab_certs,
     tab_stations,
     tab_3d_editor,
@@ -387,6 +419,7 @@ st.title("⚓ OpenMooring MEG4 Pro — Carnival Panorama")
     tab_polar,
     tab_maint,
 ) = st.tabs([
+    "⚡ Automazione Ormeggio",
     "📜 1. Certificati Cavi (PDF Drag & Drop)",
     "🏗️ 2. Pianetti Mooring Stations",
     "🗺️ 3. Layout Banchina & Bitte",
@@ -394,6 +427,12 @@ st.title("⚓ OpenMooring MEG4 Pro — Carnival Panorama")
     "🌀 5. Inviluppo Polare",
     "📈 6. Storico & Usura Cavi",
 ])
+
+# -----------------------------------------------------------------------------
+# TAB AUTOMAZIONE ORMEGGIO (30 MINUTI & TRIGGER VENTO +-6 KTS)
+# -----------------------------------------------------------------------------
+with tab_auto_engine:
+    render_tab_mooring_engine()
 
 # -----------------------------------------------------------------------------
 # TAB 1: CERTIFICATI CAVI (PERSISTENTE)
@@ -441,7 +480,6 @@ with tab_certs:
                     "standard": parsed["standard"] or "MEG4",
                     "issue_date": datetime.now().strftime("%Y-%m-%d"),
                 }
-                # Salvataggio immediato sul Database SQLite
                 save_certificate_to_db(new_cert)
                 st.session_state.certificates_db = load_certificates_from_db()
                 st.success(
@@ -469,7 +507,6 @@ with tab_stations:
 with tab_3d_editor:
     render_tab_berth(selected_port, DEFAULT_SHIP)
 
-# Calcolo costante della geometria con OFFSET FUGRO e salvataggio nello state
 active_bollards_df = st.session_state.ports_bollards[selected_port]
 geom_df = calculate_line_geometry(
     st.session_state.lines_inventory,
