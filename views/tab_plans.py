@@ -1,6 +1,6 @@
 """
 views/tab_plans.py
-Pianetti Mooring Station con caricamento immagine corretto e integrazione avanzata inventario cime di bordo.
+Pianetti Mooring Station con caricamento immagine corretto, persistenza DB ed eliminazione elementi.
 """
 
 import os
@@ -87,51 +87,60 @@ def draw_components_on_image(image: Image.Image, components_df: pd.DataFrame) ->
     return img_copy
 
 
+def load_station_data_from_db(station_name: str) -> pd.DataFrame:
+    """Carica in modo sicuro i componenti salvati nel DB per una specifica stazione."""
+    db_data = get_mooring_station_components(station_name)
+    records = []
+
+    if isinstance(db_data, pd.DataFrame) and not db_data.empty:
+        for _, row in db_data.iterrows():
+            records.append({
+                "comp_type": row.get("type", row.get("component_type", row.get("comp_type", "WINCH"))),
+                "comp_id": row.get("id", row.get("component_id", row.get("comp_id", ""))),
+                "pos_x": float(row.get("x", row.get("x_pos", row.get("pos_x", 0)))),
+                "pos_y": float(row.get("y", row.get("y_pos", row.get("pos_y", 0)))),
+                "line_drum_a": row.get("line_drum_a", "Nessuna"),
+                "line_drum_b": row.get("line_drum_b", "Nessuna"),
+                "line_capstan": row.get("line_capstan", "Nessuna"),
+                "assigned_line_id": row.get("assigned_line_id", "N/D"),
+                "source_basket": row.get("source_basket", "Nessuno")
+            })
+    elif isinstance(db_data, list) and len(db_data) > 0:
+        for row in db_data:
+            records.append({
+                "comp_type": row.get("type", row.get("component_type", row.get("comp_type", "WINCH"))),
+                "comp_id": row.get("id", row.get("component_id", row.get("comp_id", ""))),
+                "pos_x": float(row.get("x", row.get("x_pos", row.get("pos_x", 0)))),
+                "pos_y": float(row.get("y", row.get("y_pos", row.get("pos_y", 0)))),
+                "line_drum_a": row.get("line_drum_a", "Nessuna"),
+                "line_drum_b": row.get("line_drum_b", "Nessuna"),
+                "line_capstan": row.get("line_capstan", "Nessuna"),
+                "assigned_line_id": row.get("assigned_line_id", "N/D"),
+                "source_basket": row.get("source_basket", "Nessuno")
+            })
+
+    if records:
+        return pd.DataFrame(records)
+    return pd.DataFrame(
+        columns=["comp_type", "comp_id", "pos_x", "pos_y", "line_drum_a", "line_drum_b", "line_capstan", "assigned_line_id", "source_basket"]
+    )
+
+
 def render_tab_plans():
     st.header("🏗️ Mappatura Stazioni d'Ormeggio & Pianetti Interattivi")
 
-    # 1. CARICAMENTO STATO E DB
-    if "mooring_stations_loaded" not in st.session_state:
+    # 1. CARICAMENTO STATO E DB (PERSISTENZA GARANTITA ALL'AVVIO APPLICAZIONE)
+    if "mooring_stations" not in st.session_state:
         st.session_state.mooring_stations = {}
-        for stat in ["Prua (Forward Station)", "Poppa (Aft Station)"]:
-            db_data = get_mooring_station_components(stat)
-            records = []
-            
-            if isinstance(db_data, pd.DataFrame) and not db_data.empty:
-                for _, row in db_data.iterrows():
-                    records.append({
-                        "comp_type": row.get("type", row.get("component_type", "WINCH")),
-                        "comp_id": row.get("id", row.get("component_id", "")),
-                        "pos_x": float(row.get("x", row.get("x_pos", 0))),
-                        "pos_y": float(row.get("y", row.get("y_pos", 0))),
-                        "line_drum_a": row.get("line_drum_a", "Nessuna"),
-                        "line_drum_b": row.get("line_drum_b", "Nessuna"),
-                        "line_capstan": row.get("line_capstan", "Nessuna"),
-                        "assigned_line_id": row.get("assigned_line_id", "N/D"),
-                        "source_basket": row.get("source_basket", "Nessuno")
-                    })
-            elif isinstance(db_data, list) and len(db_data) > 0:
-                for row in db_data:
-                    records.append({
-                        "comp_type": row.get("type", row.get("component_type", "WINCH")),
-                        "comp_id": row.get("id", row.get("component_id", "")),
-                        "pos_x": float(row.get("x", row.get("x_pos", 0))),
-                        "pos_y": float(row.get("y", row.get("y_pos", 0))),
-                        "line_drum_a": row.get("line_drum_a", "Nessuna"),
-                        "line_drum_b": row.get("line_drum_b", "Nessuna"),
-                        "line_capstan": row.get("line_capstan", "Nessuna"),
-                        "assigned_line_id": row.get("assigned_line_id", "N/D"),
-                        "source_basket": row.get("source_basket", "Nessuno")
-                    })
-            
-            st.session_state.mooring_stations[stat] = pd.DataFrame(records) if records else pd.DataFrame(
-                columns=["comp_type", "comp_id", "pos_x", "pos_y", "line_drum_a", "line_drum_b", "line_capstan", "assigned_line_id", "source_basket"]
-            )
-        st.session_state.mooring_stations_loaded = True
+
+    stations_list = ["Prua (Forward Station)", "Poppa (Aft Station)"]
+    for stat in stations_list:
+        if stat not in st.session_state.mooring_stations:
+            st.session_state.mooring_stations[stat] = load_station_data_from_db(stat)
 
     station_sel = st.selectbox(
         "Seleziona Stazione d'Ormeggio",
-        list(st.session_state.mooring_stations.keys()),
+        stations_list,
     )
     if not station_sel:
         return
@@ -144,7 +153,6 @@ def render_tab_plans():
     
     if not lines_df.empty:
         for _, l_row in lines_df.iterrows():
-            # Costruzione etichetta parlante con ID, Materiale, Diametro o MBL
             l_id = str(l_row.get("line_id", l_row.get("id", "Cima")))
             l_mat = str(l_row.get("material", l_row.get("type", "")))
             l_dia = str(l_row.get("diameter", ""))
@@ -157,7 +165,7 @@ def render_tab_plans():
                 desc += ")"
             line_options.append(desc)
 
-    # 3. FIX CARICAMENTO IMMAGINE PIANETTO
+    # 3. CARICAMENTO IMMAGINE PIANETTO
     saved_img_path = get_station_image_path(station_sel)
 
     uploaded_image = st.file_uploader(
@@ -173,7 +181,6 @@ def render_tab_plans():
         st.success("Immagine caricata e registrata con successo!")
         st.rerun()
 
-    # Lettura e verifica presenza file
     if saved_img_path and os.path.exists(saved_img_path):
         raw_img = Image.open(saved_img_path)
     else:
@@ -214,7 +221,6 @@ def render_tab_plans():
         comp_type = st.selectbox("Tipologia Elemento", ["WINCH", "BASKET", "CHOCK", "CAPSTAN"])
         comp_id = st.text_input("Identificativo Componente", f"{comp_type[0]}_{len(st_df)+1}")
 
-        # Elenco Basket per tracciamento origine
         basket_options = ["Nessuno"] + st_df[st_df["comp_type"] == "BASKET"]["comp_id"].tolist()
 
         line_drum_a = "Nessuna"
@@ -256,9 +262,10 @@ def render_tab_plans():
             st_df = pd.concat([st_df, new_row], ignore_index=True)
             st.session_state.mooring_stations[station_sel] = st_df
 
+            # Salvataggio immediato e persistente su DB SQLite
             db_components = st_df.to_dict(orient="records")
             save_mooring_station_components(db_components, station_sel)
-            st.success(f"Elemento {comp_id} registrato!")
+            st.success(f"Elemento {comp_id} salvato permanentemente!")
             st.rerun()
 
     # TABELLA E SINCRONIZZAZIONE DB
@@ -274,3 +281,31 @@ def render_tab_plans():
         save_mooring_station_components(db_components, station_sel)
         st.success("Database aggiornato con successo!")
         st.rerun()
+
+    # GESTIONE CANCELLAZIONE ELEMENTI CON SINCRONIZZAZIONE DB
+    st.markdown("---")
+    st.subheader(f"🗑️ Eliminazione Elementi: {station_sel}")
+
+    if not st_df.empty:
+        for idx, row in st_df.iterrows():
+            c1, c2, c3, c4 = st.columns([1.5, 2, 3, 1])
+            c1.write(f"**{row.get('comp_type', '')}**")
+            c2.write(f"ID: `{row.get('comp_id', '')}`")
+            c3.write(f"Posizione: ({int(row.get('pos_x', 0))}px, {int(row.get('pos_y', 0))}px)")
+            
+            if c4.button("🗑️", key=f"del_btn_{station_sel}_{idx}"):
+                updated_df = st_df.drop(idx).reset_index(drop=True)
+                st.session_state.mooring_stations[station_sel] = updated_df
+                save_mooring_station_components(updated_df.to_dict(orient="records"), station_sel)
+                st.success(f"Elemento {row.get('comp_id', '')} rimosso con successo dal DB!")
+                st.rerun()
+
+        st.caption("")
+        if st.button(f"🗑️ Rimuovi Tutti gli Elementi di {station_sel}", type="secondary"):
+            empty_df = pd.DataFrame(columns=st_df.columns)
+            st.session_state.mooring_stations[station_sel] = empty_df
+            save_mooring_station_components([], station_sel)
+            st.success(f"Tutti gli elementi di {station_sel} sono stati eliminati dal DB!")
+            st.rerun()
+    else:
+        st.info("Nessun elemento presente da poter cancellare in questa stazione.")
