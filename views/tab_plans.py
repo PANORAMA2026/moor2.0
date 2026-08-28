@@ -1,12 +1,11 @@
 """
 views/tab_plans.py
-Pianetti Mooring Station con singola immagine dinamica (click + rendering marcatori unificato).
+Pianetti Mooring Station con singola immagine dinamica (click + rendering marcatori con etichette visibili).
 """
 
 import io
 import os
 import pandas as pd
-import plotly.graph_objects as go
 import streamlit as st
 from PIL import Image, ImageDraw, ImageFont
 from streamlit_image_coordinates import streamlit_image_coordinates
@@ -21,7 +20,7 @@ from database.db_manager import (
 
 
 def draw_components_on_image(image: Image.Image, components_df: pd.DataFrame) -> Image.Image:
-    """Disegna i marcatori dei componenti direttamente sull'immagine Pillow."""
+    """Disegna i marcatori e le relative etichette ID in evidenza sull'immagine Pillow."""
     img_copy = image.copy().convert("RGB")
     draw = ImageDraw.Draw(img_copy)
 
@@ -32,7 +31,13 @@ def draw_components_on_image(image: Image.Image, components_df: pd.DataFrame) ->
         "CHOCK": (0, 200, 83)       # Verde
     }
 
-    marker_size = 10  # Raggio del marcatore in px
+    marker_size = 8  # Dimensione marcatore in px
+
+    # Prova a caricare un font TrueType per migliore leggibilità, altrimenti fallback su default
+    try:
+        font = ImageFont.truetype("arial.ttf", 12)
+    except IOError:
+        font = ImageFont.load_default()
 
     for _, row in components_df.iterrows():
         x = float(row.get("pos_x", 0))
@@ -42,7 +47,7 @@ def draw_components_on_image(image: Image.Image, components_df: pd.DataFrame) ->
 
         color = color_map.get(c_type, (0, 123, 255))
 
-        # Disegna Quadrato Marcatore
+        # 1. Disegna Quadrato Marcatore
         draw.rectangle(
             [x - marker_size, y - marker_size, x + marker_size, y + marker_size],
             fill=color,
@@ -50,8 +55,26 @@ def draw_components_on_image(image: Image.Image, components_df: pd.DataFrame) ->
             width=2
         )
 
-        # Disegna Etichetta ID
-        draw.text((x - 8, y - marker_size - 12), c_id, fill=(0, 0, 0))
+        # 2. Calcola dimensioni testo per creare il badge bianco di sfondo
+        bbox = draw.textbbox((0, 0), c_id, font=font)
+        text_w = bbox[2] - bbox[0]
+        text_h = bbox[3] - bbox[1]
+
+        # Posizione Badge (centrato sopra il marcatore)
+        pad = 2
+        text_x = x - (text_w / 2)
+        text_y = y - marker_size - text_h - 6
+
+        # Fondo Bianco con bordo nero per garantire massima visibilità sul piano CAD
+        draw.rectangle(
+            [text_x - pad, text_y - pad, text_x + text_w + pad, text_y + text_h + pad],
+            fill=(255, 255, 255),
+            outline=(0, 0, 0),
+            width=1
+        )
+
+        # Disegna l'ID dell'elemento
+        draw.text((text_x, text_y), c_id, fill=(0, 0, 0), font=font)
 
     return img_copy
 
@@ -59,7 +82,7 @@ def draw_components_on_image(image: Image.Image, components_df: pd.DataFrame) ->
 def render_tab_plans():
     st.header("🏗️ Mappatura Stazioni d'Ormeggio & Pianetti Interattivi")
 
-    # Inizializzazione stazioni
+    # Inizializzazione stazioni nel session_state
     if "mooring_stations" not in st.session_state or not st.session_state.mooring_stations:
         st.session_state.mooring_stations = {
             "Prua (Forward Station)": pd.DataFrame(
@@ -114,7 +137,7 @@ def render_tab_plans():
     else:
         raw_img = Image.new('RGB', (600, 350), color=(230, 230, 230))
 
-    # ridimensionamento mantenendo le proporzioni corrette
+    # Ridimensionamento mantenendo le proporzioni corrette
     TARGET_WIDTH = 600
     w_percent = TARGET_WIDTH / float(raw_img.size[0])
     target_height = int(float(raw_img.size[1]) * float(w_percent))
@@ -125,17 +148,16 @@ def render_tab_plans():
     if key_click not in st.session_state:
         st.session_state[key_click] = {"x": int(TARGET_WIDTH / 2), "y": int(target_height / 2)}
 
-    # Disegna i componenti già salvati sull'immagine ridimensionata
+    # Disegna i componenti con badge ID sull'immagine
     annotated_img = draw_components_on_image(bg_img, st_df)
 
     st.markdown("---")
     col_map, col_form = st.columns([1.8, 1])
 
-    # 3. UNICA IMMAGINE INTERATTIVA
+    # 3. IMMAGINE UNIFICATA INTERATTIVA
     with col_map:
         st.subheader("👆 Clicca per Posizionare / Droppare")
         
-        # Componente a Click Diretto
         value = streamlit_image_coordinates(
             annotated_img,
             width=TARGET_WIDTH,
@@ -145,7 +167,7 @@ def render_tab_plans():
         if value is not None:
             st.session_state[key_click] = {"x": value["x"], "y": value["y"]}
 
-    # 4. FORM DI AGGIUNTA
+    # 4. FORM DI AGGIUNTA COMPONENTE
     with col_form:
         st.subheader("🎯 Aggiungi Componente")
         
@@ -174,6 +196,7 @@ def render_tab_plans():
                 "pos_y": curr_y,
                 "assigned_line_id": assigned_line
             }])
+            st_df = pd.concat([st_df, new_row], ignore_ignore_index=True) if hasattr(pd, 'concat') else st_df.append(new_row, ignore_index=True)
             st_df = pd.concat([st_df, new_row], ignore_index=True)
             st.session_state.mooring_stations[station_sel] = st_df
 
@@ -185,7 +208,7 @@ def render_tab_plans():
             st.success(f"Elemento {comp_id} aggiunto!")
             st.rerun()
 
-    # 5. TABELLA GESTIONE
+    # 5. TABELLA GESTIONE COMPONENTI
     st.markdown("---")
     st.subheader(f"⚙️ Gestione Tabellare Componenti: {station_sel}")
     edited_df = st.data_editor(
