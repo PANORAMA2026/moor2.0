@@ -1,6 +1,6 @@
 """
 views/tab_plans.py
-Pianetti Mooring Station con persistenza totale su disco (immagini e layout).
+Pianetti Mooring Station con persistenza totale su disco (immagini e layout) e controllo preciso delle coordinate.
 """
 
 import io
@@ -70,7 +70,6 @@ def render_tab_plans():
     img_width, img_height = 800, 500
 
     if uploaded_image is not None:
-        # Se l'utente carica un nuovo file, salvalo su disco e DB
         file_bytes = uploaded_image.getvalue()
         _, ext = os.path.splitext(uploaded_image.name)
         saved_img_path = save_station_image_file(station_sel, file_bytes, ext)
@@ -81,6 +80,14 @@ def render_tab_plans():
         bg_img = Image.open(saved_img_path)
         img_width, img_height = bg_img.size
         st.caption(f"📁 Immagine registrata in uso: `{saved_img_path}`")
+
+    # Inizializzazione chiavi sessione per coordinate cliccate
+    key_x = f"last_click_x_{station_sel}"
+    key_y = f"last_click_y_{station_sel}"
+    if key_x not in st.session_state:
+        st.session_state[key_x] = float(img_width / 2)
+    if key_y not in st.session_state:
+        st.session_state[key_y] = float(img_height / 2)
 
     # 3. Costruzione Grafico Interattivo Plotly
     fig = go.Figure()
@@ -101,7 +108,7 @@ def render_tab_plans():
             )
         )
 
-    # Traccia invisibile per tracciare le coordinate del cursore a schermo
+    # Traccia per tracciare le coordinate del cursore a schermo
     fig.add_trace(
         go.Scatter(
             x=[0, img_width, img_width, 0, 0],
@@ -155,6 +162,8 @@ def render_tab_plans():
     st.markdown("---")
     col_chart, col_form = st.columns([2, 1])
 
+    # Intercettazione click ed estrazione punti
+    click_event = None
     with col_chart:
         click_event = st.plotly_chart(fig, use_container_width=True, on_select="rerun", selection_mode="points")
 
@@ -168,39 +177,42 @@ def render_tab_plans():
         )
 
     # Gestione delle azioni tramite click sul grafico
-    clicked_x, clicked_y = 0.0, 0.0
     selected_comp_id = None
 
     if click_event and "selection" in click_event and "points" in click_event["selection"]:
         pts = click_event["selection"]["points"]
         if len(pts) > 0:
             pt = pts[0]
-            clicked_x = float(pt.get("x", 0.0))
-            clicked_y = float(pt.get("y", 0.0))
+            st.session_state[key_x] = float(pt.get("x", st.session_state[key_x]))
+            st.session_state[key_y] = float(pt.get("y", st.session_state[key_y]))
             if "text" in pt and pt["text"]:
                 selected_comp_id = pt["text"]
 
     with col_form:
         if selected_comp_id:
-            # Modalità Eliminazione Elemento
+            # Modalità Eliminazione Elemento Selezionato
             st.error("🗑️ Elimina Elemento")
             st.warning(f"Selezionato: **{selected_comp_id}**")
             
-            if st.button(f"Conferma Eliminazione {selected_comp_id}", use_container_width=True, type="primary"):
-                st_df = st_df[st_df["comp_id"] != selected_comp_id]
-                st.session_state.mooring_stations[station_sel] = st_df
-                
-                db_components = [
-                    {"id": row["comp_id"], "type": row["comp_type"], "x": row["pos_x"], "y": row["pos_y"], "line_id": row["assigned_line_id"]}
-                    for _, row in st_df.iterrows()
-                ]
-                save_mooring_station_components(db_components, station_sel)
-                st.rerun()
+            col_del1, col_del2 = st.columns(2)
+            with col_del1:
+                if st.button(f"Conferma Eliminazione", use_container_width=True, type="primary"):
+                    st_df = st_df[st_df["comp_id"] != selected_comp_id]
+                    st.session_state.mooring_stations[station_sel] = st_df
+                    
+                    db_components = [
+                        {"id": row["comp_id"], "type": row["comp_type"], "x": row["pos_x"], "y": row["pos_y"], "line_id": row["assigned_line_id"]}
+                        for _, row in st_df.iterrows()
+                    ]
+                    save_mooring_station_components(db_components, station_sel)
+                    st.rerun()
+            with col_del2:
+                if st.button("Annulla", use_container_width=True):
+                    st.rerun()
                 
         else:
-            # Modalità Inserimento Nuovo Elemento
+            # Modalità Inserimento Nuovo Elemento con coordinate esplicite
             st.subheader("🎯 Aggiungi Componente")
-            st.info(f"Coordinata Click: **X={clicked_x:.1f}, Y={clicked_y:.1f}**")
 
             comp_type = st.selectbox("Tipologia Elemento", ["WINCH", "BASKET", "CHOCK"])
             comp_id = st.text_input("Identificativo (es. W1, B2, C1)", f"{comp_type[0]}_{len(st_df)+1}")
@@ -215,12 +227,33 @@ def render_tab_plans():
                 assigned_line = "N/D"
                 st.caption("ℹ️ Ai CHOCK non viene associata direttamente una cima.")
 
+            st.write("**Posizionamento Coordinate (px):**")
+            col_x, col_y = st.columns(2)
+            with col_x:
+                input_x = st.number_input(
+                    "Coordinata X",
+                    min_value=0.0,
+                    max_value=float(img_width),
+                    value=float(st.session_state[key_x]),
+                    step=1.0,
+                    key=f"num_x_{station_sel}"
+                )
+            with col_y:
+                input_y = st.number_input(
+                    "Coordinata Y",
+                    min_value=0.0,
+                    max_value=float(img_height),
+                    value=float(st.session_state[key_y]),
+                    step=1.0,
+                    key=f"num_y_{station_sel}"
+                )
+
             if st.button("➕ Salva Elemento sul Pianetto", use_container_width=True):
                 new_row = pd.DataFrame([{
                     "comp_type": comp_type,
                     "comp_id": comp_id,
-                    "pos_x": clicked_x if clicked_x != 0.0 else img_width / 2,
-                    "pos_y": clicked_y if clicked_y != 0.0 else img_height / 2,
+                    "pos_x": input_x,
+                    "pos_y": input_y,
                     "assigned_line_id": assigned_line
                 }])
                 st_df = pd.concat([st_df, new_row], ignore_index=True)
@@ -231,7 +264,7 @@ def render_tab_plans():
                     for _, row in st_df.iterrows()
                 ]
                 save_mooring_station_components(db_components, station_sel)
-                st.success(f"Elemento {comp_id} aggiunto con successo!")
+                st.success(f"Elemento {comp_id} aggiunto a (X={input_x:.1f}, Y={input_y:.1f})!")
                 st.rerun()
 
     # Tabella Modifica Rapida
