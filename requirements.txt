@@ -10,4 +10,4 @@ Pillow>=10.0.0
 folium
 astral
 requests
-pip install streamlit-image-coordinates
+streamlit-image-coordinates>=0.1.6
