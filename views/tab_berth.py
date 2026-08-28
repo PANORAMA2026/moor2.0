@@ -1,203 +1,257 @@
 """
-views/tab_berth.py
-Gestione layout banchina separata in due stazioni (Prua e Poppa).
-Calcolo coordinate con segno algebrico (+ Prua / - Poppa) e scrittura su DB SQLite.
+core/line_mechanics.py
+Motore fisico non-lineare conforme a OCIMF MEG4 per calcoli di ormeggio e rigidezza elastica.
+Include pretensionamento base al 10% MBL.
 """
 
 import numpy as np
 import pandas as pd
-import plotly.graph_objects as go
-import streamlit as st
 
-try:
-    from core.line_mechanics import calculate_line_geometry
-except ImportError:
-    calculate_line_geometry = None
-
-from database.db_manager import save_port_bollards_to_db, load_port_bollards_from_db
-
-OFFSET_PLATFORM_FWD_M = 25.0
-OFFSET_PLATFORM_AFT_M = 14.0
+# Parametri curve di allungamento MEG4 (% Elongation = A * (T / MBL)^B)
+MATERIAL_ELONGATION_PARAMS = {
+    "HMPE": {"A": 0.025, "B": 0.85},       # Molto rigido
+    "POLYESTER": {"A": 0.070, "B": 0.75},  # Flessibilità media
+    "NYLON": {"A": 0.180, "B": 0.60},      # Molto elastico (alta assorbenza)
+    "STEEL_WIRE": {"A": 0.012, "B": 1.00}  # Lineare quasi rigido
+}
 
 
-def calculate_bollard_coordinates(position_type: str, dist_signed: float, slope_deg: float, ship_loa: float, ship_beam: float):
-    slope_rad = np.radians(slope_deg)
-    dist_horiz = dist_signed * np.cos(slope_rad)
-    z_m = -1.0 * (abs(dist_signed) * np.sin(slope_rad))
-
-    if position_type == "Prua":
-        x_platform = (ship_loa / 2.0) - OFFSET_PLATFORM_FWD_M
-    else:
-        x_platform = (-ship_loa / 2.0) + OFFSET_PLATFORM_AFT_M
-
-    x_m = x_platform + dist_horiz
-    y_m = (ship_beam / 2.0) + 6.4
-
-    return round(dist_horiz, 2), round(x_m, 2), round(y_m, 2), round(z_m, 2)
-
-
-def generate_detailed_3d_ship(ship_dict, offset_fugro: float = 0.0):
-    loa = ship_dict.get("LOA", 323.44)
-    beam_hull = ship_dict.get("Beam", 37.20)
-    beam_max = ship_dict.get("Beam_Max", 49.40)
-    draft = ship_dict.get("Draft", 8.25)
-    freeboard = ship_dict.get("Freeboard", 2.65)
-    bridge_bow = ship_dict.get("Bridge_To_Bow", 39.50)
-    bridge_eye_h = ship_dict.get("Bridge_Eye_Height", 26.40)
-
-    loa_half = loa / 2.0
-    beam_half = beam_hull / 2.0
-    deck_z = freeboard
-    bottom_z = -draft
-
-    traces = []
-    x_v = np.array([
-        -loa_half, loa_half * 0.7, loa_half, loa_half * 0.7, -loa_half,
-        -loa_half, loa_half * 0.7, loa_half, loa_half * 0.7, -loa_half
-    ]) + offset_fugro
-
-    y_v = [-beam_half, -beam_half, 0, beam_half, beam_half, -beam_half, -beam_half, 0, beam_half, beam_half]
-    z_v = [deck_z] * 5 + [bottom_z] * 5
-
-    i_faces = [0, 0, 0, 0, 5, 5, 0, 1, 1, 2, 2, 3, 3, 4]
-    j_faces = [1, 2, 3, 4, 6, 7, 5, 6, 2, 7, 3, 8, 4, 9]
-    k_faces = [2, 3, 4, 1, 7, 8, 1, 2, 7, 3, 8, 4, 9, 5]
-
-    traces.append(go.Mesh3d(x=x_v, y=y_v, z=z_v, i=i_faces, j=j_faces, k=k_faces, color="navy", opacity=0.85, name="Scafo Solido 3D"))
-
-    x_s = np.array([
-        -loa_half * 0.85, loa_half * 0.65, loa_half * 0.65, -loa_half * 0.85,
-        -loa_half * 0.85, loa_half * 0.65, loa_half * 0.65, -loa_half * 0.85
-    ]) + offset_fugro
-    y_s = [-beam_half * 0.9, -beam_half * 0.9, beam_half * 0.9, beam_half * 0.9, -beam_half * 0.9, -beam_half * 0.9, beam_half * 0.9, beam_half * 0.9]
-    z_s = [deck_z] * 4 + [35.0] * 4
-
-    traces.append(go.Mesh3d(x=x_s, y=y_s, z=z_s, i=[0, 0, 0, 1, 2, 3, 4, 4, 0, 1, 2, 3], j=[1, 2, 4, 5, 6, 7, 5, 6, 3, 2, 6, 7], k=[2, 3, 5, 6, 7, 4, 6, 7, 4, 5, 1, 0], color="royalblue", opacity=0.75, name="Sovrastruttura 3D"))
-
-    bridge_x = (loa_half - bridge_bow) + offset_fugro
-    wing_y = beam_max / 2.0
-    traces.append(go.Scatter3d(x=[bridge_x, bridge_x], y=[-wing_y, wing_y], z=[bridge_eye_h, bridge_eye_h], mode="lines+markers", line=dict(color="red", width=8), name=f"Plancia ({beam_max}m)"))
-
-    return traces
-
-
-def render_tab_berth(selected_port, ship_dict):
-    st.header(f"🗺️ Layout Banchina — {selected_port}")
+def get_material_stiffness(material_type: str, tension_tons: float, mbl_tons: float, length_m: float) -> float:
+    """Calcola la rigidezza tangenziale k_tan = dT/dL (ton/m) in base alla tensione attuale (MEG4)."""
+    if length_m <= 0 or mbl_tons <= 0:
+        return 0.0
     
-    offset_fugro = float(st.session_state.get("offset_fugro_m", 0.0))
-    st.caption(f"🚢 **{ship_dict.get('Name')}** | LOA: **{ship_dict.get('LOA')}m** | Offset FUGRO: **{offset_fugro:+.2f} m**")
+    mat_key = str(material_type).upper().strip() if pd.notna(material_type) else "HMPE"
+    params = MATERIAL_ELONGATION_PARAMS.get(mat_key, MATERIAL_ELONGATION_PARAMS["HMPE"])
+    
+    # Rapporto di carico minimo di guardia (1% MBL) per evitare divisioni per zero
+    load_ratio = max(tension_tons / mbl_tons, 0.01)
+    
+    a = params["A"]
+    b = params["B"]
+    
+    k_tangent = (mbl_tons / length_m) * (1.0 / (a * b)) * (load_ratio ** (1.0 - b))
+    return max(k_tangent, 0.1)
 
-    # Caricamento dal DB se non presente nello state
-    if selected_port not in st.session_state.ports_bollards:
-        st.session_state.ports_bollards[selected_port] = load_port_bollards_from_db(selected_port)
 
-    df_bollards = st.session_state.ports_bollards[selected_port].copy()
+def calculate_meg4_composite_stiffness(
+    main_mat: str, main_mbl: float, main_len: float, main_tension: float,
+    tail_mat: str, tail_mbl: float, tail_len: float
+) -> float:
+    """
+    Calcola la rigidezza equivalente di una linea composta (Cavo + Tail in serie).
+    1 / K_eq = 1 / K_main + 1 / K_tail
+    """
+    k_main = get_material_stiffness(main_mat, main_tension, main_mbl, main_len) if main_len > 0 else 0.0
+    k_tail = get_material_stiffness(tail_mat, main_tension, tail_mbl, tail_len) if tail_len > 0 else 0.0
 
-    col_edit, col_map = st.columns([1.1, 1.1])
+    if k_main > 0 and k_tail > 0:
+        return (k_main * k_tail) / (k_main + k_tail)
+    elif k_main > 0:
+        return k_main
+    elif k_tail > 0:
+        return k_tail
+    return 0.0
 
-    with col_edit:
-        st.info("📐 **Convenzione Segni:** Positivo (`> 0`) verso **Prua** | Negativo (`< 0`) verso **Poppa**.")
 
-        st.subheader("⚓ Stazione di Prua (Fwd Observation Platform)")
-        df_prua = df_bollards[df_bollards["Posizione"] == "Prua"].copy()
-        edited_prua = st.data_editor(
-            df_prua[["bollard_id", "Dist_Inclinata_m", "Pendenza_deg", "SWL_Bitta_t", "Stato"]],
-            num_rows="dynamic", hide_index=True, use_container_width=True, key="editor_prua",
-            column_config={
-                "bollard_id": st.column_config.TextColumn("ID Bitta", required=True),
-                "Dist_Inclinata_m": st.column_config.NumberColumn("Dist. da Fwd Obs. (+Prua / -Poppa)", default=0.0, step=0.5),
-                "Pendenza_deg": st.column_config.NumberColumn("Pendenza (°)", default=0.0, step=1.0),
-                "SWL_Bitta_t": st.column_config.NumberColumn("SWL (t)", default=100.0, min_value=10.0),
-                "Stato": st.column_config.SelectboxColumn("Stato", options=["In Uso", "Disponibile", "Danneggiata"], default="Disponibile"),
-            }
-        )
+def calculate_line_geometry(
+    lines_df: pd.DataFrame, 
+    bollards_df: pd.DataFrame, 
+    loa: float = 323.44, 
+    offset_fugro: float = 0.0,
+    *args, 
+    **kwargs
+) -> pd.DataFrame:
+    """Calcola vettori 3D, pendenza, azimuth, e coordinate con offset FUGRO."""
+    if lines_df is None or bollards_df is None:
+        return pd.DataFrame()
 
-        st.divider()
+    if not isinstance(lines_df, pd.DataFrame) or not isinstance(bollards_df, pd.DataFrame):
+        return pd.DataFrame()
 
-        st.subheader("⚓ Stazione di Poppa (Aft Observation Platform)")
-        df_poppa = df_bollards[df_bollards["Posizione"] == "Poppa"].copy()
-        edited_poppa = st.data_editor(
-            df_poppa[["bollard_id", "Dist_Inclinata_m", "Pendenza_deg", "SWL_Bitta_t", "Stato"]],
-            num_rows="dynamic", hide_index=True, use_container_width=True, key="editor_poppa",
-            column_config={
-                "bollard_id": st.column_config.TextColumn("ID Bitta", required=True),
-                "Dist_Inclinata_m": st.column_config.NumberColumn("Dist. da Aft Obs. (+Prua / -Poppa)", default=0.0, step=0.5),
-                "Pendenza_deg": st.column_config.NumberColumn("Pendenza (°)", default=0.0, step=1.0),
-                "SWL_Bitta_t": st.column_config.NumberColumn("SWL (t)", default=100.0, min_value=10.0),
-                "Stato": st.column_config.SelectboxColumn("Stato", options=["In Uso", "Disponibile", "Danneggiata"], default="Disponibile"),
-            }
-        )
+    if lines_df.empty or bollards_df.empty:
+        return pd.DataFrame()
 
-        if st.button("💾 Salva Layout Permanentemente su DB", type="primary"):
-            updated_rows = []
+    l_df = lines_df.copy()
+    b_df = bollards_df.copy()
 
-            for idx, row in edited_prua.iterrows():
-                b_id = str(row.get("bollard_id", f"BP{idx+1}")).strip() or f"BP{idx+1}"
-                d_signed = float(row.get("Dist_Inclinata_m", 0.0) or 0.0)
-                p_deg = float(row.get("Pendenza_deg", 0.0) or 0.0)
-                d_horiz, x_calc, y_calc, z_calc = calculate_bollard_coordinates("Prua", d_signed, p_deg, ship_dict["LOA"], ship_dict["Beam"])
-                updated_rows.append({
-                    "bollard_id": b_id, "Posizione": "Prua", "Dist_Inclinata_m": d_signed, "Pendenza_deg": p_deg,
-                    "Dist_Orizzontale_m": d_horiz, "X_Coordinata_m": x_calc, "Y_Coordinata_m": y_calc, "Z_Altezza_m": z_calc,
-                    "bollard_x_m": x_calc, "bollard_y_m": y_calc, "bollard_z_m": z_calc,
-                    "SWL_Bitta_t": float(row.get("SWL_Bitta_t", 100.0) or 100.0), "Stato": row.get("Stato", "Disponibile"), "is_frozen": True
-                })
+    # Normalizzazione mappatura bitte
+    bollard_col_map = {
+        "x_m": "bollard_x_m", "y_m": "bollard_y_m", "z_m": "bollard_z_m",
+        "X": "bollard_x_m", "Y": "bollard_y_m", "Z": "bollard_z_m",
+        "X_Coordinata_m": "bollard_x_m", "Y_Coordinata_m": "bollard_y_m", "Z_Altezza_m": "bollard_z_m"
+    }
+    b_df = b_df.rename(columns={k: v for k, v in bollard_col_map.items() if k in b_df.columns and v not in b_df.columns})
 
-            for idx, row in edited_poppa.iterrows():
-                b_id = str(row.get("bollard_id", f"BA{idx+1}")).strip() or f"BA{idx+1}"
-                d_signed = float(row.get("Dist_Inclinata_m", 0.0) or 0.0)
-                p_deg = float(row.get("Pendenza_deg", 0.0) or 0.0)
-                d_horiz, x_calc, y_calc, z_calc = calculate_bollard_coordinates("Poppa", d_signed, p_deg, ship_dict["LOA"], ship_dict["Beam"])
-                updated_rows.append({
-                    "bollard_id": b_id, "Posizione": "Poppa", "Dist_Inclinata_m": d_signed, "Pendenza_deg": p_deg,
-                    "Dist_Orizzontale_m": d_horiz, "X_Coordinata_m": x_calc, "Y_Coordinata_m": y_calc, "Z_Altezza_m": z_calc,
-                    "bollard_x_m": x_calc, "bollard_y_m": y_calc, "bollard_z_m": z_calc,
-                    "SWL_Bitta_t": float(row.get("SWL_Bitta_t", 100.0) or 100.0), "Stato": row.get("Stato", "Disponibile"), "is_frozen": True
-                })
+    # Normalizzazione mappatura passacavi
+    chock_col_map = {
+        "x_m": "chock_x_m", "y_m": "chock_y_m", "z_m": "chock_z_m",
+        "X": "chock_x_m", "Y": "chock_y_m", "Z": "chock_z_m"
+    }
+    l_df = l_df.rename(columns={k: v for k, v in chock_col_map.items() if k in l_df.columns and v not in l_df.columns})
 
-            final_df = pd.DataFrame(updated_rows)
-            st.session_state.ports_bollards[selected_port] = final_df
-            
-            # SALVATAGGIO SU DB SQLITE
-            save_port_bollards_to_db(selected_port, final_df)
-            st.success(f"Layout salvato nel database fisso per {selected_port}!")
-            st.rerun()
+    if "bollard_id" not in l_df.columns or "bollard_id" not in b_df.columns:
+        return pd.DataFrame()
 
-    with col_map:
-        st.subheader("🧊 Modellazione 3D Volumetric")
-        fig = go.Figure()
-        for trace in generate_detailed_3d_ship(ship_dict, offset_fugro=offset_fugro):
-            fig.add_trace(trace)
+    merged = l_df.merge(b_df, on="bollard_id", how="inner", suffixes=("_line", "_bollard"))
+    if merged.empty:
+        return pd.DataFrame()
 
-        loa = ship_dict.get("LOA", 323.44)
-        beam = ship_dict.get("Beam", 37.20)
-        berth_y = (beam / 2.0) + 6.4
+    for col in ["bollard_x_m", "bollard_y_m", "bollard_z_m", "chock_x_m", "chock_y_m", "chock_z_m"]:
+        if col not in merged.columns:
+            merged[col] = 0.0
+        else:
+            merged[col] = pd.to_numeric(merged[col], errors="coerce").fillna(0.0)
 
-        fig.add_trace(go.Mesh3d(
-            x=[-loa * 0.65, loa * 0.65, loa * 0.65, -loa * 0.65, -loa * 0.65, loa * 0.65, loa * 0.65, -loa * 0.65],
-            y=[berth_y, berth_y, berth_y + 15, berth_y + 15, berth_y, berth_y, berth_y + 15, berth_y + 15],
-            z=[-6, -6, -6, -6, 0, 0, 0, 0], i=[0, 0, 4, 4, 0, 0, 1, 1, 2, 2, 0, 0], j=[1, 2, 5, 6, 1, 5, 2, 6, 3, 7, 3, 4],
-            k=[2, 3, 6, 7, 5, 4, 6, 5, 7, 6, 4, 7], color="slategrey", opacity=0.5, name="Banchina"
-        ))
+    # Applicazione Offset FUGRO ai passacavi nave
+    merged["chock_x_m"] = merged["chock_x_m"] + offset_fugro
 
-        if not df_bollards.empty and "X_Coordinata_m" in df_bollards.columns:
-            fig.add_trace(go.Scatter3d(
-                x=df_bollards["X_Coordinata_m"], y=df_bollards["Y_Coordinata_m"], z=df_bollards["Z_Altezza_m"],
-                mode="markers+text", name="Bitte Banchina", text=df_bollards["bollard_id"],
-                textposition="bottom center", marker=dict(size=7, color="red", symbol="square")
-            ))
+    dx = merged["bollard_x_m"] - merged["chock_x_m"]
+    dy = merged["bollard_y_m"] - merged["chock_y_m"]
+    dz = merged["bollard_z_m"] - merged["chock_z_m"]
 
-        if calculate_line_geometry is not None and "lines_inventory" in st.session_state:
-            try:
-                geom_df = calculate_line_geometry(st.session_state.lines_inventory, df_bollards, loa=loa, offset_fugro=offset_fugro)
-                if geom_df is not None and not geom_df.empty:
-                    for _, line in geom_df.iterrows():
-                        fig.add_trace(go.Scatter3d(
-                            x=[line["chock_x_m"], line["bollard_x_m"]], y=[line["chock_y_m"], line["bollard_y_m"]], z=[line["chock_z_m"], line["bollard_z_m"]],
-                            mode="lines", line=dict(color="orange", width=4), showlegend=False
-                        ))
-            except Exception:
-                pass
+    length_3d = np.sqrt(dx**2 + dy**2 + dz**2)
+    azimuth = np.degrees(np.arctan2(dy, dx))
+    incline = np.degrees(np.arcsin(np.abs(dz) / np.maximum(length_3d, 0.1)))
 
-        fig.update_layout(scene=dict(xaxis=dict(title="X (m)"), yaxis=dict(title="Y (m)"), zaxis=dict(title="Z (m)"), aspectmode="data"), height=650, margin=dict(l=0, r=0, b=0, t=30))
-        st.plotly_chart(fig, use_container_width=True)
+    merged["length_m"] = np.round(length_3d, 2)
+    merged["azimuth_deg"] = np.round(azimuth, 1)
+    merged["incline_deg"] = np.round(incline, 1)
+    merged["dx"] = dx
+    merged["dy"] = dy
+    merged["dz"] = dz
+
+    return merged
+
+
+def solve_line_tensions_3d(
+    geom_df: pd.DataFrame, 
+    forces_dict: dict, 
+    pretension_pct: float = 10.0, 
+    max_iter: int = 20, 
+    tol: float = 1e-3
+) -> pd.DataFrame:
+    """
+    Risolutore Newton-Raphson 3D MEG4. 
+    Applica una tensione iniziale fissa pari al % MBL (default 10%) anche a 0 vento.
+    """
+    df = geom_df.copy()
+    num_lines = len(df)
+
+    if num_lines == 0:
+        df["Tension_tons"] = []
+        df["Util_Percent"] = []
+        return df
+
+    if "mbl_tons" not in df.columns:
+        df["mbl_tons"] = 100.0
+    else:
+        df["mbl_tons"] = pd.to_numeric(df["mbl_tons"], errors="coerce").fillna(100.0)
+
+    f_ext = np.array([
+        forces_dict.get("Fx_total_t", 0.0),
+        forces_dict.get("Fy_total_t", 0.0),
+        forces_dict.get("Mz_total_tm", 0.0)
+    ], dtype=float)
+
+    # PRETENSIONAMENTO INIZIALE (10% MBL fisso MEG4)
+    base_pretension = df["mbl_tons"].values * (pretension_pct / 100.0)
+    tensions = base_pretension.copy()
+
+    # Se le forze esterne sono tutte nulle (0 vento, 0 corrente), restituisce direttamente la pretensione iniziale
+    if np.allclose(f_ext, 0.0):
+        utils = (tensions / df["mbl_tons"].values) * 100.0
+        df["Tension_tons"] = np.round(tensions, 2)
+        df["Util_Percent"] = np.round(utils, 1)
+        return df
+
+    for iteration in range(max_iter):
+        k_global = np.zeros((3, 3))
+        b_vectors = []
+        k_eq_list = []
+
+        for idx, row in df.iterrows():
+            rad_az = np.radians(row.get("azimuth_deg", 0.0))
+            rad_inc = np.radians(row.get("incline_deg", 0.0))
+            x_c = float(row.get("chock_x_m", 0.0))
+            y_c = float(row.get("chock_y_m", 0.0))
+
+            bx = np.cos(rad_inc) * np.cos(rad_az)
+            by = np.cos(rad_inc) * np.sin(rad_az)
+            bm = x_c * by - y_c * bx
+            b_vec = np.array([bx, by, bm])
+            b_vectors.append(b_vec)
+
+            if tensions[idx] <= 0.0:
+                k_eq = 0.0
+            else:
+                mat_main = row.get("material", "HMPE")
+                mat_tail = row.get("tail_material", "NYLON")
+                mbl = float(row.get("mbl_tons", 100.0))
+                l_main = float(row.get("length_m", 30.0))
+                l_tail = float(row.get("tail_length_m", 11.0))
+
+                k_eq = calculate_meg4_composite_stiffness(
+                    mat_main, mbl, l_main, tensions[idx],
+                    mat_tail, mbl, l_tail
+                )
+
+            k_eq_list.append(k_eq)
+            k_global += k_eq * np.outer(b_vec, b_vec)
+
+        k_global += np.eye(3) * 1e-6
+
+        try:
+            displacements = np.linalg.solve(k_global, f_ext)
+        except np.linalg.LinAlgError:
+            break
+
+        new_tensions = np.zeros(num_lines)
+        for i in range(num_lines):
+            delta_l = np.dot(b_vectors[i], displacements)
+            # Somma del Delta carico al pretensionamento di base
+            updated_t = base_pretension[i] + (k_eq_list[i] * delta_l)
+            new_tensions[i] = max(0.0, updated_t)
+
+        if np.max(np.abs(new_tensions - tensions)) < tol:
+            tensions = new_tensions
+            break
+
+        tensions = new_tensions
+
+    utils = [(t / mbl) * 100.0 if mbl > 0 else 0.0 for t, mbl in zip(tensions, df["mbl_tons"])]
+
+    df["Tension_tons"] = np.round(tensions, 2)
+    df["Util_Percent"] = np.round(utils, 1)
+
+    return df
+
+
+def calculate_wind_operability_envelope(
+    geom_df: pd.DataFrame,
+    afw: float, alw: float, alc: float, loa: float,
+    v_curr: float = 0.0, dir_curr: float = 0.0
+) -> tuple:
+    """Calcola l'inviluppo di operabilità a 360° (limite 55% MBL)."""
+    from core.hydrodynamic_forces import calculate_environmental_forces
+
+    angles = list(range(0, 360, 10))
+    max_winds = []
+
+    for angle in angles:
+        speed = 10.0
+        safe = True
+        while safe and speed <= 90.0:
+            forces = calculate_environmental_forces(
+                speed, angle, v_curr, dir_curr, afw, alw, alc, loa
+            )
+            res_df = solve_line_tensions_3d(geom_df, forces, pretension_pct=10.0)
+
+            if "Util_Percent" in res_df.columns and (res_df["Util_Percent"] > 55.0).any():
+                safe = False
+            else:
+                speed += 2.0
+
+        max_winds.append(speed)
+
+    return angles, max_winds
