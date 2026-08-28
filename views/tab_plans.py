@@ -1,9 +1,8 @@
 """
 views/tab_plans.py
-Pianetti Mooring Station con persistenza corretta e posizionamento a click.
+Pianetti Mooring Station con gestione 2 Tamburi per Winch, Capstan integrata e tracciamento cavi da Basket.
 """
 
-import io
 import os
 import pandas as pd
 import streamlit as st
@@ -18,20 +17,22 @@ from database.db_manager import (
     get_station_image_path,
 )
 
+
 def draw_components_on_image(image: Image.Image, components_df: pd.DataFrame) -> Image.Image:
-    """Disegna i marcatori e le relative etichette ID in evidenza sull'immagine Pillow."""
+    """Disegna marcatori ed etichette dettagliate per Winch (2 drums + capstan) e altri elementi."""
     img_copy = image.copy().convert("RGB")
     draw = ImageDraw.Draw(img_copy)
 
     color_map = {
-        "WINCH": (255, 75, 75),
-        "BASKET": (255, 165, 0),
-        "CHOCK": (0, 200, 83)
+        "WINCH": (255, 75, 75),       # Rosso
+        "BASKET": (255, 165, 0),     # Arancione
+        "CHOCK": (0, 200, 83),       # Verde
+        "CAPSTAN": (153, 50, 204)    # Viola
     }
     marker_size = 8
 
     try:
-        font = ImageFont.truetype("arial.ttf", 12)
+        font = ImageFont.truetype("arial.ttf", 11)
     except IOError:
         font = ImageFont.load_default()
 
@@ -43,16 +44,37 @@ def draw_components_on_image(image: Image.Image, components_df: pd.DataFrame) ->
 
         color = color_map.get(c_type, (0, 123, 255))
 
+        # 1. Marcatore
         draw.rectangle(
             [x - marker_size, y - marker_size, x + marker_size, y + marker_size],
             fill=color, outline=(255, 255, 255), width=2
         )
 
-        bbox = draw.textbbox((0, 0), c_id, font=font)
+        # 2. Etichetta dinamica
+        line_info = ""
+        if c_type == "WINCH":
+            l1 = row.get("line_drum_a", "Nessuna")
+            l2 = row.get("line_drum_b", "Nessuna")
+            cap = row.get("line_capstan", "Nessuna")
+            details = []
+            if l1 and l1 != "Nessuna": details.append(f"DrA:{l1}")
+            if l2 and l2 != "Nessuna": details.append(f"DrB:{l2}")
+            if cap and cap != "Nessuna": details.append(f"Cap:{cap}")
+            if details:
+                line_info = f" ({', '.join(details)})"
+        elif c_type == "BASKET":
+            assigned = row.get("assigned_line_id", "Nessuna")
+            if assigned and assigned != "Nessuna":
+                line_info = f" [{assigned}]"
+
+        label_text = f"{c_id}{line_info}"
+
+        # 3. Badge Bordo / Sfondo
+        bbox = draw.textbbox((0, 0), label_text, font=font)
         text_w = bbox[2] - bbox[0]
         text_h = bbox[3] - bbox[1]
 
-        pad = 2
+        pad = 3
         text_x = x - (text_w / 2)
         text_y = y - marker_size - text_h - 6
 
@@ -60,7 +82,7 @@ def draw_components_on_image(image: Image.Image, components_df: pd.DataFrame) ->
             [text_x - pad, text_y - pad, text_x + text_w + pad, text_y + text_h + pad],
             fill=(255, 255, 255), outline=(0, 0, 0), width=1
         )
-        draw.text((text_x, text_y), c_id, fill=(0, 0, 0), font=font)
+        draw.text((text_x, text_y), label_text, fill=(0, 0, 0), font=font)
 
     return img_copy
 
@@ -68,7 +90,7 @@ def draw_components_on_image(image: Image.Image, components_df: pd.DataFrame) ->
 def render_tab_plans():
     st.header("🏗️ Mappatura Stazioni d'Ormeggio & Pianetti Interattivi")
 
-    # 1. CARICAMENTO ROBUSTO DAL DATABASE AL RIAVVIO
+    # CARICAMENTO DATI DAL DB
     if "mooring_stations_loaded" not in st.session_state:
         st.session_state.mooring_stations = {}
         
@@ -76,7 +98,6 @@ def render_tab_plans():
             db_data = get_mooring_station_components(stat)
             records = []
             
-            # Gestione sicura sia se db_manager restituisce un DataFrame, sia una lista di dizionari
             if isinstance(db_data, pd.DataFrame) and not db_data.empty:
                 for _, row in db_data.iterrows():
                     records.append({
@@ -84,7 +105,11 @@ def render_tab_plans():
                         "comp_id": row.get("id", row.get("component_id", "")),
                         "pos_x": float(row.get("x", row.get("x_pos", 0))),
                         "pos_y": float(row.get("y", row.get("y_pos", 0))),
-                        "assigned_line_id": row.get("line_id", "N/D")
+                        "line_drum_a": row.get("line_drum_a", row.get("assigned_line_id", "Nessuna")),
+                        "line_drum_b": row.get("line_drum_b", "Nessuna"),
+                        "line_capstan": row.get("line_capstan", "Nessuna"),
+                        "assigned_line_id": row.get("line_id", row.get("assigned_line_id", "N/D")),
+                        "source_basket": row.get("source_basket", "Nessuno")
                     })
             elif isinstance(db_data, list) and len(db_data) > 0:
                 for row in db_data:
@@ -93,14 +118,22 @@ def render_tab_plans():
                         "comp_id": row.get("id", row.get("component_id", "")),
                         "pos_x": float(row.get("x", row.get("x_pos", 0))),
                         "pos_y": float(row.get("y", row.get("y_pos", 0))),
-                        "assigned_line_id": row.get("line_id", "N/D")
+                        "line_drum_a": row.get("line_drum_a", row.get("assigned_line_id", "Nessuna")),
+                        "line_drum_b": row.get("line_drum_b", "Nessuna"),
+                        "line_capstan": row.get("line_capstan", "Nessuna"),
+                        "assigned_line_id": row.get("line_id", "N/D"),
+                        "source_basket": row.get("source_basket", "Nessuno")
                     })
             
             if records:
                 st.session_state.mooring_stations[stat] = pd.DataFrame(records)
             else:
                 st.session_state.mooring_stations[stat] = pd.DataFrame(
-                    columns=["comp_type", "comp_id", "pos_x", "pos_y", "assigned_line_id"]
+                    columns=[
+                        "comp_type", "comp_id", "pos_x", "pos_y", 
+                        "line_drum_a", "line_drum_b", "line_capstan", 
+                        "assigned_line_id", "source_basket"
+                    ]
                 )
                 
         st.session_state.mooring_stations_loaded = True
@@ -115,9 +148,8 @@ def render_tab_plans():
     st_df = st.session_state.mooring_stations[station_sel]
     lines_df = get_line_history()
 
-    # 2. GESTIONE IMMAGINE E RIDIMENSIONAMENTO
+    # GESTIONE IMMAGINE Sfondo
     saved_img_path = get_station_image_path(station_sel)
-
     uploaded_image = st.file_uploader(
         f"📷 Carica/Sostituisci Pianetta per: {station_sel}",
         type=["png", "jpg", "jpeg"],
@@ -128,14 +160,14 @@ def render_tab_plans():
         file_bytes = uploaded_image.getvalue()
         _, ext = os.path.splitext(uploaded_image.name)
         saved_img_path = save_station_image_file(station_sel, file_bytes, ext)
-        st.success("Immagine salvata permanentemente!")
+        st.success("Immagine salvata!")
 
     if saved_img_path and os.path.exists(saved_img_path):
         raw_img = Image.open(saved_img_path)
     else:
         raw_img = Image.new('RGB', (600, 350), color=(230, 230, 230))
 
-    TARGET_WIDTH = 600
+    TARGET_WIDTH = 650
     w_percent = TARGET_WIDTH / float(raw_img.size[0])
     target_height = int(float(raw_img.size[1]) * float(w_percent))
     bg_img = raw_img.resize((TARGET_WIDTH, target_height), Image.Resampling.LANCZOS)
@@ -147,10 +179,10 @@ def render_tab_plans():
     annotated_img = draw_components_on_image(bg_img, st_df)
 
     st.markdown("---")
-    col_map, col_form = st.columns([1.8, 1])
+    col_map, col_form = st.columns([1.7, 1.1])
 
     with col_map:
-        st.subheader("👆 Clicca per Posizionare / Droppare")
+        st.subheader("👆 Clicca sul disegno per aggiungere un elemento")
         value = streamlit_image_coordinates(
             annotated_img,
             width=TARGET_WIDTH,
@@ -161,56 +193,83 @@ def render_tab_plans():
             st.session_state[key_click] = {"x": value["x"], "y": value["y"]}
 
     with col_form:
-        st.subheader("🎯 Aggiungi Componente")
+        st.subheader("🎯 Configura Componente")
         curr_x = st.session_state[key_click]["x"]
         curr_y = st.session_state[key_click]["y"]
-        st.info(f"Punto Selezionato: **X={curr_x} px, Y={curr_y} px**")
+        st.info(f"Punto Cliccato: **X={curr_x} px, Y={curr_y} px**")
 
-        comp_type = st.selectbox("Tipologia Elemento", ["WINCH", "BASKET", "CHOCK"])
-        comp_id = st.text_input("Identificativo (es. W1, B2, C1)", f"{comp_type[0]}_{len(st_df)+1}")
+        comp_type = st.selectbox("Tipologia Elemento", ["WINCH", "BASKET", "CHOCK", "CAPSTAN"])
+        comp_id = st.text_input("Identificativo Componente", f"{comp_type[0]}_{len(st_df)+1}")
 
+        # Elenco cavi disponibili
         line_options = ["Nessuna"]
         if not lines_df.empty and "line_id" in lines_df.columns:
             line_options += lines_df["line_id"].tolist()
 
-        assigned_line = st.selectbox("Cima d'Ormeggio Associata", line_options) if comp_type in ["WINCH", "BASKET"] else "N/D"
+        # Elenco Basket disponibili nella stazione corrente per tracciamento origine
+        basket_options = ["Nessuno"]
+        baskets_in_station = st_df[st_df["comp_type"] == "BASKET"]["comp_id"].tolist()
+        if baskets_in_station:
+            basket_options += baskets_in_station
 
-        if st.button("➕ Droppa Elemento Qui", use_container_width=True, type="primary"):
-            new_row = pd.DataFrame([{
-                "comp_type": comp_type, "comp_id": comp_id,
-                "pos_x": curr_x, "pos_y": curr_y,
-                "assigned_line_id": assigned_line
-            }])
+        line_drum_a = "Nessuna"
+        line_drum_b = "Nessuna"
+        line_capstan = "Nessuna"
+        assigned_line = "N/D"
+        source_basket = "Nessuno"
+
+        # CONFIGURAZIONE IN BASE AL TIPO COMPONENTE
+        if comp_type == "WINCH":
+            st.markdown("---")
+            st.caption("⚙️ Configurazione Dati Winch (2 Tamburi + Capstan Integrata)")
+            line_drum_a = st.selectbox("Cima - Tamburo A (Drum A)", line_options, key=f"dr_a_{station_sel}")
+            line_drum_b = st.selectbox("Cima - Tamburo B (Drum B)", line_options, key=f"dr_b_{station_sel}")
             
+            use_capstan = st.checkbox("Collega cavo alla Capstan del Winch")
+            if use_capstan:
+                line_capstan = st.selectbox("Cima lavorata su Capstan", line_options, key=f"cap_{station_sel}")
+                source_basket = st.selectbox("Origine Cima Capstan (Da quale Basket viene?)", basket_options)
+
+        elif comp_type == "BASKET":
+            assigned_line = st.selectbox("Cima stivata nel Basket", line_options)
+
+        elif comp_type == "CAPSTAN":
+            line_capstan = st.selectbox("Cima d'Ormeggio collegata", line_options)
+            source_basket = st.selectbox("Origine Cima (Da quale Basket proviene?)", basket_options)
+
+        if st.button("➕ Salva ed Inserisci sul Pianetto", use_container_width=True, type="primary"):
+            new_row = pd.DataFrame([{
+                "comp_type": comp_type,
+                "comp_id": comp_id,
+                "pos_x": curr_x,
+                "pos_y": curr_y,
+                "line_drum_a": line_drum_a,
+                "line_drum_b": line_drum_b,
+                "line_capstan": line_capstan,
+                "assigned_line_id": assigned_line if comp_type == "BASKET" else line_drum_a,
+                "source_basket": source_basket
+            }])
+
             st_df = pd.concat([st_df, new_row], ignore_index=True)
             st.session_state.mooring_stations[station_sel] = st_df
 
-            db_components = [
-                {"id": row["comp_id"], "type": row["comp_type"], "x": row["pos_x"], "y": row["pos_y"], "line_id": row["assigned_line_id"]}
-                for _, row in st_df.iterrows()
-            ]
+            # Salvataggio persistente su Database
+            db_components = st_df.to_dict(orient="records")
             save_mooring_station_components(db_components, station_sel)
-            st.success(f"Elemento {comp_id} aggiunto!")
+            
+            st.success(f"Elemento {comp_id} registrato permanentemente!")
             st.rerun()
 
+    # TABELLA MODIFICA SINCRO DB
     st.markdown("---")
-    st.subheader(f"⚙️ Gestione Tabellare Componenti: {station_sel}")
+    st.subheader(f"⚙️ Configurazione Tabellare: {station_sel}")
     edited_df = st.data_editor(
         st_df, num_rows="dynamic", use_container_width=True, key=f"editor_{station_sel}"
     )
-    
-    if st.button("💾 Sincronizza Tabella su DB"):
+
+    if st.button("💾 Sincronizza Tutti i Dati su DB"):
         st.session_state.mooring_stations[station_sel] = edited_df
-        db_components = [
-            {
-                "id": str(row.get("comp_id", "")),
-                "type": str(row.get("comp_type", "WINCH")),
-                "x": float(row.get("pos_x", 0.0)),
-                "y": float(row.get("pos_y", 0.0)),
-                "line_id": str(row.get("assigned_line_id", "N/D"))
-            }
-            for _, row in edited_df.iterrows()
-        ]
+        db_components = edited_df.to_dict(orient="records")
         save_mooring_station_components(db_components, station_sel)
-        st.success("Database aggiornato!")
+        st.success("Database aggiornato con successo!")
         st.rerun()
