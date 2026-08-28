@@ -282,17 +282,42 @@ st.sidebar.caption(
 )
 st.sidebar.divider()
 
-# NUOVO: UPLOADER ED ENGINE CALENDARIO PORT CALLS
+# FUNZIONE PARSER DEDICATA PER EXCEL CALENDARIO
+def load_and_parse_itinerary(uploaded_file):
+    df = pd.read_excel(uploaded_file)
+    
+    # Filtra giorni in mare o righe non ormeggiate senza ETA/ETD
+    df_clean = df.dropna(subset=["ETA", "ETD", "Date"]).copy()
+    
+    # Estrae la data in formato YYYY-MM-DD
+    df_clean["Date_Str"] = pd.to_datetime(df_clean["Date"]).dt.strftime("%Y-%m-%d")
+    
+    # Combina data + ora per ETA ed ETD
+    df_clean["ETA_dt"] = pd.to_datetime(df_clean["Date_Str"] + " " + df_clean["ETA"].astype(str), errors="coerce")
+    df_clean["ETD_dt"] = pd.to_datetime(df_clean["Date_Str"] + " " + df_clean["ETD"].astype(str), errors="coerce")
+    
+    # Gestisce ormeggi a cavallo della mezzanotte
+    df_clean.loc[df_clean["ETD_dt"] < df_clean["ETA_dt"], "ETD_dt"] += pd.Timedelta(days=1)
+    
+    # Mappa sul formato atteso dai moduli dell'app
+    parsed_df = pd.DataFrame({
+        "Port": df_clean["Location"],
+        "Port_Code": df_clean["Port Code"],
+        "ETA": df_clean["ETA_dt"],
+        "ETD": df_clean["ETD_dt"],
+        "Berthing_Type": df_clean["Confirmed Berthing"],
+        "Call_Type": df_clean["Call Type"]
+    })
+    return parsed_df
+
+# UPLOADER ED ENGINE CALENDARIO PORT CALLS
 st.sidebar.header("📅 Port Call Schedule")
 schedule_file = st.sidebar.file_uploader("Carica Calendario Scali (.xlsx)", type=["xlsx", "xls"], key="schedule_uploader")
 
 if schedule_file is not None:
     try:
-        df_sched = pd.read_excel(schedule_file)
-        df_sched["ETA"] = pd.to_datetime(df_sched["ETA"])
-        df_sched["ETD"] = pd.to_datetime(df_sched["ETD"])
-        st.session_state["port_schedule"] = df_sched
-        st.sidebar.success("Calendario Scali caricato con successo!")
+        st.session_state["port_schedule"] = load_and_parse_itinerary(schedule_file)
+        st.sidebar.success("Calendario Scali caricato e processato!")
     except Exception as e:
         st.sidebar.error(f"Errore lettura Excel: {e}")
 
