@@ -20,7 +20,7 @@ def get_connection():
 
 
 def init_db(default_lines_df: pd.DataFrame = None):
-    """Inizializza il database SQLite creando le tabelle se non esistono."""
+    """Inizializza il database SQLite creando le tabelle se non esistono e aggiorna gli schemi."""
     conn = get_connection()
     cursor = conn.cursor()
 
@@ -42,7 +42,7 @@ def init_db(default_lines_df: pd.DataFrame = None):
         )
     """)
 
-    # Tabella Certificati Cavi (Estesa per supportare stazioni, slot e sub-componenti)
+    # Tabella Certificati Cavi
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS certificates (
             cert_id TEXT PRIMARY KEY,
@@ -112,6 +112,15 @@ def init_db(default_lines_df: pd.DataFrame = None):
         )
     """)
 
+    # MIGRAZIONE AUTOMATICA SCHEMA: Verifica ed aggiunge eventuali colonne mancanti in station_components
+    cursor.execute("PRAGMA table_info(station_components)")
+    existing_cols = [row[1] for row in cursor.fetchall()]
+    
+    if "last_inspection_date" not in existing_cols:
+        cursor.execute("ALTER TABLE station_components ADD COLUMN last_inspection_date TEXT DEFAULT ''")
+    if "last_inspection_note" not in existing_cols:
+        cursor.execute("ALTER TABLE station_components ADD COLUMN last_inspection_note TEXT DEFAULT ''")
+
     # Tabella Metadati Stazioni
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS station_metadata (
@@ -132,7 +141,7 @@ def init_db(default_lines_df: pd.DataFrame = None):
         )
     """)
 
-    # NEW: Tabella Setup d'Ormeggio per Porto
+    # Tabella Setup d'Ormeggio per Porto
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS port_mooring_setups (
             port_name TEXT,
@@ -144,7 +153,7 @@ def init_db(default_lines_df: pd.DataFrame = None):
         )
     """)
 
-    # NEW: Tabella Storico Accumulato Cime (Ore e Stress)
+    # Tabella Storico Accumulato Cime
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS line_life_history (
             line_id TEXT PRIMARY KEY,
@@ -169,14 +178,12 @@ def assign_line_to_slot(cert_id: str, station: str, storage_type: str, assigned_
     conn = get_connection()
     cursor = conn.cursor()
     
-    # Rilascia lo slot se precedentemente occupato da un altro cavo
     cursor.execute("""
         UPDATE certificates 
         SET assigned_slot = 'Nessuna', storage_type = 'Spare Line'
         WHERE station = ? AND assigned_slot = ? AND cert_id != ?
     """, (station, assigned_slot, cert_id))
 
-    # Aggiorna la posizione del cavo target
     cursor.execute("""
         UPDATE certificates
         SET station = ?, storage_type = ?, assigned_slot = ?
@@ -187,9 +194,6 @@ def assign_line_to_slot(cert_id: str, station: str, storage_type: str, assigned_
     conn.close()
 
 
-# -----------------------------------------------------------------------------
-# PERSISTENZA SETUP D'ORMEGGIO E STORICO CIME (FUNZIONI ESISTENTI)
-# -----------------------------------------------------------------------------
 def get_port_mooring_setups(port_name: str) -> dict:
     conn = get_connection()
     df = pd.read_sql_query(
@@ -301,9 +305,6 @@ def get_line_history() -> pd.DataFrame:
     return df
 
 
-# -----------------------------------------------------------------------------
-# OPERAZIONI BANCHINA, CERTIFICATI ED INVENTARIO
-# -----------------------------------------------------------------------------
 def save_port_bollards_to_db(port_name: str, bollards_df: pd.DataFrame):
     conn = get_connection()
     cursor = conn.cursor()
@@ -430,11 +431,39 @@ def get_station_image_path(station_name: str) -> str:
 
 
 def save_mooring_station_components(components_list: list, station_name: str):
+    """Salva i componenti della stazione gestendo la mappatura flessibile dei campi del DB."""
     conn = get_connection()
     cursor = conn.cursor()
+    
+    # Assicura che le colonne di ispezione esistano nel DB
+    cursor.execute("PRAGMA table_info(station_components)")
+    existing_cols = [row[1] for row in cursor.fetchall()]
+    if "last_inspection_date" not in existing_cols:
+        cursor.execute("ALTER TABLE station_components ADD COLUMN last_inspection_date TEXT DEFAULT ''")
+    if "last_inspection_note" not in existing_cols:
+        cursor.execute("ALTER TABLE station_components ADD COLUMN last_inspection_note TEXT DEFAULT ''")
+
     cursor.execute("DELETE FROM station_components WHERE station_name = ?", (station_name,))
 
     for item in components_list:
+        comp_id = str(item.get("comp_id", item.get("component_id", item.get("id", "ELEMENTO"))))
+        comp_type = str(item.get("comp_type", item.get("component_type", item.get("type", "WINCH"))))
+        
+        pos_x = float(item.get("pos_x", item.get("x_pos", item.get("x", 0.0))))
+        pos_y = float(item.get("pos_y", item.get("y_pos", item.get("y", 0.0))))
+        
+        line_id = str(item.get("line_id", "N/D"))
+        line_drum_a = str(item.get("line_drum_a", "Nessuna"))
+        line_drum_b = str(item.get("line_drum_b", "Nessuna"))
+        line_capstan = str(item.get("line_capstan", "Nessuna"))
+        assigned_line_id = str(item.get("assigned_line_id", "N/D"))
+        source_basket = str(item.get("source_basket", "Nessuno"))
+        
+        wear_pct = int(item.get("wear_pct", 0))
+        condition = str(item.get("condition", "BUONO"))
+        last_insp_date = str(item.get("last_inspection_date", ""))
+        last_insp_note = str(item.get("last_inspection_note", ""))
+
         cursor.execute("""
             INSERT INTO station_components (
                 station_name, component_id, component_type, x_pos, y_pos, line_id,
@@ -442,13 +471,9 @@ def save_mooring_station_components(components_list: list, station_name: str):
                 wear_pct, condition, last_inspection_date, last_inspection_note
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
-            station_name, str(item.get("comp_id", item.get("id"))), str(item.get("comp_type", item.get("type"))),
-            float(item.get("pos_x", item.get("x", 0.0))), float(item.get("pos_y", item.get("y", 0.0))),
-            str(item.get("line_id", "N/D")), str(item.get("line_drum_a", "Nessuna")),
-            str(item.get("line_drum_b", "Nessuna")), str(item.get("line_capstan", "Nessuna")),
-            str(item.get("assigned_line_id", "N/D")), str(item.get("source_basket", "Nessuno")),
-            int(item.get("wear_pct", 0)), str(item.get("condition", "BUONO")),
-            str(item.get("last_inspection_date", "")), str(item.get("last_inspection_note", ""))
+            station_name, comp_id, comp_type, pos_x, pos_y, line_id,
+            line_drum_a, line_drum_b, line_capstan, assigned_line_id, source_basket,
+            wear_pct, condition, last_insp_date, last_insp_note
         ))
 
     conn.commit()
