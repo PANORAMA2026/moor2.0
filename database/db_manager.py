@@ -112,10 +112,9 @@ def init_db(default_lines_df: pd.DataFrame = None):
         )
     """)
 
-    # MIGRAZIONE AUTOMATICA SCHEMA: Verifica ed aggiunge eventuali colonne mancanti in station_components
+    # MIGRAZIONE AUTOMATICA SCHEMA: station_components
     cursor.execute("PRAGMA table_info(station_components)")
     existing_cols = [row[1] for row in cursor.fetchall()]
-    
     if "last_inspection_date" not in existing_cols:
         cursor.execute("ALTER TABLE station_components ADD COLUMN last_inspection_date TEXT DEFAULT ''")
     if "last_inspection_note" not in existing_cols:
@@ -162,19 +161,32 @@ def init_db(default_lines_df: pd.DataFrame = None):
             applied_tension_mbl_pct REAL,
             total_hours REAL DEFAULT 0.0,
             accumulated_stress_index REAL DEFAULT 0.0,
+            wear_percentage INTEGER DEFAULT 0,
+            status TEXT DEFAULT 'BUONO',
+            last_inspection TEXT DEFAULT '',
+            notes TEXT DEFAULT '',
             last_auto_sync TEXT
         )
     """)
+
+    # MIGRAZIONE AUTOMATICA SCHEMA: line_life_history
+    cursor.execute("PRAGMA table_info(line_life_history)")
+    existing_life_cols = [row[1] for row in cursor.fetchall()]
+    for col_name, col_type in [
+        ("wear_percentage", "INTEGER DEFAULT 0"),
+        ("status", "TEXT DEFAULT 'BUONO'"),
+        ("last_inspection", "TEXT DEFAULT ''"),
+        ("notes", "TEXT DEFAULT ''")
+    ]:
+        if col_name not in existing_life_cols:
+            cursor.execute(f"ALTER TABLE line_life_history ADD COLUMN {col_name} {col_type}")
 
     conn.commit()
     conn.close()
 
 
 def assign_line_to_slot(cert_id: str, station: str, storage_type: str, assigned_slot: str):
-    """
-    Sincronizza l'assegnazione di un cavo rilasciando eventuali slot precedenti 
-    e aggiornando sia la vista Certificati che quella della Mooring Station.
-    """
+    """Sincronizza l'assegnazione di un cavo rilasciando eventuali slot precedenti."""
     conn = get_connection()
     cursor = conn.cursor()
     
@@ -260,26 +272,35 @@ def save_line_history(history_df: pd.DataFrame):
 
     for _, row in history_df.iterrows():
         l_id = str(row.get("line_id", row.get("id", "")))
-        last_port = str(row.get("last_port", ""))
-        current_setup = str(row.get("current_setup", ""))
+        last_port = str(row.get("last_port", "N/D"))
+        current_setup = str(row.get("current_setup", "N/D"))
         applied_tension = float(row.get("applied_tension_mbl_pct", 0.0))
         total_hours = float(row.get("total_hours", 0.0))
         accumulated_stress = float(row.get("accumulated_stress_index", 0.0))
+        wear_pct = int(row.get("wear_percentage", row.get("wear_pct", 0)))
+        status = str(row.get("status", row.get("condition", "BUONO")))
+        last_insp = str(row.get("last_inspection", row.get("last_inspection_date", "")))
+        notes = str(row.get("notes", row.get("last_inspection_note", "")))
         last_sync = str(row.get("last_auto_sync", ""))
 
         cursor.execute("""
             INSERT INTO line_life_history (
                 line_id, last_port, current_setup, applied_tension_mbl_pct, 
-                total_hours, accumulated_stress_index, last_auto_sync
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                total_hours, accumulated_stress_index, wear_percentage, status,
+                last_inspection, notes, last_auto_sync
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(line_id) DO UPDATE SET
                 last_port = excluded.last_port,
                 current_setup = excluded.current_setup,
                 applied_tension_mbl_pct = excluded.applied_tension_mbl_pct,
                 total_hours = excluded.total_hours,
                 accumulated_stress_index = excluded.accumulated_stress_index,
+                wear_percentage = excluded.wear_percentage,
+                status = excluded.status,
+                last_inspection = excluded.last_inspection,
+                notes = excluded.notes,
                 last_auto_sync = excluded.last_auto_sync
-        """, (l_id, last_port, current_setup, applied_tension, total_hours, accumulated_stress, last_sync))
+        """, (l_id, last_port, current_setup, applied_tension, total_hours, accumulated_stress, wear_pct, status, last_insp, notes, last_sync))
 
     conn.commit()
     conn.close()
@@ -300,6 +321,10 @@ def get_line_history() -> pd.DataFrame:
                 "applied_tension_mbl_pct": 0.0,
                 "total_hours": 0.0,
                 "accumulated_stress_index": 0.0,
+                "wear_percentage": 0,
+                "status": "BUONO",
+                "last_inspection": "",
+                "notes": "",
                 "last_auto_sync": "Mai"
             })
     return df
@@ -435,7 +460,6 @@ def save_mooring_station_components(components_list: list, station_name: str):
     conn = get_connection()
     cursor = conn.cursor()
     
-    # Assicura che le colonne di ispezione esistano nel DB
     cursor.execute("PRAGMA table_info(station_components)")
     existing_cols = [row[1] for row in cursor.fetchall()]
     if "last_inspection_date" not in existing_cols:
