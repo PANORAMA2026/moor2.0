@@ -1,7 +1,6 @@
 """
 views/tab_certificate.py
-Interfaccia per il caricamento, parsing ed archiviazione dei certificati PDF.
-Suddiviso per stazioni FWD/AFT con assegnazione dinamica a Winch, Basket o Spare Line.
+Modulo Certificati Cavi: Parsing PDF, assegnazione slot e suddivisione esplicita FWD / AFT.
 """
 
 import pandas as pd
@@ -16,17 +15,17 @@ from database.db_manager import (
     save_mooring_station_components
 )
 
+
 def render_tab_certificate():
-    st.header("📜 Modulo Certificati Cavi & Assegnazione Stazioni")
-    st.info("Carica un certificato PDF per estrarre i dati ed assegnare la linea alla stazione di Prua (FWD) o Poppa (AFT).")
+    st.header("📜 Modulo Certificati Cavi & Drag and Drop PDF")
 
     # 1. SEZIONE UPLOAD & PARSING
-    st.subheader("📥 1. Caricamento & Parsing Certificato PDF")
+    st.subheader("📥 Caricamento & Parsing Certificato PDF")
     col_up, col_preview = st.columns([1, 1.5])
 
     with col_up:
-        uploaded_file = st.file_uploader("Trascina qui il file PDF del certificato", type=["pdf"])
-        text_input = st.text_area("Oppure incolla il testo del certificato", height=90)
+        uploaded_file = st.file_uploader("Trascina qui il file PDF", type=["pdf"], key="cert_pdf_uploader")
+        text_input = st.text_area("Oppure incolla qui il testo del certificato", height=100, key="cert_text_area")
 
         if st.button("🔍 Esegui Parsing Certificato", type="primary", use_container_width=True):
             extracted = None
@@ -37,14 +36,14 @@ def render_tab_certificate():
 
             if extracted:
                 st.session_state["active_parsed_cert"] = extracted
-                st.success("Parsing completato con successo!")
+                st.success("Parsing completato!")
             else:
-                st.error("⚠️ Nessun file caricato o testo presente!")
+                st.error("⚠️ Nessun file o testo fornito.")
 
     with col_preview:
         if "active_parsed_cert" in st.session_state:
             ext = st.session_state["active_parsed_cert"]
-            st.markdown("### 📋 Dati Estratti dal Certificato")
+            st.markdown("### 📋 Dati Estratti")
             st.write(f"**ID Certificato:** `{ext['cert_id']}` | **Produttore:** {ext['manufacturer']}")
             
             p_col1, p_col2 = st.columns(2)
@@ -53,31 +52,29 @@ def render_tab_certificate():
             p_col2.metric("Materiale", ext['main_material'])
             p_col2.metric("Lunghezza", f"{ext['main_length_m']} m")
 
-            if ext["has_geolink"]:
-                st.caption(f"🔗 **GeoLink Rilevato:** MBL {ext['geolink_mbl_tons']} t")
-            if ext["has_tail"]:
-                st.caption(f"🪢 **Tail Rilevata:** Materiale {ext['tail_material']} | Ø {ext['tail_diameter_mm']} mm | MBL {ext['tail_mbl_tons']} t")
+            if ext.get("has_geolink"):
+                st.caption(f"🔗 **GeoLink:** MBL {ext['geolink_mbl_tons']} t")
+            if ext.get("has_tail"):
+                st.caption(f"🪢 **Tail:** {ext['tail_material']} | Ø {ext['tail_diameter_mm']} mm | MBL {ext['tail_mbl_tons']} t")
 
     st.markdown("---")
 
-    # 2. SEZIONE ASSEGNAZIONE STAZIONE ED ALLOGGIAMENTO
+    # 2. SEZIONE ASSEGNAZIONE STAZIONE E SLOT
     if "active_parsed_cert" in st.session_state:
         ext = st.session_state["active_parsed_cert"]
-        st.subheader("⚙️ 2. Assegnazione Stazione & Alloggiamento Cavo")
+        st.subheader("⚙️ Assegnazione Stazione & Slot")
 
-        with st.form("assign_line_form"):
+        with st.form("form_assign_cert"):
             station_choice = st.radio(
-                "Seleziona la Stazione di Ormeggio:",
+                "Seleziona Stazione di Ormeggio:",
                 ["Prua (Forward Station)", "Poppa (Aft Station)"],
                 horizontal=True
             )
             station_code = "FWD" if "Prua" in station_choice else "AFT"
-            station_full_name = station_choice
 
-            col_assign_1, col_assign_2 = st.columns(2)
+            col_a1, col_a2 = st.columns(2)
 
-            # Recupero componenti registrati sul pianetto per popolare i menu
-            station_comps = get_mooring_station_components(station_full_name)
+            station_comps = get_mooring_station_components(station_choice)
             winch_list = []
             basket_list = []
             
@@ -95,24 +92,21 @@ def render_tab_certificate():
             if not basket_list:
                 basket_list = [f"{station_code} Basket #1", f"{station_code} Basket #2"]
 
-            with col_assign_1:
+            with col_a1:
                 storage_type = st.selectbox(
-                    "Seleziona tipo di alloggiamento:",
+                    "Tipo Alloggiamento:",
                     ["Winch (Drum Winch)", "Cesta (Basket / Rope Locker)", "Cavo di Riserva (Spare Line)"]
                 )
 
-            with col_assign_2:
+            with col_a2:
                 if "Winch" in storage_type:
-                    target_slot = st.selectbox("Seleziona il Drum Winch di destinazione:", winch_list)
+                    target_slot = st.selectbox("Slot Winch Destinazione:", winch_list)
                 elif "Cesta" in storage_type:
-                    target_slot = st.selectbox("Seleziona il Basket / Cesta:", basket_list)
+                    target_slot = st.selectbox("Basket Destinazione:", basket_list)
                 else:
-                    target_slot = f"{station_code} Spare Storage (Ponte di Coperta)"
-                    st.info("Il cavo verrà registrato a magazzino come linea di riserva pronta all'uso.")
+                    target_slot = f"{station_code} Spare Storage"
 
-            btn_save = st.form_submit_button("💾 Salva Certificato e Assegna Cavo", type="primary", use_container_width=True)
-
-            if btn_save:
+            if st.form_submit_button("💾 Salva Certificato nel DB", type="primary", use_container_width=True):
                 cert_record = {
                     "cert_id": ext["cert_id"],
                     "manufacturer": ext["manufacturer"],
@@ -123,22 +117,20 @@ def render_tab_certificate():
                     "station": station_code,
                     "assigned_slot": target_slot,
                     "storage_type": storage_type,
-                    "has_geolink": "SI" if ext["has_geolink"] else "NO",
-                    "geolink_mbl": ext["geolink_mbl_tons"] if ext["has_geolink"] else 0.0,
-                    "has_tail": "SI" if ext["has_tail"] else "NO",
-                    "tail_material": ext["tail_material"] if ext["has_tail"] else "N/A",
-                    "tail_diameter": ext["tail_diameter_mm"] if ext["has_tail"] else 0.0,
-                    "tail_mbl": ext["tail_mbl_tons"] if ext["has_tail"] else 0.0,
-                    "tail_length": ext["tail_length_m"] if ext["has_tail"] else 0.0,
-                    "standard": ext["standard"],
+                    "has_geolink": "SI" if ext.get("has_geolink") else "NO",
+                    "geolink_mbl": ext.get("geolink_mbl_tons", 0.0),
+                    "has_tail": "SI" if ext.get("has_tail") else "NO",
+                    "tail_material": ext.get("tail_material", "N/A"),
+                    "tail_diameter": ext.get("tail_diameter_mm", 0.0),
+                    "tail_mbl": ext.get("tail_mbl_tons", 0.0),
+                    "tail_length": ext.get("tail_length_m", 0.0),
+                    "standard": ext.get("standard", "MEG4"),
                     "issue_date": ""
                 }
                 
-                # 1. Scrittura nel DB Certificati
                 save_certificate_to_db(cert_record)
                 assign_line_to_slot(ext["cert_id"], station_code, storage_type, target_slot)
 
-                # 2. Aggiornamento automatico del pianetto corrispondente
                 if not station_comps.empty:
                     clean_comp_id = target_slot.split(" ")[0]
                     for idx, row in station_comps.iterrows():
@@ -149,9 +141,8 @@ def render_tab_certificate():
                                 station_comps.loc[idx, "line_drum_b"] = ext["cert_id"]
                             elif "Basket" in target_slot or "Cesta" in storage_type:
                                 station_comps.loc[idx, "assigned_line_id"] = ext["cert_id"]
-                    save_mooring_station_components(station_comps.to_dict(orient="records"), station_full_name)
+                    save_mooring_station_components(station_comps.to_dict(orient="records"), station_choice)
 
-                # 3. Aggiornamento Inventario Generale Cime
                 line_entry = {
                     "line_id": ext["cert_id"],
                     "last_port": "Inizializzazione",
@@ -163,37 +154,37 @@ def render_tab_certificate():
                 }
                 save_line_history(pd.DataFrame([line_entry]))
 
-                st.success(f"Cavo {ext['cert_id']} salvato ed assegnato a **{target_slot}** nella stazione **{station_code}**!")
+                st.success(f"Certificato {ext['cert_id']} salvato in stazione {station_code}!")
                 del st.session_state["active_parsed_cert"]
                 st.rerun()
 
     st.markdown("---")
 
-    # 3. DIVISIONE ESPILICITA CERTIFICATI: MOORING STATION PRUA (FWD) E POPPA (AFT)
-    st.subheader("📚 Registro Certificati per Stazione d'Ormeggio")
+    # 3. TABELLE DIVISE PER MOORING STATION PRUA E POPPA
+    st.subheader("📊 Registri Certificati per Stazione d'Ormeggio")
 
     certs_df = load_certificates_from_db()
 
-    # SEZIONE PRUA (FWD)
-    st.markdown("### ⚓ Mooring Station di PRUA (Forward Station - FWD)")
+    # SECTION 1: PRUA (FWD)
+    st.markdown("#### ⚓ Mooring Station PRUA (Forward Station - FWD)")
     if not certs_df.empty and "station" in certs_df.columns:
         fwd_df = certs_df[certs_df["station"] == "FWD"]
         if not fwd_df.empty:
             st.dataframe(fwd_df, use_container_width=True)
         else:
-            st.info("Nessun certificato/cavo registrato per la stazione di Prua (FWD).")
+            st.info("Nessun certificato registrato per la stazione di Prua (FWD).")
     else:
-        st.info("Nessun certificato presente nel database.")
+        st.info("Nessun dato registrato nel DB.")
 
     st.markdown("---")
 
-    # SEZIONE POPPA (AFT)
-    st.markdown("### ⚓ Mooring Station di POPPA (Aft Station - AFT)")
+    # SECTION 2: POPPA (AFT)
+    st.markdown("#### ⚓ Mooring Station POPPA (Aft Station - AFT)")
     if not certs_df.empty and "station" in certs_df.columns:
         aft_df = certs_df[certs_df["station"] == "AFT"]
         if not aft_df.empty:
             st.dataframe(aft_df, use_container_width=True)
         else:
-            st.info("Nessun certificato/cavo registrato per la stazione di Poppa (AFT).")
+            st.info("Nessun certificato registrato per la stazione di Poppa (AFT).")
     else:
-        st.info("Nessun certificato presente nel database.")
+        st.info("Nessun dato registrato nel DB.")
