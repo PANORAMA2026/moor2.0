@@ -17,6 +17,8 @@ from database.db_manager import (
     save_station_image_file,
     get_station_image_path,
     save_line_history,
+    assign_line_to_slot,
+    load_certificates_from_db
 )
 
 # -----------------------------------------------------------------------------
@@ -59,7 +61,7 @@ def analyze_damage_with_ai(image_file):
     }
 
 # -----------------------------------------------------------------------------
-# DISAGNO COMPONENTI SUL PIANETTO (MARCATORI VISIBILI)
+# DISEGNO COMPONENTI SUL PIANETTO (MARCATORI VISIBILI)
 # -----------------------------------------------------------------------------
 def draw_components_on_image(image: Image.Image, components_df: pd.DataFrame) -> Image.Image:
     """Disegna marcatori ed etichette con coordinamento x, y su immagine."""
@@ -256,7 +258,6 @@ def render_tab_plans():
 
     stations_list = ["Prua (Forward Station)", "Poppa (Aft Station)"]
 
-    # 1. CARICAMENTO UNA SOLA VOLTA DAL DB PER EVITARE RESETS
     if "mooring_stations" not in st.session_state:
         st.session_state.mooring_stations = {}
 
@@ -269,21 +270,17 @@ def render_tab_plans():
         return
 
     st_df = st.session_state.mooring_stations[station_sel]
+    st_code = "FWD" if "Prua" in station_sel else "AFT"
 
-    # 2. SELEZIONE CIME INVENTARIO
-    lines_df = get_line_history()
+    # 2. SELEZIONE CIME INVENTARIO / CERTIFICATI
+    certs_df = load_certificates_from_db()
     line_options = ["Nessuna"]
-    if not lines_df.empty:
-        for _, l_row in lines_df.iterrows():
-            l_id = str(l_row.get("line_id", l_row.get("id", "Cima")))
-            l_mat = str(l_row.get("material", l_row.get("type", "")))
-            l_dia = str(l_row.get("diameter", ""))
-            desc = f"{l_id}"
-            if l_mat and l_mat != "nan":
-                desc += f" ({l_mat}"
-                if l_dia and l_dia != "nan":
-                    desc += f" - {l_dia}mm"
-                desc += ")"
+    if not certs_df.empty and "cert_id" in certs_df.columns:
+        for _, c_row in certs_df.iterrows():
+            c_id = str(c_row["cert_id"])
+            c_mat = str(c_row.get("material", ""))
+            c_dia = str(c_row.get("diameter_mm", ""))
+            desc = f"{c_id} ({c_mat} - {c_dia}mm)" if c_mat else c_id
             line_options.append(desc)
 
     # 3. GESTIONE E RIDIMENSIONAMENTO IMMAGINE PIANETTO
@@ -391,7 +388,19 @@ def render_tab_plans():
 
             # SALVATAGGIO FORZATO SU DB SQLITE
             save_mooring_station_components(updated_df.to_dict(orient="records"), station_sel)
-            st.success(f"Elemento {comp_id} salvato definitivamente!")
+
+            # SINCRO BIDIREZIONALE VERSO TAB CERTIFICATI
+            if line_drum_a != "Nessuna":
+                c_id_a = line_drum_a.split(" ")[0]
+                assign_line_to_slot(c_id_a, st_code, "Winch (Drum Winch)", f"{comp_id} (Drum A)")
+            if line_drum_b != "Nessuna":
+                c_id_b = line_drum_b.split(" ")[0]
+                assign_line_to_slot(c_id_b, st_code, "Winch (Drum Winch)", f"{comp_id} (Drum B)")
+            if comp_type == "BASKET" and assigned_line != "Nessuna":
+                c_id_bk = assigned_line.split(" ")[0]
+                assign_line_to_slot(c_id_bk, st_code, "Cesta (Basket / Rope Locker)", f"{comp_id}")
+
+            st.success(f"Elemento {comp_id} salvato e sincronizzato con i Certificati!")
             st.rerun()
 
     # -------------------------------------------------------------------------
