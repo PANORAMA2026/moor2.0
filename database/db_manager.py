@@ -42,7 +42,7 @@ def init_db(default_lines_df: pd.DataFrame = None):
         )
     """)
 
-    # Tabella Certificati Cavi
+    # Tabella Certificati Cavi (Estesa per supportare stazioni, slot e sub-componenti)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS certificates (
             cert_id TEXT PRIMARY KEY,
@@ -50,6 +50,17 @@ def init_db(default_lines_df: pd.DataFrame = None):
             material TEXT,
             diameter_mm REAL,
             mbl_tons REAL,
+            length_m REAL DEFAULT 220.0,
+            station TEXT DEFAULT 'FWD',
+            assigned_slot TEXT DEFAULT 'Nessuna',
+            storage_type TEXT DEFAULT 'Spare Line',
+            has_geolink TEXT DEFAULT 'NO',
+            geolink_mbl REAL DEFAULT 0.0,
+            has_tail TEXT DEFAULT 'NO',
+            tail_material TEXT DEFAULT 'N/A',
+            tail_diameter REAL DEFAULT 0.0,
+            tail_mbl REAL DEFAULT 0.0,
+            tail_length REAL DEFAULT 0.0,
             standard TEXT,
             issue_date TEXT
         )
@@ -88,6 +99,15 @@ def init_db(default_lines_df: pd.DataFrame = None):
             x_pos REAL,
             y_pos REAL,
             line_id TEXT,
+            line_drum_a TEXT,
+            line_drum_b TEXT,
+            line_capstan TEXT,
+            assigned_line_id TEXT,
+            source_basket TEXT,
+            wear_pct INTEGER,
+            condition TEXT,
+            last_inspection_date TEXT,
+            last_inspection_note TEXT,
             PRIMARY KEY (station_name, component_id)
         )
     """)
@@ -141,11 +161,36 @@ def init_db(default_lines_df: pd.DataFrame = None):
     conn.close()
 
 
+def assign_line_to_slot(cert_id: str, station: str, storage_type: str, assigned_slot: str):
+    """
+    Sincronizza l'assegnazione di un cavo rilasciando eventuali slot precedenti 
+    e aggiornando sia la vista Certificati che quella della Mooring Station.
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+    
+    # Rilascia lo slot se precedentemente occupato da un altro cavo
+    cursor.execute("""
+        UPDATE certificates 
+        SET assigned_slot = 'Nessuna', storage_type = 'Spare Line'
+        WHERE station = ? AND assigned_slot = ? AND cert_id != ?
+    """, (station, assigned_slot, cert_id))
+
+    # Aggiorna la posizione del cavo target
+    cursor.execute("""
+        UPDATE certificates
+        SET station = ?, storage_type = ?, assigned_slot = ?
+        WHERE cert_id = ?
+    """, (station, storage_type, assigned_slot, cert_id))
+
+    conn.commit()
+    conn.close()
+
+
 # -----------------------------------------------------------------------------
-# PERSISTENZA SETUP D'ORMEGGIO E STORICO CIME (NUOVE FUNZIONI)
+# PERSISTENZA SETUP D'ORMEGGIO E STORICO CIME (FUNZIONI ESISTENTI)
 # -----------------------------------------------------------------------------
 def get_port_mooring_setups(port_name: str) -> dict:
-    """Restituisce un dizionario {setup_name: DataFrame} per un porto specificato."""
     conn = get_connection()
     df = pd.read_sql_query(
         "SELECT * FROM port_mooring_setups WHERE port_name = ?", 
@@ -155,7 +200,6 @@ def get_port_mooring_setups(port_name: str) -> dict:
     conn.close()
 
     if df.empty:
-        # Layout di default generico basato sull'inventario se non ne esistono di personalizzati
         lines_df = load_lines_inventory_from_db()
 
         default_records = []
@@ -179,7 +223,6 @@ def get_port_mooring_setups(port_name: str) -> dict:
 
 
 def save_port_mooring_setup(port_name: str, setup_name: str, setup_df: pd.DataFrame, is_default: bool = False):
-    """Salva o aggiorna un setup d'ormeggio per un determinato porto."""
     conn = get_connection()
     cursor = conn.cursor()
 
@@ -205,10 +248,6 @@ def save_port_mooring_setup(port_name: str, setup_name: str, setup_df: pd.DataFr
 
 
 def save_line_history(history_df: pd.DataFrame):
-    """
-    Aggiorna lo storico incrementale di ore e stress per le cime nel DB.
-    Utilizza un meccanismo UPSERT (INSERT OR REPLACE).
-    """
     if history_df.empty:
         return
 
@@ -216,7 +255,7 @@ def save_line_history(history_df: pd.DataFrame):
     cursor = conn.cursor()
 
     for _, row in history_df.iterrows():
-        l_id = str(row.get("line_id"))
+        l_id = str(row.get("line_id", row.get("id", "")))
         last_port = str(row.get("last_port", ""))
         current_setup = str(row.get("current_setup", ""))
         applied_tension = float(row.get("applied_tension_mbl_pct", 0.0))
@@ -243,13 +282,11 @@ def save_line_history(history_df: pd.DataFrame):
 
 
 def get_line_history() -> pd.DataFrame:
-    """Restituisce lo storico dell'usura di tutte le cime."""
     conn = get_connection()
     df = pd.read_sql_query("SELECT * FROM line_life_history", conn)
     conn.close()
 
     if df.empty:
-        # Se vuoto, costruisce la struttura base partendo dall'inventario
         inv_df = load_lines_inventory_from_db()
         if not inv_df.empty and "line_id" in inv_df.columns:
             df = pd.DataFrame({
@@ -322,11 +359,19 @@ def save_certificate_to_db(cert_dict: dict):
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("""
-        INSERT OR REPLACE INTO certificates (cert_id, manufacturer, material, diameter_mm, mbl_tons, standard, issue_date)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT OR REPLACE INTO certificates (
+            cert_id, manufacturer, material, diameter_mm, mbl_tons, length_m,
+            station, assigned_slot, storage_type, has_geolink, geolink_mbl,
+            has_tail, tail_material, tail_diameter, tail_mbl, tail_length, standard, issue_date
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
-        cert_dict["cert_id"], cert_dict["manufacturer"], cert_dict["material"],
-        cert_dict["diameter_mm"], cert_dict["mbl_tons"], cert_dict["standard"], cert_dict["issue_date"]
+        cert_dict.get("cert_id"), cert_dict.get("manufacturer"), cert_dict.get("material"),
+        cert_dict.get("diameter_mm"), cert_dict.get("mbl_tons"), cert_dict.get("length_m", 220.0),
+        cert_dict.get("station", "FWD"), cert_dict.get("assigned_slot", "Nessuna"), cert_dict.get("storage_type", "Spare Line"),
+        cert_dict.get("has_geolink", "NO"), cert_dict.get("geolink_mbl", 0.0),
+        cert_dict.get("has_tail", "NO"), cert_dict.get("tail_material", "N/A"),
+        cert_dict.get("tail_diameter", 0.0), cert_dict.get("tail_mbl", 0.0),
+        cert_dict.get("tail_length", 0.0), cert_dict.get("standard", "MEG4"), cert_dict.get("issue_date", "")
     ))
     conn.commit()
     conn.close()
@@ -391,11 +436,19 @@ def save_mooring_station_components(components_list: list, station_name: str):
 
     for item in components_list:
         cursor.execute("""
-            INSERT INTO station_components (station_name, component_id, component_type, x_pos, y_pos, line_id)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO station_components (
+                station_name, component_id, component_type, x_pos, y_pos, line_id,
+                line_drum_a, line_drum_b, line_capstan, assigned_line_id, source_basket,
+                wear_pct, condition, last_inspection_date, last_inspection_note
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
-            station_name, str(item.get("id")), str(item.get("type")),
-            float(item.get("x", 0.0)), float(item.get("y", 0.0)), str(item.get("line_id", "N/D"))
+            station_name, str(item.get("comp_id", item.get("id"))), str(item.get("comp_type", item.get("type"))),
+            float(item.get("pos_x", item.get("x", 0.0))), float(item.get("pos_y", item.get("y", 0.0))),
+            str(item.get("line_id", "N/D")), str(item.get("line_drum_a", "Nessuna")),
+            str(item.get("line_drum_b", "Nessuna")), str(item.get("line_capstan", "Nessuna")),
+            str(item.get("assigned_line_id", "N/D")), str(item.get("source_basket", "Nessuno")),
+            int(item.get("wear_pct", 0)), str(item.get("condition", "BUONO")),
+            str(item.get("last_inspection_date", "")), str(item.get("last_inspection_note", ""))
         ))
 
     conn.commit()
