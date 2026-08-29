@@ -167,21 +167,36 @@ def load_station_data_from_db(station_name: str) -> pd.DataFrame:
 
 
 def update_line_inventory_and_history(line_name: str, new_wear: int, condition: str, note: str):
-    """Sincronizza permanentemente con l'inventario generale cime."""
+    """Sincronizza permanentemente con l'inventario generale e lo storico cime."""
     if not line_name or line_name == "Nessuna":
         return
     
     clean_line_id = line_name.split(" ")[0]
     lines_df = get_line_history()
     
-    if not lines_df.empty:
-        id_col = "line_id" if "line_id" in lines_df.columns else "id"
-        if clean_line_id in lines_df[id_col].astype(str).values:
-            lines_df.loc[lines_df[id_col].astype(str) == clean_line_id, "wear_percentage"] = new_wear
-            lines_df.loc[lines_df[id_col].astype(str) == clean_line_id, "status"] = condition
-            lines_df.loc[lines_df[id_col].astype(str) == clean_line_id, "last_inspection"] = str(date.today())
-            lines_df.loc[lines_df[id_col].astype(str) == clean_line_id, "notes"] = note
-            save_line_history(lines_df)
+    id_col = "line_id" if "line_id" in lines_df.columns else "id"
+    if not lines_df.empty and clean_line_id in lines_df[id_col].astype(str).values:
+        lines_df.loc[lines_df[id_col].astype(str) == clean_line_id, "wear_percentage"] = new_wear
+        lines_df.loc[lines_df[id_col].astype(str) == clean_line_id, "status"] = condition
+        lines_df.loc[lines_df[id_col].astype(str) == clean_line_id, "last_inspection"] = str(date.today())
+        lines_df.loc[lines_df[id_col].astype(str) == clean_line_id, "notes"] = note
+    else:
+        new_row = pd.DataFrame([{
+            "line_id": clean_line_id,
+            "last_port": "N/D",
+            "current_setup": "N/D",
+            "applied_tension_mbl_pct": 0.0,
+            "total_hours": 0.0,
+            "accumulated_stress_index": 0.0,
+            "wear_percentage": new_wear,
+            "status": condition,
+            "last_inspection": str(date.today()),
+            "notes": note,
+            "last_auto_sync": str(date.today())
+        }])
+        lines_df = pd.concat([lines_df, new_row], ignore_index=True)
+
+    save_line_history(lines_df)
 
 
 @st.dialog("📸 Analisi Foto Danno Cima (AI + Reference Library)", width="large")
@@ -243,7 +258,7 @@ def open_ai_inspection_dialog(row, idx, station_sel, st_df):
             # 2. Sincronizzazione permanente su Inventario e Storico Cime DB
             target_line = row.get("line_drum_a", row.get("assigned_line_id", "Nessuna"))
             update_line_inventory_and_history(
-                target_line, new_total_wear, st_df.loc[idx, "condition"], st_df.loc[idx, "last_inspection_note"]
+                target_line, new_total_wear, str(st_df.loc[idx, "condition"]), str(st_df.loc[idx, "last_inspection_note"])
             )
 
             del st.session_state[f"selected_wear_{idx}"]
@@ -258,6 +273,7 @@ def render_tab_plans():
 
     stations_list = ["Prua (Forward Station)", "Poppa (Aft Station)"]
 
+    # Inizializzazione corretta di session_state: carica da DB SOLO se la chiave non esiste
     if "mooring_stations" not in st.session_state:
         st.session_state.mooring_stations = {}
 
@@ -272,7 +288,7 @@ def render_tab_plans():
     st_df = st.session_state.mooring_stations[station_sel]
     st_code = "FWD" if "Prua" in station_sel else "AFT"
 
-    # 2. SELEZIONE CIME INVENTARIO / CERTIFICATI
+    # SELEZIONE CIME INVENTARIO / CERTIFICATI
     certs_df = load_certificates_from_db()
     line_options = ["Nessuna"]
     if not certs_df.empty and "cert_id" in certs_df.columns:
@@ -283,7 +299,7 @@ def render_tab_plans():
             desc = f"{c_id} ({c_mat} - {c_dia}mm)" if c_mat else c_id
             line_options.append(desc)
 
-    # 3. GESTIONE E RIDIMENSIONAMENTO IMMAGINE PIANETTO
+    # GESTIONE E RIDIMENSIONAMENTO IMMAGINE PIANETTO
     saved_img_path = get_station_image_path(station_sel)
 
     uploaded_image = st.file_uploader(
@@ -372,8 +388,8 @@ def render_tab_plans():
             new_row = pd.DataFrame([{
                 "comp_type": comp_type,
                 "comp_id": comp_id,
-                "pos_x": curr_x,
-                "pos_y": curr_y,
+                "pos_x": float(curr_x),
+                "pos_y": float(curr_y),
                 "line_drum_a": line_drum_a,
                 "line_drum_b": line_drum_b,
                 "line_capstan": line_capstan,
@@ -385,7 +401,7 @@ def render_tab_plans():
                 "last_inspection_note": "Inizializzazione"
             }])
 
-            # Concatenazione e aggiornamento Session
+            # Concatenazione e aggiornamento Session State
             updated_df = pd.concat([st_df, new_row], ignore_index=True)
             st.session_state.mooring_stations[station_sel] = updated_df
 
@@ -403,12 +419,10 @@ def render_tab_plans():
                 c_id_bk = assigned_line.split(" ")[0]
                 assign_line_to_slot(c_id_bk, st_code, "Cesta (Basket / Rope Locker)", f"{comp_id}")
 
-            st.success(f"Elemento {comp_id} salvato e sincronizzato con i Certificati!")
+            st.success(f"Elemento {comp_id} salvato e sincronizzato permanentemente!")
             st.rerun()
 
-    # -------------------------------------------------------------------------
-    # ISPEZIONE IBRIDA RAPIDA (ZERO SFORZO + FOTO AI)
-    # -------------------------------------------------------------------------
+    # ISPEZIONE RAPIDA
     st.markdown("---")
     st.subheader(f"🛡️ Ispezione Rapida & Controllo Stato: {station_sel}")
 
@@ -451,6 +465,14 @@ def render_tab_plans():
     )
 
     if st.button("💾 Sincronizza Tabella su DB"):
+        if not edited_df.empty:
+            if "pos_x" in edited_df.columns:
+                edited_df["pos_x"] = pd.to_numeric(edited_df["pos_x"], errors="coerce").fillna(0.0)
+            if "pos_y" in edited_df.columns:
+                edited_df["pos_y"] = pd.to_numeric(edited_df["pos_y"], errors="coerce").fillna(0.0)
+            if "wear_pct" in edited_df.columns:
+                edited_df["wear_pct"] = pd.to_numeric(edited_df["wear_pct"], errors="coerce").fillna(0).astype(int)
+
         st.session_state.mooring_stations[station_sel] = edited_df
         save_mooring_station_components(edited_df.to_dict(orient="records"), station_sel)
         st.success("Salvataggio DB eseguito!")
@@ -467,7 +489,7 @@ def render_tab_plans():
             c2.write(f"ID: `{row.get('comp_id', row.get('component_id', ''))}`")
             x_val = row.get('pos_x', row.get('x_pos', 0))
             y_val = row.get('pos_y', row.get('y_pos', 0))
-            c3.write(f"Posizione: ({int(x_val)}px, {int(y_val)}px)")
+            c3.write(f"Posizione: ({int(float(x_val))}px, {int(float(y_val))}px)")
             
             if c4.button("🗑️", key=f"del_btn_{station_sel}_{idx}"):
                 updated_df = st_df.drop(idx).reset_index(drop=True)
