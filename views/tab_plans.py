@@ -84,13 +84,13 @@ def draw_components_on_image(image: Image.Image, components_df: pd.DataFrame) ->
     if components_df is not None and not components_df.empty:
         for _, row in components_df.iterrows():
             try:
-                x = float(row.get("pos_x", 0))
-                y = float(row.get("pos_y", 0))
+                x = float(row.get("pos_x", row.get("x_pos", row.get("x", 0))))
+                y = float(row.get("pos_y", row.get("y_pos", row.get("y", 0))))
             except (ValueError, TypeError):
                 continue
 
-            c_type = str(row.get("comp_type", "WINCH"))
-            c_id = str(row.get("comp_id", ""))
+            c_type = str(row.get("comp_type", row.get("component_type", "WINCH")))
+            c_id = str(row.get("comp_id", row.get("component_id", "")))
             color = color_map.get(c_type, (0, 123, 255))
 
             # Disegna Quadrato Marcatore
@@ -341,8 +341,11 @@ def render_tab_plans():
         comp_id = st.text_input("Identificativo Componente", f"{comp_type[0]}_{len(st_df)+1}")
 
         basket_options = ["Nessuno"]
-        if not st_df.empty and "comp_type" in st_df.columns:
-            basket_options += st_df[st_df["comp_type"] == "BASKET"]["comp_id"].tolist()
+        if not st_df.empty:
+            c_type_col = "comp_type" if "comp_type" in st_df.columns else "component_type"
+            c_id_col = "comp_id" if "comp_id" in st_df.columns else "component_id"
+            if c_type_col in st_df.columns and c_id_col in st_df.columns:
+                basket_options += st_df[st_df[c_type_col] == "BASKET"][c_id_col].tolist()
 
         line_drum_a = "Nessuna"
         line_drum_b = "Nessuna"
@@ -433,8 +436,8 @@ def render_tab_plans():
         wear = int(row.get("wear_pct", 0))
         badge = "🟢" if wear < 40 else "🟡" if wear < 70 else "🔴"
         
-        c_id.write(f"**{row.get('comp_id')}**")
-        c_type.write(f"{row.get('comp_type')} (`{row.get('line_drum_a', 'Nessuna')}`)")
+        c_id.write(f"**{row.get('comp_id', row.get('component_id', ''))}**")
+        c_type.write(f"{row.get('comp_type', row.get('component_type', ''))} (`{row.get('line_drum_a', 'Nessuna')}`)")
         c_wear.write(f"{badge} Usura: **{wear}%** | {row.get('condition', 'OK')}")
 
         if c_action.button("📸 Segnala Danno", key=f"btn_ai_{station_sel}_{idx}"):
@@ -460,9 +463,11 @@ def render_tab_plans():
     if not st_df.empty:
         for idx, row in st_df.iterrows():
             c1, c2, c3, c4 = st.columns([1.5, 2, 3, 1])
-            c1.write(f"**{row.get('comp_type', '')}**")
-            c2.write(f"ID: `{row.get('comp_id', '')}`")
-            c3.write(f"Posizione: ({int(row.get('pos_x', 0))}px, {int(row.get('pos_y', 0))}px)")
+            c1.write(f"**{row.get('comp_type', row.get('component_type', ''))}**")
+            c2.write(f"ID: `{row.get('comp_id', row.get('component_id', ''))}`")
+            x_val = row.get('pos_x', row.get('x_pos', 0))
+            y_val = row.get('pos_y', row.get('y_pos', 0))
+            c3.write(f"Posizione: ({int(x_val)}px, {int(y_val)}px)")
             
             if c4.button("🗑️", key=f"del_btn_{station_sel}_{idx}"):
                 updated_df = st_df.drop(idx).reset_index(drop=True)
