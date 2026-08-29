@@ -1,12 +1,14 @@
 """
 views/tab_plans.py
-Pianetti Mooring Station con caricamento immagine corretto, persistenza DB ed eliminazione elementi.
+Pianetti Mooring Station con caricamento immagine corretto, persistenza DB,
+gestione eliminazione elementi e Ispezione Ibrida AI-Assisted integrata.
 """
 
 import os
 import pandas as pd
 import streamlit as st
 from PIL import Image, ImageDraw, ImageFont
+from datetime import date
 from streamlit_image_coordinates import streamlit_image_coordinates
 
 from database.db_manager import (
@@ -15,7 +17,48 @@ from database.db_manager import (
     get_mooring_station_components,
     save_station_image_file,
     get_station_image_path,
+    save_line_history,  # Sincronizzazione con Inventario/Storico
 )
+
+# -----------------------------------------------------------------------------
+# REFERENCE LIBRARY PER ISPEZIONE AI (ISO 2307 / CI 2001)
+# -----------------------------------------------------------------------------
+DAMAGE_REFERENCE_LIBRARY = {
+    "Abrasione Superficiale": {
+        "image_path": "assets/ref_abrasion.jpg",
+        "description": "Pelosità superficiale dovuta a sfregamento su passacavi o tamburi ruvidi.",
+        "iso_severity": "MEDIA",
+        "default_wear_impact": 20
+    },
+    "Rottura Legnoli / Capi Tranciati": {
+        "image_path": "assets/ref_strand_break.jpg",
+        "description": "Rottura di uno o più legnoli principali. Riduzione diretta di MBL.",
+        "iso_severity": "CRITICA",
+        "default_wear_impact": 50
+    },
+    "Fusione da Calore / Attrito": {
+        "image_path": "assets/ref_glazing.jpg",
+        "description": "Vetrificazione del materiale sintetico per scorrimento o carico d'impatto.",
+        "iso_severity": "ALTA",
+        "default_wear_impact": 35
+    },
+    "Degrado UV / Decolorazione": {
+        "image_path": "assets/ref_uv_damage.jpg",
+        "description": "Irrigidimento e polverizzazione delle fibre esterne per esposizione solare.",
+        "iso_severity": "LIEVE",
+        "default_wear_impact": 15
+    }
+}
+
+
+def analyze_damage_with_ai(image_file):
+    """Simula l'analisi della foto con rete neurale Computer Vision."""
+    return {
+        "damage_type": "Abrasione Superficiale",
+        "confidence": 88.5,
+        "suggested_extra_wear": 20,
+        "severity": "MEDIA"
+    }
 
 
 def draw_components_on_image(image: Image.Image, components_df: pd.DataFrame) -> Image.Image:
@@ -103,7 +146,11 @@ def load_station_data_from_db(station_name: str) -> pd.DataFrame:
                 "line_drum_b": row.get("line_drum_b", "Nessuna"),
                 "line_capstan": row.get("line_capstan", "Nessuna"),
                 "assigned_line_id": row.get("assigned_line_id", "N/D"),
-                "source_basket": row.get("source_basket", "Nessuno")
+                "source_basket": row.get("source_basket", "Nessuno"),
+                "wear_pct": int(row.get("wear_pct", 0)),
+                "condition": row.get("condition", "BUONO"),
+                "last_inspection_date": row.get("last_inspection_date", str(date.today())),
+                "last_inspection_note": row.get("last_inspection_note", "")
             })
     elif isinstance(db_data, list) and len(db_data) > 0:
         for row in db_data:
@@ -116,14 +163,105 @@ def load_station_data_from_db(station_name: str) -> pd.DataFrame:
                 "line_drum_b": row.get("line_drum_b", "Nessuna"),
                 "line_capstan": row.get("line_capstan", "Nessuna"),
                 "assigned_line_id": row.get("assigned_line_id", "N/D"),
-                "source_basket": row.get("source_basket", "Nessuno")
+                "source_basket": row.get("source_basket", "Nessuno"),
+                "wear_pct": int(row.get("wear_pct", 0)),
+                "condition": row.get("condition", "BUONO"),
+                "last_inspection_date": row.get("last_inspection_date", str(date.today())),
+                "last_inspection_note": row.get("last_inspection_note", "")
             })
 
     if records:
         return pd.DataFrame(records)
     return pd.DataFrame(
-        columns=["comp_type", "comp_id", "pos_x", "pos_y", "line_drum_a", "line_drum_b", "line_capstan", "assigned_line_id", "source_basket"]
+        columns=["comp_type", "comp_id", "pos_x", "pos_y", "line_drum_a", "line_drum_b", "line_capstan", "assigned_line_id", "source_basket", "wear_pct", "condition", "last_inspection_date", "last_inspection_note"]
     )
+
+
+def update_line_inventory_and_history(line_name: str, new_wear: int, condition: str, note: str):
+    """Sincronizza permanentemente lo stato dell'ispezione con l'inventario generale cime su DB."""
+    if not line_name or line_name == "Nessuna":
+        return
+    
+    clean_line_id = line_name.split(" ")[0]
+    lines_df = get_line_history()
+    
+    if not lines_df.empty:
+        id_col = "line_id" if "line_id" in lines_df.columns else "id"
+        if clean_line_id in lines_df[id_col].astype(str).values:
+            lines_df.loc[lines_df[id_col].astype(str) == clean_line_id, "wear_percentage"] = new_wear
+            lines_df.loc[lines_df[id_col].astype(str) == clean_line_id, "status"] = condition
+            lines_df.loc[lines_df[id_col].astype(str) == clean_line_id, "last_inspection"] = str(date.today())
+            lines_df.loc[lines_df[id_col].astype(str) == clean_line_id, "notes"] = note
+            
+            # Salvataggio su database
+            save_line_history(lines_df)
+
+
+@st.dialog("📸 Analisi Foto Danno Cima (AI + Reference Library)", width="large")
+def open_ai_inspection_dialog(row, idx, station_sel, st_df):
+    st.write(f"Ispezione rapida: **{row.get('comp_id')}** — Cima: `{row.get('line_drum_a', 'Nessuna')}`")
+    
+    img_file = st.camera_input("Scatta foto al danno sulla cima")
+    if not img_file:
+        img_file = st.file_uploader("Oppure carica foto dalla galleria", type=["jpg", "png", "jpeg"])
+
+    if img_file:
+        ai_res = analyze_damage_with_ai(img_file)
+        ref_data = DAMAGE_REFERENCE_LIBRARY.get(ai_res["damage_type"], {
+            "image_path": None, "description": "Nessuna scheda standard", "iso_severity": "N/D", "default_wear_impact": 20
+        })
+
+        st.markdown("---")
+        col_snap, col_ref = st.columns(2)
+        with col_snap:
+            st.caption("📷 Foto Scattata a Bordo")
+            st.image(Image.open(img_file), use_container_width=True)
+        with col_ref:
+            st.caption(f"📚 Catalogo Ufficiale ISO: **{ai_res['damage_type']}**")
+            if ref_data["image_path"] and os.path.exists(ref_data["image_path"]):
+                st.image(Image.open(ref_data["image_path"]), use_container_width=True)
+            else:
+                st.info(f"**Descrizione:** {ref_data['description']}\n\n**Gravità ISO:** `{ref_data['iso_severity']}`")
+
+        st.markdown("---")
+        st.write("**Conferma o Correggi Valutazione Usura Extra:**")
+        
+        if f"selected_wear_{idx}" not in st.session_state:
+            st.session_state[f"selected_wear_{idx}"] = ai_res["suggested_extra_wear"]
+
+        c_low, c_ai, c_high = st.columns(3)
+        if c_low.button("📉 Lieve (+15%)"):
+            st.session_state[f"selected_wear_{idx}"] = 15
+        if c_ai.button(f"🤖 AI Default (+{ai_res['suggested_extra_wear']}%)"):
+            st.session_state[f"selected_wear_{idx}"] = ai_res["suggested_extra_wear"]
+        if c_high.button("📈 Severo (+45%)"):
+            st.session_state[f"selected_wear_{idx}"] = 45
+
+        final_extra = st.session_state[f"selected_wear_{idx}"]
+        current_wear = int(row.get("wear_pct", 0))
+        new_total_wear = min(100, current_wear + final_extra)
+
+        st.metric("Usura Totale Calcolata", f"{new_total_wear}%", delta=f"+{final_extra}% applicati")
+
+        if st.button("💾 Conferma ed Aggiorna Tutti i Tab", type="primary", use_container_width=True):
+            st_df.loc[idx, "wear_pct"] = new_total_wear
+            st_df.loc[idx, "condition"] = "DANNEGGIATO" if new_total_wear > 60 else "USURATO"
+            st_df.loc[idx, "last_inspection_date"] = str(date.today())
+            st_df.loc[idx, "last_inspection_note"] = f"AI Danno: {ai_res['damage_type']} (+{final_extra}%)"
+
+            # 1. Salvataggio Stazione d'Ormeggio DB
+            st.session_state.mooring_stations[station_sel] = st_df
+            save_mooring_station_components(st_df.to_dict(orient="records"), station_sel)
+            
+            # 2. Sincronizzazione permanente su Inventario e Storico Cime DB
+            target_line = row.get("line_drum_a", row.get("assigned_line_id", "Nessuna"))
+            update_line_inventory_and_history(
+                target_line, new_total_wear, st_df.loc[idx, "condition"], st_df.loc[idx, "last_inspection_note"]
+            )
+
+            del st.session_state[f"selected_wear_{idx}"]
+            st.success("Dati salvati permanentemente in memoria e registrati in tutti i Tab!")
+            st.rerun()
 
 
 def render_tab_plans():
@@ -256,7 +394,11 @@ def render_tab_plans():
                 "line_drum_b": line_drum_b,
                 "line_capstan": line_capstan,
                 "assigned_line_id": assigned_line if comp_type == "BASKET" else line_drum_a,
-                "source_basket": source_basket
+                "source_basket": source_basket,
+                "wear_pct": 0,
+                "condition": "OTTIMO",
+                "last_inspection_date": str(date.today()),
+                "last_inspection_note": "Inizializzazione"
             }])
 
             st_df = pd.concat([st_df, new_row], ignore_index=True)
@@ -267,6 +409,44 @@ def render_tab_plans():
             save_mooring_station_components(db_components, station_sel)
             st.success(f"Elemento {comp_id} salvato permanentemente!")
             st.rerun()
+
+    # -------------------------------------------------------------------------
+    # ISPEZIONE IBRIDA RAPIDA (ZERO SFORZO + FOTO AI)
+    # -------------------------------------------------------------------------
+    st.markdown("---")
+    st.subheader(f"🛡️ Ispezione Rapida & Controllo Stato: {station_sel}")
+
+    col_banner, col_confirm_all = st.columns([3, 1.2])
+    with col_banner:
+        st.info("ℹ️ **Procedura Standard:** Se non ci sono anomalie visive, premi **'Conferma Tutti OK'** per validare lo stato per tutti i componenti.")
+    with col_confirm_all:
+        if st.button("✅ Conferma Tutti OK", type="primary", use_container_width=True):
+            today_str = str(date.today())
+            for idx in st_df.index:
+                st_df.loc[idx, "last_inspection_date"] = today_str
+                # Sincronizzazione automatica con Inventario Cime DB
+                target_line = st_df.loc[idx, "line_drum_a"]
+                update_line_inventory_and_history(
+                    target_line, int(st_df.loc[idx, "wear_pct"]), str(st_df.loc[idx, "condition"]), "Ispezione Standard OK"
+                )
+            
+            st.session_state.mooring_stations[station_sel] = st_df
+            save_mooring_station_components(st_df.to_dict(orient="records"), station_sel)
+            st.success("Ispezione mensile confermata e registrata in memoria!")
+            st.rerun()
+
+    st.caption("Segnala anomalie visive con foto solo sui cavi interessati:")
+    for idx, row in st_df.iterrows():
+        c_id, c_type, c_wear, c_action = st.columns([2, 2, 2.5, 1.5])
+        wear = int(row.get("wear_pct", 0))
+        badge = "🟢" if wear < 40 else "🟡" if wear < 70 else "🔴"
+        
+        c_id.write(f"**{row.get('comp_id')}**")
+        c_type.write(f"{row.get('comp_type')} (`{row.get('line_drum_a', 'Nessuna')}`)")
+        c_wear.write(f"{badge} Usura: **{wear}%** | {row.get('condition', 'OK')}")
+
+        if c_action.button("📸 Segnala Danno", key=f"btn_ai_{station_sel}_{idx}"):
+            open_ai_inspection_dialog(row, idx, station_sel, st_df)
 
     # TABELLA E SINCRONIZZAZIONE DB
     st.markdown("---")
