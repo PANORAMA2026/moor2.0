@@ -1,7 +1,7 @@
 """
 views/tab_certificate.py
-Vista per la gestione, caricamente e parsing dei certificati cavi multi-componente.
-Identifica e calcola automaticamente l'anello debole (Weak Point) per i calcoli di tensione.
+Vista per la gestione, caricamento e parsing dei certificati cavi multi-componente.
+Identifica l'anello debole (Weak Point) e permette l'associazione diretta a Mooring Station, Winch Drum e Basket.
 """
 
 import pandas as pd
@@ -44,11 +44,11 @@ def render_tab_certificate():
             st.session_state["parsed_cert_temp"] = cert_data
             st.success("✅ Parsing completato con successo!")
 
-    # VISUALIZZAZIONE COMPLETA DEI COMPONENTI ED IDENTIFICAZIONE WEAK POINT
+    # VISUALIZZAZIONE COMPONENTI, WEAK POINT E ASSOCIAZIONE POSTAZIONE
     if "parsed_cert_temp" in st.session_state:
         cd = st.session_state["parsed_cert_temp"]
 
-        # Calcolo dell'anello debole (Weak Point)
+        # Calcolo anello debole (Weak Point)
         components = {
             "Main Line": cd.get("main_mbl_tons", 0.0),
         }
@@ -57,7 +57,6 @@ def render_tab_certificate():
         if cd.get("has_tail"):
             components["Tail (Coda)"] = cd.get("tail_mbl_tons", 0.0)
 
-        # Filtra valori validi e trova il minimo
         valid_components = {k: v for k, v in components.items() if v > 0}
         weak_point_name = min(valid_components, key=valid_components.get)
         weak_point_mbl = valid_components[weak_point_name]
@@ -70,7 +69,7 @@ def render_tab_certificate():
                 f" {cd.get('manufacturer')}"
             )
 
-            # Tabella di riepilogo delle 3 parti del cavo
+            # Scomposizione 3 parti
             st.markdown("#### 🔗 Scomposizione Componenti Cavo")
             c1, c2, c3 = st.columns(3)
 
@@ -106,37 +105,78 @@ def render_tab_certificate():
                 else:
                     st.caption("Tail: Non Presente")
 
-            # BOX WEAK POINT E LIMITE OPERATIVO 55% MEG4
+            # Box Weak Point
             st.warning(
                 f"⚠️ **WEAK POINT IDENTIFICATO:** **{weak_point_name}**\n\n"
                 f"• **MBL Minimo Assieme:** **{weak_point_mbl:.2f} t**\n\n"
                 f"• **Limite Operativo MEG4 (55% MBL):** **{limite_55_mbl:.2f} t**\n\n"
-                f"*Questo è il valore critico che verrà utilizzato nei calcoli delle tensioni d'ormeggio.*"
+                f"*Valore di calcolo per le tensioni d'ormeggio.*"
             )
 
-            if st.button("💾 Salva Certificato nel Database", type="primary"):
+            # ASSOCIAZIONE MOORING STATION / WINCH / BASKET
+            st.markdown("#### ⚓ Assegnazione Postazione d'Ormeggio")
+            col_a, col_b, col_c = st.columns(3)
+
+            with col_a:
+                station = st.selectbox(
+                    "Mooring Station",
+                    [
+                        "FWD (Prora)",
+                        "AFT (Poppa)",
+                        "MID FWD (Centro Prora)",
+                        "MID AFT (Centro Poppa)",
+                    ],
+                    key="sel_station",
+                )
+
+            with col_b:
+                winch_drum = st.selectbox(
+                    "Winch Drum",
+                    [
+                        "Winch 1 (Working Drum)",
+                        "Winch 1 (Storage Drum)",
+                        "Winch 2 (Working Drum)",
+                        "Winch 2 (Storage Drum)",
+                        "Winch 3 (Working Drum)",
+                        "Winch 4 (Working Drum)",
+                    ],
+                    key="sel_winch",
+                )
+
+            with col_c:
+                basket_id = st.text_input(
+                    "Basket / Line ID", value="G1-GT1 FWD", key="sel_basket"
+                )
+
+            if st.button("💾 Salva & Associa Certificato", type="primary"):
                 record = {
                     "cert_id": cd.get("cert_id"),
+                    "line_id": basket_id,
+                    "station": station,
+                    "winch": winch_drum,
                     "manufacturer": cd.get("manufacturer"),
                     "material": cd.get("main_material"),
                     "diameter_mm": cd.get("main_diameter_mm"),
-                    "mbl_tons": weak_point_mbl,  # Salva il valore dell'anello debole per i calcoli
+                    "mbl_tons": weak_point_mbl,  # MBL dell'anello debole
+                    "mbl_55_limit": limite_55_mbl,
+                    "weak_point": weak_point_name,
                     "standard": cd.get("standard"),
                     "issue_date": "2025-12-12",
                 }
                 save_certificate_to_db(record)
                 st.session_state.certificates_db = load_certificates_from_db()
                 st.success(
-                    f"Certificato {cd.get('cert_id')} salvato! MBL operativo"
-                    f" impostato a {weak_point_mbl:.2f} t."
+                    f"Cavo {basket_id} associato a {station} - {winch_drum}! MBL"
+                    f" operativo: {weak_point_mbl:.2f} t (Limite 55%:"
+                    f" {limite_55_mbl:.2f} t)."
                 )
 
     st.divider()
 
-    # REGISTRO CERTIFICATI IN MEMORIA
-    st.subheader("📚 Registro Certificati Salvati")
+    # REGISTRO CERTIFICATI E ASSEGNAZIONI
+    st.subheader("📚 Registro Cavi & Assegnazioni Salvare")
     df_certs = load_certificates_from_db()
     if not df_certs.empty:
         st.dataframe(df_certs, use_container_width=True)
     else:
-        st.info("Nessun certificato presente nel database.")
+        st.info("Nessun cavo o certificato presente nel database.")
