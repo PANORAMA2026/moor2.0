@@ -43,6 +43,7 @@ from utils.pdf_parser import extract_text_from_pdf, parse_certificate_text
 
 # Import delle viste (Tabs)
 from views.tab_berth import render_tab_berth
+from views.tab_certificate import render_tab_certificate
 from views.tab_history import render_tab_history
 from views.tab_plans import render_tab_plans
 from views.tab_polar import render_tab_polar
@@ -50,7 +51,7 @@ from views.tab_mooring_engine import render_tab_mooring_engine
 
 # Configurazione della pagina Streamlit
 st.set_page_config(
-    page_title="OpenMooring MEG4 Pro - Carnival Panorama",
+    page_title="OpenMooring MEG4 Pro — Carnival Panorama",
     layout="wide",
 )
 
@@ -478,62 +479,7 @@ with tab_auto_engine:
 # TAB 1: CERTIFICATI CAVI (PERSISTENTE)
 # -----------------------------------------------------------------------------
 with tab_certs:
-    st.header("📜 Modulo Certificati Cavi & Drag and Drop PDF")
-    st.info(
-        "📁 **Drag & Drop Certificato:** Trascina direttamente il file PDF del"
-        " certificato del cavo."
-    )
-
-    c_col1, c_col2 = st.columns([1, 1])
-    with c_col1:
-        uploaded_pdf = st.file_uploader(
-            "Trascina qui il file PDF", type=["pdf"]
-        )
-        cert_text_to_parse = ""
-
-        if uploaded_pdf is not None:
-            st.success(f"File caricato: {uploaded_pdf.name}")
-            cert_text_to_parse = extract_text_from_pdf(uploaded_pdf)
-
-        manual_text = st.text_area(
-            "Oppure incolla qui il testo del certificato", height=100
-        )
-        if manual_text:
-            cert_text_to_parse = manual_text
-
-        if st.button("🔍 Esegui Parsing Certificato"):
-            if cert_text_to_parse:
-                parsed = parse_certificate_text(cert_text_to_parse)
-                st.success("Parsing completato!")
-                st.json(parsed)
-
-                new_cert_id = (
-                    parsed["cert_id"]
-                    or f"CERT-{len(st.session_state.certificates_db)+1}"
-                )
-                new_cert = {
-                    "cert_id": new_cert_id,
-                    "manufacturer": parsed["manufacturer"] or "Unknown",
-                    "material": parsed["material"] or "HMPE",
-                    "diameter_mm": float(parsed["diameter_mm"] or 64.0),
-                    "mbl_tons": float(parsed["mbl_tons"] or 105.0),
-                    "standard": parsed["standard"] or "MEG4",
-                    "issue_date": datetime.now().strftime("%Y-%m-%d"),
-                }
-                save_certificate_to_db(new_cert)
-                st.session_state.certificates_db = load_certificates_from_db()
-                st.success(
-                    f"Certificato {new_cert_id} salvato con successo su DB!"
-                )
-                st.rerun()
-
-    with c_col2:
-        st.subheader("📚 Database Certificati Registrati (Fisso su DB)")
-        st.dataframe(
-            st.session_state.certificates_db,
-            use_container_width=True,
-            height=280,
-        )
+    render_tab_certificate()
 
 # -----------------------------------------------------------------------------
 # TAB 2: MOORING STATIONS & PIANETTI
