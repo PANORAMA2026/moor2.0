@@ -8,7 +8,7 @@ DB_FILE_PATH = "openmooring.db"
 DB_PATH = "openmooring.db"
 
 # Offset delle piattaforme di osservazione rispetto a prua e poppa (in metri)
-OFFSET_PLATFORM_FWD_M = 25.0
+OFFSET_PLATFORM_FWD_M = 27.0
 OFFSET_PLATFORM_AFT_M = 14.0
 
 # Fattori di conversione Unità di Misura (Kilonewton e Tonnellate metriche)
