@@ -69,7 +69,7 @@ def init_db(default_lines_df: pd.DataFrame = None):
         )
     """)
 
-    # MIGRAZIONE AUTOMATICA SCHEMA: certificates (Previene OperationalError)
+    # MIGRAZIONE AUTOMATICA SCHEMA: certificates
     cursor.execute("PRAGMA table_info(certificates)")
     existing_cert_cols = [row[1] for row in cursor.fetchall()]
     for col_name, col_type in [
@@ -121,10 +121,10 @@ def init_db(default_lines_df: pd.DataFrame = None):
             line_capstan TEXT,
             assigned_line_id TEXT,
             source_basket TEXT,
-            wear_pct INTEGER,
-            condition TEXT,
-            last_inspection_date TEXT,
-            last_inspection_note TEXT,
+            wear_pct INTEGER DEFAULT 0,
+            condition TEXT DEFAULT 'BUONO',
+            last_inspection_date TEXT DEFAULT '',
+            last_inspection_note TEXT DEFAULT '',
             PRIMARY KEY (station_name, component_id)
         )
     """)
@@ -203,7 +203,7 @@ def init_db(default_lines_df: pd.DataFrame = None):
 
 
 def assign_line_to_slot(cert_id: str, station: str, storage_type: str, assigned_slot: str, winch_drum: str = "Drum A"):
-    """Sincronizza l'assegnazione di un cavo rilasciando eventuali slot precedenti, distinguendo tra Drum A e Drum B."""
+    """Sincronizza l'assegnazione di un cavo rilasciando eventuali slot precedenti."""
     init_db()
     conn = get_connection()
     cursor = conn.cursor()
@@ -225,6 +225,7 @@ def assign_line_to_slot(cert_id: str, station: str, storage_type: str, assigned_
 
 
 def get_port_mooring_setups(port_name: str) -> dict:
+    init_db()
     conn = get_connection()
     df = pd.read_sql_query(
         "SELECT * FROM port_mooring_setups WHERE port_name = ?", 
@@ -257,6 +258,7 @@ def get_port_mooring_setups(port_name: str) -> dict:
 
 
 def save_port_mooring_setup(port_name: str, setup_name: str, setup_df: pd.DataFrame, is_default: bool = False):
+    init_db()
     conn = get_connection()
     cursor = conn.cursor()
 
@@ -285,6 +287,7 @@ def save_line_history(history_df: pd.DataFrame):
     if history_df.empty:
         return
 
+    init_db()
     conn = get_connection()
     cursor = conn.cursor()
 
@@ -325,6 +328,7 @@ def save_line_history(history_df: pd.DataFrame):
 
 
 def get_line_history() -> pd.DataFrame:
+    init_db()
     conn = get_connection()
     df = pd.read_sql_query("SELECT * FROM line_life_history", conn)
     conn.close()
@@ -349,6 +353,7 @@ def get_line_history() -> pd.DataFrame:
 
 
 def save_port_bollards_to_db(port_name: str, bollards_df: pd.DataFrame):
+    init_db()
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("DELETE FROM port_bollards WHERE port_name = ?", (port_name,))
@@ -372,6 +377,7 @@ def save_port_bollards_to_db(port_name: str, bollards_df: pd.DataFrame):
 
 
 def load_port_bollards_from_db(port_name: str) -> pd.DataFrame:
+    init_db()
     conn = get_connection()
     df = pd.read_sql_query("SELECT * FROM port_bollards WHERE port_name = ?", conn, params=(port_name,))
     conn.close()
@@ -400,7 +406,6 @@ def load_port_bollards_from_db(port_name: str) -> pd.DataFrame:
 
 
 def save_certificate_to_db(cert_dict: dict):
-    """Salva il certificato supportando sia i vecchi che i nuovi campi senza fallire."""
     init_db()
     conn = get_connection()
     cursor = conn.cursor()
@@ -447,12 +452,14 @@ def load_certificates_from_db() -> pd.DataFrame:
 
 
 def save_lines_inventory_to_db(lines_df: pd.DataFrame):
+    init_db()
     conn = get_connection()
     lines_df.to_sql("lines_inventory", conn, if_exists="replace", index=False)
     conn.close()
 
 
 def load_lines_inventory_from_db() -> pd.DataFrame:
+    init_db()
     conn = get_connection()
     df = pd.read_sql_query("SELECT * FROM lines_inventory", conn)
     conn.close()
@@ -460,6 +467,7 @@ def load_lines_inventory_from_db() -> pd.DataFrame:
 
 
 def save_station_image_file(station_name: str, file_bytes: bytes, file_ext: str) -> str:
+    init_db()
     safe_name = station_name.replace(" ", "_").replace("(", "").replace(")", "").lower()
     filename = f"plan_{safe_name}{file_ext}"
     filepath = os.path.join(PLANS_DIR, filename)
@@ -480,6 +488,7 @@ def save_station_image_file(station_name: str, file_bytes: bytes, file_ext: str)
 
 
 def get_station_image_path(station_name: str) -> str:
+    init_db()
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT image_path FROM station_metadata WHERE station_name = ?", (station_name,))
@@ -492,7 +501,8 @@ def get_station_image_path(station_name: str) -> str:
 
 
 def save_mooring_station_components(components_list: list, station_name: str):
-    """Salva i componenti e le cime della stazione mantenendo la compatibilità con tab_plans.py e lo schema DB."""
+    """Garantisce la creazione delle tabelle prima di cancellare ed inserire i componenti."""
+    init_db()
     conn = get_connection()
     cursor = conn.cursor()
     
@@ -536,11 +546,11 @@ def save_mooring_station_components(components_list: list, station_name: str):
 
 
 def get_mooring_station_components(station_name: str) -> pd.DataFrame:
-    """Carica i componenti adattandosi sia alla vecchia che alla nuova struttura della tabella."""
+    """Carica i componenti con verifica preventiva della tabella e mappatura dinamica."""
+    init_db()
     conn = get_connection()
     cursor = conn.cursor()
     
-    # Controlla le colonne presenti nella tabella
     cursor.execute("PRAGMA table_info(station_components)")
     cols = [row[1] for row in cursor.fetchall()]
     conn.close()
@@ -548,7 +558,6 @@ def get_mooring_station_components(station_name: str) -> pd.DataFrame:
     if not cols:
         return pd.DataFrame()
 
-    # Mappatura dinamica in base alle colonne esistenti
     slot_col = "component_id" if "component_id" in cols else "slot_id"
     type_col = "component_type" if "component_type" in cols else "comp_type"
     
@@ -586,6 +595,7 @@ def get_mooring_station_components(station_name: str) -> pd.DataFrame:
 
 
 def log_mooring_session(results_df: pd.DataFrame, port_name: str):
+    init_db()
     conn = get_connection()
     cursor = conn.cursor()
     for _, r in results_df.iterrows():
