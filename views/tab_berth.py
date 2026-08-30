@@ -2,7 +2,7 @@
 views/tab_berth.py
 Gestione layout banchina separata in due stazioni (Prua e Poppa).
 Calcolo coordinate 3D (con Azimut), calcolo rigidezza con pretensione e passaggio dati allo State.
-Modello 3D da file CAD (.glb) con rotazione e scaling corretto, e selezione murata d'ormeggio.
+Modello 3D da file CAD (.glb) allineato alongside e selezione murata d'ormeggio.
 """
 
 import os
@@ -64,7 +64,7 @@ def calculate_bollard_coordinates(
 def generate_detailed_3d_ship(ship_dict, offset_fugro: float = 0.0):
     """
     Carica il modello CAD 3D .glb da asset/carnivalpanorama.glb,
-    applica le rotazioni e scala le dimensioni mantenendo la geometria coerente.
+    applica le rotazioni corrette per adagiarla alongside su Z=0 e X=LOA.
     """
     loa = ship_dict.get("LOA", 323.44)
     beam = ship_dict.get("Beam", 37.20)
@@ -84,28 +84,29 @@ def generate_detailed_3d_ship(ship_dict, offset_fugro: float = 0.0):
             else:
                 mesh = loaded
 
-            # 1. Rotazione per orientare la nave: X = Lunghezza, Y = Larghezza, Z = Altezza
+            # 1. Orientamento Corretto AlongSide:
+            # Rotazione attorno a Y per sdraiarla da verticale a orizzontale
+            Ry = trimesh.transformations.rotation_matrix(np.radians(-90), [0, 1, 0])
             Rz = trimesh.transformations.rotation_matrix(np.radians(90), [0, 0, 1])
-            Rx = trimesh.transformations.rotation_matrix(np.radians(90), [1, 0, 0])
             
+            mesh.apply_transform(Ry)
             mesh.apply_transform(Rz)
-            mesh.apply_transform(Rx)
 
-            # 2. Ricalcolo bounding box e dimensioni sulla mesh ruotata
+            # 2. Ricalcolo bounding box e dimensioni sulla mesh orientata
             extents = mesh.extents
             bounds = mesh.bounds
 
-            # 3. Scaling corretto e coerente per ciascun asse
+            # 3. Scaling controllato
             scale_x = loa / extents[0] if extents[0] != 0 else 1.0
             scale_y = beam / extents[1] if extents[1] != 0 else 1.0
-            scale_z = scale_x  # Mantiene la proporzione verticale reale
+            scale_z = scale_y  # Mantiene proporzioni di altezza corrette rispetto alla larghezza
 
             vertices = mesh.vertices.copy()
             vertices[:, 0] = vertices[:, 0] * scale_x
             vertices[:, 1] = vertices[:, 1] * scale_y
             vertices[:, 2] = vertices[:, 2] * scale_z
 
-            # 4. Centratura longitudinale (Midship X=0) e offset Z (Chiglia a Z=0)
+            # 4. Centratura longitudinale e allineamento linea di galleggiamento a Z=0
             x_center = ((bounds[0][0] + bounds[1][0]) / 2.0) * scale_x
             z_min = bounds[0][2] * scale_z
 
