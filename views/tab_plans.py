@@ -235,7 +235,7 @@ def render_tab_plans():
 
     if saved_img_path and os.path.exists(saved_img_path):
         raw_img = Image.open(saved_img_path)
-        st.image(raw_img, caption=f"Orientamento Visivo — {station_sel}", use_container_width=True)
+        st.image(raw_img, caption=f"Orientamento Visivo — {station_sel}", width=500)
     else:
         st.info("ℹ️ Nessuna immagine caricata per questa stazione. Carica un file sopra per orientamento visivo.")
 
