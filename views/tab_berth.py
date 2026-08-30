@@ -6,6 +6,7 @@ Modello 3D da file CAD (.glb) caricato da cartella asset/.
 """
 
 import os
+from pathlib import Path
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
@@ -57,20 +58,23 @@ def calculate_bollard_coordinates(
 def generate_detailed_3d_ship(ship_dict, offset_fugro: float = 0.0):
     """
     Carica il modello CAD 3D .glb da asset/carnivalpanorama.glb
-    e lo adatta alle dimensioni reali LOA e Beam della nave.
+    utilizzando un percorso assoluto e mostrando eventuali errori di parsing.
     """
     loa = ship_dict.get("LOA", 323.44)
     beam = ship_dict.get("Beam", 37.20)
     bridge_bow = ship_dict.get("Bridge_To_Bow", 39.50)
     bridge_eye_h = ship_dict.get("Bridge_Eye_Height", 26.40)
 
-    mesh_path = os.path.join("asset", "carnivalpanorama.glb")
+    # Percorso assoluto sicuro rispetto alla posizione della cartella views/
+    base_dir = Path(__file__).resolve().parent.parent
+    mesh_path = base_dir / "asset" / "carnivalpanorama.glb"
+
     traces = []
 
-    if os.path.exists(mesh_path):
+    if mesh_path.exists():
         try:
-            # Carica il file GLB esportando la mesh combinata
-            loaded = trimesh.load(mesh_path, force="mesh")
+            # Carica la scena o mesh con trimesh
+            loaded = trimesh.load(str(mesh_path), force="mesh")
             if isinstance(loaded, trimesh.Scene):
                 mesh = loaded.dump(concatenate=True)
             else:
@@ -81,9 +85,9 @@ def generate_detailed_3d_ship(ship_dict, offset_fugro: float = 0.0):
             bounds = mesh.bounds
 
             # Scaling matriciale su LOA e Beam reali
-            scale_x = loa / extents[0]
-            scale_y = beam / extents[1]
-            scale_z = scale_x  # Mantiene proporzioni su Z
+            scale_x = loa / extents[0] if extents[0] != 0 else 1.0
+            scale_y = beam / extents[1] if extents[1] != 0 else 1.0
+            scale_z = scale_x
 
             vertices = mesh.vertices * [scale_x, scale_y, scale_z]
 
@@ -107,7 +111,9 @@ def generate_detailed_3d_ship(ship_dict, offset_fugro: float = 0.0):
                 )
             )
         except Exception as e:
-            st.warning(f"Errore caricamento modello 3D (.glb): {e}")
+            st.error(f"⚠️ Errore caricamento modello 3D GLB: {e}")
+    else:
+        st.error(f"⚠️ File 3D non trovato nel percorso: {mesh_path}")
 
     # Alette di Plancia
     bridge_x = (loa / 2.0 - bridge_bow) + offset_fugro
