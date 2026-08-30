@@ -492,7 +492,7 @@ def get_station_image_path(station_name: str) -> str:
 
 
 def save_mooring_station_components(components_list: list, station_name: str):
-    """Salva i componenti della stazione gestendo la mappatura flessibile dei campi del DB."""
+    """Salva i componenti e le cime della stazione mantenendo la compatibilità con tab_plans.py e lo schema DB."""
     conn = get_connection()
     cursor = conn.cursor()
     
@@ -506,23 +506,18 @@ def save_mooring_station_components(components_list: list, station_name: str):
     cursor.execute("DELETE FROM station_components WHERE station_name = ?", (station_name,))
 
     for item in components_list:
-        comp_id = str(item.get("comp_id", item.get("component_id", item.get("id", "ELEMENTO"))))
-        comp_type = str(item.get("comp_type", item.get("component_type", item.get("type", "WINCH"))))
+        comp_id = str(item.get("slot_id", item.get("comp_id", item.get("component_id", "SLOT"))))
+        comp_type = str(item.get("comp_type", item.get("component_type", "WINCH")))
         
         pos_x = float(item.get("pos_x", item.get("x_pos", item.get("x", 0.0))))
         pos_y = float(item.get("pos_y", item.get("y_pos", item.get("y", 0.0))))
         
-        line_id = str(item.get("line_id", "N/D"))
-        line_drum_a = str(item.get("line_drum_a", "Nessuna"))
-        line_drum_b = str(item.get("line_drum_b", "Nessuna"))
-        line_capstan = str(item.get("line_capstan", "Nessuna"))
-        assigned_line_id = str(item.get("assigned_line_id", "N/D"))
-        source_basket = str(item.get("source_basket", "Nessuno"))
+        line_assigned = str(item.get("assigned_line", item.get("line_drum_a", item.get("line_id", "Nessuna"))))
         
-        wear_pct = int(item.get("wear_pct", 0))
-        condition = str(item.get("condition", "BUONO"))
-        last_insp_date = str(item.get("last_inspection_date", ""))
-        last_insp_note = str(item.get("last_inspection_note", ""))
+        wear_pct = int(item.get("wear_pct", item.get("wear_percentage", 0)))
+        condition = str(item.get("condition", item.get("status", "BUONO")))
+        last_insp_date = str(item.get("last_inspection_date", item.get("last_inspection", "")))
+        last_insp_note = str(item.get("last_inspection_note", item.get("notes", "")))
 
         cursor.execute("""
             INSERT INTO station_components (
@@ -531,8 +526,8 @@ def save_mooring_station_components(components_list: list, station_name: str):
                 wear_pct, condition, last_inspection_date, last_inspection_note
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
-            station_name, comp_id, comp_type, pos_x, pos_y, line_id,
-            line_drum_a, line_drum_b, line_capstan, assigned_line_id, source_basket,
+            station_name, comp_id, comp_type, pos_x, pos_y, line_assigned,
+            line_assigned, "Nessuna", "Nessuna", line_assigned, "Nessuno",
             wear_pct, condition, last_insp_date, last_insp_note
         ))
 
@@ -541,8 +536,21 @@ def save_mooring_station_components(components_list: list, station_name: str):
 
 
 def get_mooring_station_components(station_name: str) -> pd.DataFrame:
+    """Carica i componenti aliasando le colonne per farle coincidere con l'interfaccia di tab_plans.py."""
     conn = get_connection()
-    df = pd.read_sql_query("SELECT * FROM station_components WHERE station_name = ?", conn, params=(station_name,))
+    query = """
+        SELECT 
+            component_id AS slot_id,
+            component_type AS comp_type,
+            line_drum_a AS assigned_line,
+            wear_pct,
+            condition,
+            last_inspection_date,
+            last_inspection_note
+        FROM station_components 
+        WHERE station_name = ?
+    """
+    df = pd.read_sql_query(query, conn, params=(station_name,))
     conn.close()
     return df
 
