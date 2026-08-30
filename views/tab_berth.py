@@ -2,7 +2,7 @@
 views/tab_berth.py
 Gestione layout banchina separata in due stazioni (Prua e Poppa).
 Calcolo coordinate 3D (con Azimut), calcolo rigidezza con pretensione e passaggio dati allo State.
-Modello 3D da file CAD (.glb) allineato alongside e selezione murata d'ormeggio.
+Modello 3D da file CAD (.glb) allineato e scalato in modo deterministico, con selezione murata d'ormeggio.
 """
 
 import os
@@ -64,7 +64,7 @@ def calculate_bollard_coordinates(
 def generate_detailed_3d_ship(ship_dict, offset_fugro: float = 0.0):
     """
     Carica il modello CAD 3D .glb da asset/carnivalpanorama.glb,
-    applica le rotazioni corrette per adagiarla alongside su Z=0 e X=LOA.
+    allinea e scala la mesh in maniera deterministica per posizionarla alongside.
     """
     loa = ship_dict.get("LOA", 323.44)
     beam = ship_dict.get("Beam", 37.20)
@@ -84,29 +84,39 @@ def generate_detailed_3d_ship(ship_dict, offset_fugro: float = 0.0):
             else:
                 mesh = loaded
 
-            # 1. Orientamento Corretto AlongSide:
-            # Rotazione attorno a Y per sdraiarla da verticale a orizzontale
-            Ry = trimesh.transformations.rotation_matrix(np.radians(-90), [0, 1, 0])
-            Rz = trimesh.transformations.rotation_matrix(np.radians(90), [0, 0, 1])
+            # 1. Identifica gli assi originali del file CAD in base alle estensioni reali
+            orig_extents = mesh.extents
+            # Ordina gli indici delle dimensioni dal più grande al più piccolo (0: LOA, 1: Beam, 2: Height)
+            axis_order = np.argsort(orig_extents)[::-1] 
             
-            mesh.apply_transform(Ry)
-            mesh.apply_transform(Rz)
+            idx_loa = axis_order[0]
+            idx_beam = axis_order[1]
+            idx_h = axis_order[2]
 
-            # 2. Ricalcolo bounding box e dimensioni sulla mesh orientata
+            # 2. Costruisci la matrice di riordinamento rigido degli assi (X=LOA, Y=Beam, Z=Height)
+            R_align = np.zeros((4, 4))
+            R_align[0, idx_loa] = 1.0
+            R_align[1, idx_beam] = 1.0
+            R_align[2, idx_h] = 1.0
+            R_align[3, 3] = 1.0
+
+            mesh.apply_transform(R_align)
+
+            # 3. Ricalcola i limiti post-allineamento
             extents = mesh.extents
             bounds = mesh.bounds
 
-            # 3. Scaling controllato
+            # 4. Scaling proporzionale e coerente
             scale_x = loa / extents[0] if extents[0] != 0 else 1.0
             scale_y = beam / extents[1] if extents[1] != 0 else 1.0
-            scale_z = scale_y  # Mantiene proporzioni di altezza corrette rispetto alla larghezza
+            scale_z = scale_y  # Mantiene la proporzione dell'altezza rispetto al baglio massimo
 
             vertices = mesh.vertices.copy()
             vertices[:, 0] = vertices[:, 0] * scale_x
             vertices[:, 1] = vertices[:, 1] * scale_y
             vertices[:, 2] = vertices[:, 2] * scale_z
 
-            # 4. Centratura longitudinale e allineamento linea di galleggiamento a Z=0
+            # 5. Centratura X=0 (Centro nave) e allineamento linea di galleggiamento Z=0
             x_center = ((bounds[0][0] + bounds[1][0]) / 2.0) * scale_x
             z_min = bounds[0][2] * scale_z
 
