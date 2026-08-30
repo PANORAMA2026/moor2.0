@@ -2,13 +2,15 @@
 views/tab_berth.py
 Gestione layout banchina separata in due stazioni (Prua e Poppa).
 Calcolo coordinate 3D (con Azimut), calcolo rigidezza con pretensione e passaggio dati allo State.
-Modello 3D parametrico continuo per profilo classe Carnival Panorama.
+Modello 3D da file CAD (.glb) caricato da cartella asset/.
 """
 
+import os
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+import trimesh
 
 try:
     from core.line_mechanics import calculate_line_geometry, solve_line_tensions_3d
@@ -54,119 +56,62 @@ def calculate_bollard_coordinates(
 
 def generate_detailed_3d_ship(ship_dict, offset_fugro: float = 0.0):
     """
-    Genera un modello 3D parametrico continuo per navi da crociera (classe Carnival Panorama).
-    Utilizza superfici parametriche per evitare difetti di triangolazione Mesh.
+    Carica il modello CAD 3D .glb da asset/carnivalpanorama.glb
+    e lo adatta alle dimensioni reali LOA e Beam della nave.
     """
     loa = ship_dict.get("LOA", 323.44)
     beam = ship_dict.get("Beam", 37.20)
-    draft = ship_dict.get("Draft", 8.25)
-    freeboard = ship_dict.get("Freeboard", 2.65)
     bridge_bow = ship_dict.get("Bridge_To_Bow", 39.50)
     bridge_eye_h = ship_dict.get("Bridge_Eye_Height", 26.40)
 
-    loa_half = loa / 2.0
-    beam_half = beam / 2.0
-
+    mesh_path = os.path.join("asset", "carnivalpanorama.glb")
     traces = []
 
-    # -------------------------------------------------------------------------
-    # 1. SCAFO CONTINUO (Surface Parametrica)
-    # -------------------------------------------------------------------------
-    u = np.linspace(-loa_half, loa_half, 60)  # Lunghezza X
-    v = np.linspace(-1, 1, 30)                # Larghezza Y
+    if os.path.exists(mesh_path):
+        try:
+            # Carica il file GLB esportando la mesh combinata
+            loaded = trimesh.load(mesh_path, force="mesh")
+            if isinstance(loaded, trimesh.Scene):
+                mesh = loaded.dump(concatenate=True)
+            else:
+                mesh = loaded
 
-    U, V = np.meshgrid(u, v)
+            # Dimensioni e Bounding Box originali
+            extents = mesh.extents
+            bounds = mesh.bounds
 
-    # Profilo larghezza lungo la nave (affusolato a prua e poppa)
-    width_factor = np.ones_like(U)
-    bow_mask = U > (loa_half * 0.4)
-    stern_mask = U < (-loa_half * 0.7)
+            # Scaling matriciale su LOA e Beam reali
+            scale_x = loa / extents[0]
+            scale_y = beam / extents[1]
+            scale_z = scale_x  # Mantiene proporzioni su Z
 
-    # Prua affilata
-    width_factor[bow_mask] = np.cos(
-        ((U[bow_mask] - loa_half * 0.4) / (loa_half * 0.6)) * (np.pi / 2)
-    )
-    # Poppa leggermente arrotondata
-    width_factor[stern_mask] = 1.0 - 0.25 * (
-        ((-loa_half * 0.7) - U[stern_mask]) / (loa_half * 0.3)
-    ) ** 2
+            vertices = mesh.vertices * [scale_x, scale_y, scale_z]
 
-    X_hull = U + offset_fugro
-    Y_hull = V * beam_half * width_factor
-    Z_deck = np.ones_like(U) * freeboard
+            # Centratura su Midship (X=0) + Offset FUGRO
+            x_center = ((bounds[0][0] + bounds[1][0]) / 2.0) * scale_x
+            vertices[:, 0] = (vertices[:, 0] - x_center) + offset_fugro
 
-    # Superficie Coperta Scafo
-    traces.append(
-        go.Surface(
-            x=X_hull,
-            y=Y_hull,
-            z=Z_deck,
-            colorscale=[[0, "navy"], [1, "navy"]],
-            showscale=False,
-            name="Coperta Scafo",
-            hoverinfo="skip",
-        )
-    )
+            traces.append(
+                go.Mesh3d(
+                    x=vertices[:, 0],
+                    y=vertices[:, 1],
+                    z=vertices[:, 2],
+                    i=mesh.faces[:, 0],
+                    j=mesh.faces[:, 1],
+                    k=mesh.faces[:, 2],
+                    color="gainsboro",
+                    flatshading=True,
+                    opacity=0.95,
+                    name=ship_dict.get("Name", "Carnival Panorama"),
+                    hoverinfo="skip",
+                )
+            )
+        except Exception as e:
+            st.warning(f"Errore caricamento modello 3D (.glb): {e}")
 
-    # -------------------------------------------------------------------------
-    # 2. SOVRASTRUTTURA PULITA E SMUSSATA (Blocco Unico Decks)
-    # -------------------------------------------------------------------------
-    super_length_fwd = loa_half * 0.60
-    super_length_aft = -loa_half * 0.82
-
-    u_s = np.linspace(super_length_aft, super_length_fwd, 40)
-    v_s = np.linspace(-beam_half * 0.88, beam_half * 0.88, 20)
-    U_S, V_S = np.meshgrid(u_s, v_s)
-
-    # Arrotondamento frontale sovrastruttura
-    s_bow = U_S > (super_length_fwd * 0.6)
-    s_factor = np.ones_like(U_S)
-    s_factor[s_bow] = np.cos(
-        ((U_S[s_bow] - super_length_fwd * 0.6) / (super_length_fwd * 0.4))
-        * (np.pi / 2.2)
-    )
-
-    X_super = U_S + offset_fugro
-    Y_super = V_S * s_factor
-    Z_super = np.ones_like(U_S) * (freeboard + 28.0)  # Altezza sovrastruttura ~28m
-
-    traces.append(
-        go.Surface(
-            x=X_super,
-            y=Y_super,
-            z=Z_super,
-            colorscale=[[0, "whitesmoke"], [1, "whitesmoke"]],
-            showscale=False,
-            name="Sovrastruttura",
-            hoverinfo="skip",
-        )
-    )
-
-    # -------------------------------------------------------------------------
-    # 3. FUMAIOLO STILIZZATO CARNIVAL
-    # -------------------------------------------------------------------------
-    f_x = -loa_half * 0.15 + offset_fugro
-    f_z_base = freeboard + 28.0
-
-    traces.append(
-        go.Scatter3d(
-            x=[f_x, f_x],
-            y=[0, 0],
-            z=[f_z_base, f_z_base + 10.0],
-            mode="lines+markers",
-            line=dict(color="crimson", width=14),
-            marker=dict(size=8, color="crimson"),
-            name="Fumaiolo",
-            hoverinfo="skip",
-        )
-    )
-
-    # -------------------------------------------------------------------------
-    # 4. PLANCIA DI COMANDO (Bridge Wings)
-    # -------------------------------------------------------------------------
-    bridge_x = (loa_half - bridge_bow) + offset_fugro
+    # Alette di Plancia
+    bridge_x = (loa / 2.0 - bridge_bow) + offset_fugro
     wing_y = ship_dict.get("Beam_Max", 49.40) / 2.0
-
     traces.append(
         go.Scatter3d(
             x=[bridge_x, bridge_x],
