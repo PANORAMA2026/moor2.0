@@ -2,7 +2,7 @@
 views/tab_berth.py
 Gestione layout banchina separata in due stazioni (Prua e Poppa).
 Calcolo coordinate 3D (con Azimut), calcolo rigidezza con pretensione e passaggio dati allo State.
-Modello 3D personalizzato per profilo classe Carnival Panorama.
+Modello 3D parametrico continuo per profilo classe Carnival Panorama.
 """
 
 import numpy as np
@@ -54,173 +54,129 @@ def calculate_bollard_coordinates(
 
 def generate_detailed_3d_ship(ship_dict, offset_fugro: float = 0.0):
     """
-    Genera un modello 3D volumetrico avanzato specifico per profilatura tipo Carnival Panorama.
+    Genera un modello 3D parametrico continuo per navi da crociera (classe Carnival Panorama).
+    Utilizza superfici parametriche per evitare difetti di triangolazione Mesh.
     """
     loa = ship_dict.get("LOA", 323.44)
-    beam_hull = ship_dict.get("Beam", 37.20)
-    beam_max = ship_dict.get("Beam_Max", 49.40)
+    beam = ship_dict.get("Beam", 37.20)
     draft = ship_dict.get("Draft", 8.25)
     freeboard = ship_dict.get("Freeboard", 2.65)
     bridge_bow = ship_dict.get("Bridge_To_Bow", 39.50)
     bridge_eye_h = ship_dict.get("Bridge_Eye_Height", 26.40)
 
     loa_half = loa / 2.0
-    beam_half = beam_hull / 2.0
-    deck_z = freeboard
-    bottom_z = -draft
+    beam_half = beam / 2.0
 
     traces = []
 
     # -------------------------------------------------------------------------
-    # 1. SCAFO IDRODINAMICO (Prua Affilata + Bulbo + Poppa Transom)
+    # 1. SCAFO CONTINUO (Surface Parametrica)
     # -------------------------------------------------------------------------
-    # Punti vertici dello scafo: Poppa (SX/DX), Flanco (SX/DX), Prua (Punta), Bulbo
-    x_hull_top = np.array([
-        -loa_half, -loa_half,                 # Poppa Bassa/Alta (Stern)
-        loa_half * 0.5, loa_half * 0.5,       # Centro Flanco
-        loa_half * 0.88, loa_half * 0.88,     # Raccordo Prua
-        loa_half                               # Cresta di Prua (Bow tip)
-    ]) + offset_fugro
+    u = np.linspace(-loa_half, loa_half, 60)  # Lunghezza X
+    v = np.linspace(-1, 1, 30)                # Larghezza Y
 
-    y_hull_top = [
-        -beam_half, beam_half,
-        -beam_half, beam_half,
-        -beam_half * 0.6, beam_half * 0.6,
-        0.0
-    ]
-    z_hull_top = [deck_z] * 7
+    U, V = np.meshgrid(u, v)
 
-    x_hull_bot = np.array([
-        -loa_half * 0.95, -loa_half * 0.95,
-        loa_half * 0.45, loa_half * 0.45,
-        loa_half * 0.82, loa_half * 0.82,
-        loa_half * 0.96                        # Bulbo sotto galleggiamento
-    ]) + offset_fugro
+    # Profilo larghezza lungo la nave (affusolato a prua e poppa)
+    width_factor = np.ones_like(U)
+    bow_mask = U > (loa_half * 0.4)
+    stern_mask = U < (-loa_half * 0.7)
 
-    y_hull_bot = [
-        -beam_half * 0.8, beam_half * 0.8,
-        -beam_half * 0.8, beam_half * 0.8,
-        -beam_half * 0.4, beam_half * 0.4,
-        0.0
-    ]
-    z_hull_bot = [bottom_z] * 6 + [bottom_z * 0.3]
+    # Prua affilata
+    width_factor[bow_mask] = np.cos(
+        ((U[bow_mask] - loa_half * 0.4) / (loa_half * 0.6)) * (np.pi / 2)
+    )
+    # Poppa leggermente arrotondata
+    width_factor[stern_mask] = 1.0 - 0.25 * (
+        ((-loa_half * 0.7) - U[stern_mask]) / (loa_half * 0.3)
+    ) ** 2
 
-    x_v = np.concatenate([x_hull_top, x_hull_bot])
-    y_v = y_hull_top + y_hull_bot
-    z_v = z_hull_top + z_hull_bot
+    X_hull = U + offset_fugro
+    Y_hull = V * beam_half * width_factor
+    Z_deck = np.ones_like(U) * freeboard
 
-    # Facce per chiusura solido scafo
-    i_faces = [0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 0, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 0, 1]
-    j_faces = [1, 7, 2, 8, 3, 9, 4, 10, 5, 11, 6, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 2, 3]
-    k_faces = [7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 7, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 8, 9]
-
+    # Superficie Coperta Scafo
     traces.append(
-        go.Mesh3d(
-            x=x_v,
-            y=y_v,
-            z=z_v,
-            i=i_faces,
-            j=j_faces,
-            k=k_faces,
-            color="navy",
-            opacity=0.90,
-            name="Scafo Carnival Panorama",
+        go.Surface(
+            x=X_hull,
+            y=Y_hull,
+            z=Z_deck,
+            colorscale=[[0, "navy"], [1, "navy"]],
+            showscale=False,
+            name="Coperta Scafo",
+            hoverinfo="skip",
         )
     )
 
     # -------------------------------------------------------------------------
-    # 2. SOVRASTRUTTURA A PIÙ LIVELLI (Ponti Passeggeri & Balconate)
+    # 2. SOVRASTRUTTURA PULITA E SMUSSATA (Blocco Unico Decks)
     # -------------------------------------------------------------------------
-    # Blocco 1: Sovrastruttura Bassa (Ponti Promenade/Passeggeri)
-    x_s1 = np.array([
-        -loa_half * 0.88, loa_half * 0.65, loa_half * 0.65, -loa_half * 0.88,
-        -loa_half * 0.88, loa_half * 0.65, loa_half * 0.65, -loa_half * 0.88
-    ]) + offset_fugro
-    y_s1 = [
-        -beam_half * 0.92, -beam_half * 0.92, beam_half * 0.92, beam_half * 0.92,
-        -beam_half * 0.92, -beam_half * 0.92, beam_half * 0.92, beam_half * 0.92
-    ]
-    z_s1 = [deck_z] * 4 + [deck_z + 18.0] * 4
+    super_length_fwd = loa_half * 0.60
+    super_length_aft = -loa_half * 0.82
 
-    traces.append(
-        go.Mesh3d(
-            x=x_s1, y=y_s1, z=z_s1,
-            i=[0, 0, 0, 1, 2, 3, 4, 4, 0, 1, 2, 3],
-            j=[1, 2, 4, 5, 6, 7, 5, 6, 3, 2, 6, 7],
-            k=[2, 3, 5, 6, 7, 4, 6, 7, 4, 5, 1, 0],
-            color="white",
-            opacity=0.85,
-            name="Ponti Passeggeri",
-        )
+    u_s = np.linspace(super_length_aft, super_length_fwd, 40)
+    v_s = np.linspace(-beam_half * 0.88, beam_half * 0.88, 20)
+    U_S, V_S = np.meshgrid(u_s, v_s)
+
+    # Arrotondamento frontale sovrastruttura
+    s_bow = U_S > (super_length_fwd * 0.6)
+    s_factor = np.ones_like(U_S)
+    s_factor[s_bow] = np.cos(
+        ((U_S[s_bow] - super_length_fwd * 0.6) / (super_length_fwd * 0.4))
+        * (np.pi / 2.2)
     )
 
-    # Blocco 2: Sovrastruttura Alta / Lido Deck
-    x_s2 = np.array([
-        -loa_half * 0.75, loa_half * 0.50, loa_half * 0.50, -loa_half * 0.75,
-        -loa_half * 0.75, loa_half * 0.50, loa_half * 0.50, -loa_half * 0.75
-    ]) + offset_fugro
-    y_s2 = [
-        -beam_half * 0.82, -beam_half * 0.82, beam_half * 0.82, beam_half * 0.82,
-        -beam_half * 0.82, -beam_half * 0.82, beam_half * 0.82, beam_half * 0.82
-    ]
-    z_s2 = [deck_z + 18.0] * 4 + [deck_z + 32.0] * 4
+    X_super = U_S + offset_fugro
+    Y_super = V_S * s_factor
+    Z_super = np.ones_like(U_S) * (freeboard + 28.0)  # Altezza sovrastruttura ~28m
 
     traces.append(
-        go.Mesh3d(
-            x=x_s2, y=y_s2, z=z_s2,
-            i=[0, 0, 0, 1, 2, 3, 4, 4, 0, 1, 2, 3],
-            j=[1, 2, 4, 5, 6, 7, 5, 6, 3, 2, 6, 7],
-            k=[2, 3, 5, 6, 7, 4, 6, 7, 4, 5, 1, 0],
-            color="whitesmoke",
-            opacity=0.80,
-            name="Lido & Upper Decks",
+        go.Surface(
+            x=X_super,
+            y=Y_super,
+            z=Z_super,
+            colorscale=[[0, "whitesmoke"], [1, "whitesmoke"]],
+            showscale=False,
+            name="Sovrastruttura",
+            hoverinfo="skip",
         )
     )
 
     # -------------------------------------------------------------------------
-    # 3. FUMAIOLO CARNIVAL ("Whale-Tail Funnel")
+    # 3. FUMAIOLO STILIZZATO CARNIVAL
     # -------------------------------------------------------------------------
-    funnel_x_center = -loa_half * 0.10 + offset_fugro
-    funnel_z_base = deck_z + 32.0
-    funnel_z_top = funnel_z_base + 12.0
-
-    # Base e Ali fumaiolo
-    x_fn = [
-        funnel_x_center - 4, funnel_x_center + 4, funnel_x_center + 4, funnel_x_center - 4,
-        funnel_x_center - 6, funnel_x_center + 6, funnel_x_center + 6, funnel_x_center - 6
-    ]
-    y_fn = [
-        -3.0, -3.0, 3.0, 3.0,
-        -12.0, -12.0, 12.0, 12.0  # Estensione laterale "Coda di Balena"
-    ]
-    z_fn = [funnel_z_base] * 4 + [funnel_z_top] * 4
+    f_x = -loa_half * 0.15 + offset_fugro
+    f_z_base = freeboard + 28.0
 
     traces.append(
-        go.Mesh3d(
-            x=x_fn, y=y_fn, z=z_fn,
-            i=[0, 0, 0, 1, 2, 3, 4, 4, 0, 1, 2, 3],
-            j=[1, 2, 4, 5, 6, 7, 5, 6, 3, 2, 6, 7],
-            k=[2, 3, 5, 6, 7, 4, 6, 7, 4, 5, 1, 0],
-            color="crimson",
-            opacity=0.95,
-            name="Fumaiolo Carnival",
+        go.Scatter3d(
+            x=[f_x, f_x],
+            y=[0, 0],
+            z=[f_z_base, f_z_base + 10.0],
+            mode="lines+markers",
+            line=dict(color="crimson", width=14),
+            marker=dict(size=8, color="crimson"),
+            name="Fumaiolo",
+            hoverinfo="skip",
         )
     )
 
     # -------------------------------------------------------------------------
-    # 4. PLANCIA DI COMANDO CON ALETTE DI MANOVRA (Bridge Wings)
+    # 4. PLANCIA DI COMANDO (Bridge Wings)
     # -------------------------------------------------------------------------
     bridge_x = (loa_half - bridge_bow) + offset_fugro
-    wing_y = beam_max / 2.0
+    wing_y = ship_dict.get("Beam_Max", 49.40) / 2.0
+
     traces.append(
         go.Scatter3d(
             x=[bridge_x, bridge_x],
             y=[-wing_y, wing_y],
             z=[bridge_eye_h, bridge_eye_h],
             mode="lines+markers",
-            line=dict(color="red", width=9),
-            marker=dict(size=4, color="darkred"),
-            name=f"Plancia Comando ({beam_max}m)",
+            line=dict(color="red", width=8),
+            marker=dict(size=5, color="darkred"),
+            name="Alette di Plancia",
+            hoverinfo="skip",
         )
     )
 
@@ -228,7 +184,7 @@ def generate_detailed_3d_ship(ship_dict, offset_fugro: float = 0.0):
 
 
 def render_tab_berth(selected_port, ship_dict):
-    st.header(f"MAPPA BANCHINA & BITTE — {selected_port}")
+    st.header(f"🗺️ Layout Banchina — {selected_port}")
 
     offset_fugro = float(st.session_state.get("offset_fugro_m", 0.0))
     st.caption(
