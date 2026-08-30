@@ -405,7 +405,7 @@ def load_port_bollards_from_db(port_name: str) -> pd.DataFrame:
 
 
 def save_certificate_to_db(cert_dict: dict):
-    """Salva o aggiorna un certificato nel database SQLite in modo atomico."""
+    """Salva o aggiorna un certificato nel database SQLite in modo atomico (21 colonne, 21 segnaposto)."""
     init_db()
     
     cert_id = str(cert_dict.get("cert_id", ""))
