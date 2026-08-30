@@ -2,7 +2,7 @@
 views/tab_berth.py
 Gestione layout banchina separata in due stazioni (Prua e Poppa).
 Calcolo coordinate 3D (con Azimut), calcolo rigidezza con pretensione e passaggio dati allo State.
-Modello 3D da file CAD (.glb) allineato e scalato in modo deterministico, con selezione murata d'ormeggio.
+Modello 3D da file CAD (.glb) allineato e scalato con mappatura deterministica degli assi (LOA -> X, Altezza -> Z, Beam -> Y).
 """
 
 import os
@@ -64,7 +64,10 @@ def calculate_bollard_coordinates(
 def generate_detailed_3d_ship(ship_dict, offset_fugro: float = 0.0):
     """
     Carica il modello CAD 3D .glb da asset/carnivalpanorama.glb,
-    allinea e scala la mesh in maniera deterministica per posizionarla alongside.
+    allinea e scala la mesh associando:
+      - Asse più lungo   -> X (LOA)
+      - Asse intermedio  -> Z (Altezza)
+      - Asse più corto   -> Y (Beam)
     """
     loa = ship_dict.get("LOA", 323.44)
     beam = ship_dict.get("Beam", 37.20)
@@ -84,32 +87,31 @@ def generate_detailed_3d_ship(ship_dict, offset_fugro: float = 0.0):
             else:
                 mesh = loaded
 
-            # 1. Identifica gli assi originali del file CAD in base alle estensioni reali
+            # 1. Identifica gli assi CAD originali ordinati per dimensione decrescente
             orig_extents = mesh.extents
-            # Ordina gli indici delle dimensioni dal più grande al più piccolo (0: LOA, 1: Beam, 2: Height)
             axis_order = np.argsort(orig_extents)[::-1] 
             
-            idx_loa = axis_order[0]
-            idx_beam = axis_order[1]
-            idx_h = axis_order[2]
+            idx_loa = axis_order[0]   # Asse più lungo -> LOA (X)
+            idx_h = axis_order[1]     # Asse intermedio -> Altezza (Z)
+            idx_beam = axis_order[2]  # Asse più corto -> Beam (Y)
 
-            # 2. Costruisci la matrice di riordinamento rigido degli assi (X=LOA, Y=Beam, Z=Height)
+            # 2. Matrice di riordinamento rigido degli assi (X=LOA, Y=Beam, Z=Altezza)
             R_align = np.zeros((4, 4))
-            R_align[0, idx_loa] = 1.0
-            R_align[1, idx_beam] = 1.0
-            R_align[2, idx_h] = 1.0
+            R_align[0, idx_loa] = 1.0   # X = LOA
+            R_align[1, idx_beam] = 1.0  # Y = Beam
+            R_align[2, idx_h] = 1.0     # Z = Altezza
             R_align[3, 3] = 1.0
 
             mesh.apply_transform(R_align)
 
-            # 3. Ricalcola i limiti post-allineamento
+            # 3. Limiti post-allineamento
             extents = mesh.extents
             bounds = mesh.bounds
 
-            # 4. Scaling proporzionale e coerente
+            # 4. Scaling proporzionale
             scale_x = loa / extents[0] if extents[0] != 0 else 1.0
             scale_y = beam / extents[1] if extents[1] != 0 else 1.0
-            scale_z = scale_y  # Mantiene la proporzione dell'altezza rispetto al baglio massimo
+            scale_z = scale_y  # Mantiene l'altezza proporzionata al baglio massimo
 
             vertices = mesh.vertices.copy()
             vertices[:, 0] = vertices[:, 0] * scale_x
