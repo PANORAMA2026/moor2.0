@@ -1,7 +1,7 @@
 """
 views/tab_certificate.py
 Vista per la gestione, caricamento e parsing dei certificati cavi multi-componente.
-Identifica l'anello debole (Weak Point) e permette l'associazione diretta a Mooring Station, Winch Drum e Basket.
+Identifica l'anello debole (Weak Point) e permette l'associazione diretta a Mooring Station, Winch Drum (Drum A / Drum B) e Basket.
 """
 
 import pandas as pd
@@ -9,6 +9,7 @@ import streamlit as st
 from database.db_manager import (
     load_certificates_from_db,
     save_certificate_to_db,
+    assign_line_to_slot
 )
 from utils.pdf_parser import parse_certificate_text, parse_line_certificate
 
@@ -113,9 +114,9 @@ def render_tab_certificate():
                 f"*Valore di calcolo per le tensioni d'ormeggio.*"
             )
 
-            # ASSOCIAZIONE MOORING STATION / WINCH / BASKET
-            st.markdown("#### ⚓ Assegnazione Postazione d'Ormeggio")
-            col_a, col_b, col_c = st.columns(3)
+            # ASSOCIAZIONE MOORING STATION / WINCH / BASKET / DRUMS
+            st.markdown("#### ⚓ Assegnazione Postazione d'Ormeggio & Tamburo Winch")
+            col_a, col_b, col_c, col_d = st.columns([1, 1, 0.8, 1])
 
             with col_a:
                 station = st.selectbox(
@@ -130,20 +131,27 @@ def render_tab_certificate():
                 )
 
             with col_b:
-                winch_drum = st.selectbox(
-                    "Winch Drum",
+                winch_name = st.selectbox(
+                    "Winch",
                     [
-                        "Winch 1 (Working Drum)",
-                        "Winch 1 (Storage Drum)",
-                        "Winch 2 (Working Drum)",
-                        "Winch 2 (Storage Drum)",
-                        "Winch 3 (Working Drum)",
-                        "Winch 4 (Working Drum)",
+                        "Winch 1",
+                        "Winch 2",
+                        "Winch 3",
+                        "Winch 4",
+                        "Winch 5",
+                        "Winch 6",
                     ],
                     key="sel_winch",
                 )
 
             with col_c:
+                winch_drum = st.selectbox(
+                    "Tamburo",
+                    ["Drum A", "Drum B"],
+                    key="sel_drum",
+                )
+
+            with col_d:
                 basket_id = st.text_input(
                     "Basket / Line ID", value="G1-GT1 FWD", key="sel_basket"
                 )
@@ -153,20 +161,31 @@ def render_tab_certificate():
                     "cert_id": cd.get("cert_id"),
                     "line_id": basket_id,
                     "station": station,
-                    "winch": winch_drum,
+                    "assigned_slot": winch_name,
+                    "storage_type": "Winch",
+                    "winch_drum": winch_drum,
                     "manufacturer": cd.get("manufacturer"),
                     "material": cd.get("main_material"),
                     "diameter_mm": cd.get("main_diameter_mm"),
+                    "length_m": cd.get("main_length_m", 220.0),
                     "mbl_tons": weak_point_mbl,  # MBL dell'anello debole
                     "mbl_55_limit": limite_55_mbl,
                     "weak_point": weak_point_name,
-                    "standard": cd.get("standard"),
+                    "has_geolink": "YES" if cd.get("has_geolink") else "NO",
+                    "geolink_mbl": cd.get("geolink_mbl_tons", 0.0),
+                    "has_tail": "YES" if cd.get("has_tail") else "NO",
+                    "tail_material": cd.get("tail_material", "N/A"),
+                    "tail_diameter": cd.get("tail_diameter_mm", 0.0),
+                    "tail_mbl": cd.get("tail_mbl_tons", 0.0),
+                    "tail_length": cd.get("tail_length_m", 0.0),
+                    "standard": cd.get("standard", "MEG4"),
                     "issue_date": "2025-12-12",
                 }
                 save_certificate_to_db(record)
+                assign_line_to_slot(cd.get("cert_id"), station, "Winch", winch_name, winch_drum)
                 st.session_state.certificates_db = load_certificates_from_db()
                 st.success(
-                    f"Cavo {basket_id} associato a {station} - {winch_drum}! MBL"
+                    f"Cavo {basket_id} associato a {station} - {winch_name} [{winch_drum}]! MBL"
                     f" operativo: {weak_point_mbl:.2f} t (Limite 55%:"
                     f" {limite_55_mbl:.2f} t)."
                 )
@@ -174,7 +193,7 @@ def render_tab_certificate():
     st.divider()
 
     # REGISTRO CERTIFICATI E ASSEGNAZIONI
-    st.subheader("📚 Registro Cavi & Assegnazioni Salvare")
+    st.subheader("📚 Registro Cavi & Assegnazioni Salvate")
     df_certs = load_certificates_from_db()
     if not df_certs.empty:
         st.dataframe(df_certs, use_container_width=True)
