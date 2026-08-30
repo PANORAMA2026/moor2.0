@@ -20,7 +20,7 @@ def get_connection():
 
 
 def init_db(default_lines_df: pd.DataFrame = None):
-    """Inizializza il database SQLite creando le tabelle e allineando gli schemi."""
+    """Inizializza il database SQLite creando le tabelle se non esistono e aggiorna gli schemi."""
     conn = get_connection()
     cursor = conn.cursor()
 
@@ -42,7 +42,7 @@ def init_db(default_lines_df: pd.DataFrame = None):
         )
     """)
 
-    # Tabella Certificati Cavi (21 colonne)
+    # Tabella Certificati Cavi
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS certificates (
             cert_id TEXT PRIMARY KEY,
@@ -69,28 +69,17 @@ def init_db(default_lines_df: pd.DataFrame = None):
         )
     """)
 
-    # Migrazione dinamica schema certificates (per DB già creati)
+    # MIGRAZIONE AUTOMATICA SCHEMA: certificates (Previene OperationalError)
     cursor.execute("PRAGMA table_info(certificates)")
     existing_cert_cols = [row[1] for row in cursor.fetchall()]
-    cols_to_add = [
-        ("length_m", "REAL DEFAULT 220.0"),
-        ("station", "TEXT DEFAULT 'FWD'"),
-        ("assigned_slot", "TEXT DEFAULT 'Nessuna'"),
-        ("storage_type", "TEXT DEFAULT 'Spare Line'"),
+    for col_name, col_type in [
         ("winch_drum", "TEXT DEFAULT 'N/D'"),
         ("weak_point", "TEXT DEFAULT 'Main Line'"),
         ("mbl_55_limit", "REAL DEFAULT 0.0"),
-        ("has_geolink", "TEXT DEFAULT 'NO'"),
-        ("geolink_mbl", "REAL DEFAULT 0.0"),
-        ("has_tail", "TEXT DEFAULT 'NO'"),
-        ("tail_material", "TEXT DEFAULT 'N/A'"),
-        ("tail_diameter", "REAL DEFAULT 0.0"),
-        ("tail_mbl", "REAL DEFAULT 0.0"),
-        ("tail_length", "REAL DEFAULT 0.0"),
-        ("standard", "TEXT"),
-        ("issue_date", "TEXT")
-    ]
-    for col_name, col_type in cols_to_add:
+        ("assigned_slot", "TEXT DEFAULT 'Nessuna'"),
+        ("storage_type", "TEXT DEFAULT 'Spare Line'"),
+        ("station", "TEXT DEFAULT 'FWD'")
+    ]:
         if col_name not in existing_cert_cols:
             cursor.execute(f"ALTER TABLE certificates ADD COLUMN {col_name} {col_type}")
 
@@ -118,7 +107,7 @@ def init_db(default_lines_df: pd.DataFrame = None):
         )
     """)
 
-    # Tabella Componenti Stazioni
+    # Tabella Componenti Pianetti/Stazioni
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS station_components (
             station_name TEXT,
@@ -132,13 +121,21 @@ def init_db(default_lines_df: pd.DataFrame = None):
             line_capstan TEXT,
             assigned_line_id TEXT,
             source_basket TEXT,
-            wear_pct INTEGER DEFAULT 0,
-            condition TEXT DEFAULT 'BUONO',
-            last_inspection_date TEXT DEFAULT '',
-            last_inspection_note TEXT DEFAULT '',
+            wear_pct INTEGER,
+            condition TEXT,
+            last_inspection_date TEXT,
+            last_inspection_note TEXT,
             PRIMARY KEY (station_name, component_id)
         )
     """)
+
+    # MIGRAZIONE AUTOMATICA SCHEMA: station_components
+    cursor.execute("PRAGMA table_info(station_components)")
+    existing_cols = [row[1] for row in cursor.fetchall()]
+    if "last_inspection_date" not in existing_cols:
+        cursor.execute("ALTER TABLE station_components ADD COLUMN last_inspection_date TEXT DEFAULT ''")
+    if "last_inspection_note" not in existing_cols:
+        cursor.execute("ALTER TABLE station_components ADD COLUMN last_inspection_note TEXT DEFAULT ''")
 
     # Tabella Metadati Stazioni
     cursor.execute("""
@@ -148,7 +145,7 @@ def init_db(default_lines_df: pd.DataFrame = None):
         )
     """)
 
-    # Tabella Storico Sessioni
+    # Tabella Storico Sessioni Generico
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS mooring_history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -172,7 +169,7 @@ def init_db(default_lines_df: pd.DataFrame = None):
         )
     """)
 
-    # Tabella Storico Usura Cime
+    # Tabella Storico Accumulato Cime
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS line_life_history (
             line_id TEXT PRIMARY KEY,
@@ -189,90 +186,56 @@ def init_db(default_lines_df: pd.DataFrame = None):
         )
     """)
 
+    # MIGRAZIONE AUTOMATICA SCHEMA: line_life_history
+    cursor.execute("PRAGMA table_info(line_life_history)")
+    existing_life_cols = [row[1] for row in cursor.fetchall()]
+    for col_name, col_type in [
+        ("wear_percentage", "INTEGER DEFAULT 0"),
+        ("status", "TEXT DEFAULT 'BUONO'"),
+        ("last_inspection", "TEXT DEFAULT ''"),
+        ("notes", "TEXT DEFAULT ''")
+    ]:
+        if col_name not in existing_life_cols:
+            cursor.execute(f"ALTER TABLE line_life_history ADD COLUMN {col_name} {col_type}")
+
     conn.commit()
     conn.close()
 
 
-def save_certificate_to_db(cert_dict: dict):
-    """Salva/Aggiorna un certificato verificando l'esatta corrispondenza tra 21 colonne e 21 segnaposto."""
-    init_db()
-
-    fields = [
-        "cert_id", "manufacturer", "material", "diameter_mm", "mbl_tons", "length_m",
-        "station", "assigned_slot", "storage_type", "winch_drum", "weak_point", "mbl_55_limit",
-        "has_geolink", "geolink_mbl", "has_tail", "tail_material", "tail_diameter", "tail_mbl",
-        "tail_length", "standard", "issue_date"
-    ]
-
-    values = (
-        str(cert_dict.get("cert_id", "UNKNOWN")),
-        str(cert_dict.get("manufacturer", "N/D")),
-        str(cert_dict.get("material", "HMPE")),
-        float(cert_dict.get("diameter_mm", 0.0)),
-        float(cert_dict.get("mbl_tons", 0.0)),
-        float(cert_dict.get("length_m", 220.0)),
-        str(cert_dict.get("station", "FWD")),
-        str(cert_dict.get("assigned_slot", cert_dict.get("winch", "Nessuna"))),
-        str(cert_dict.get("storage_type", "Winch")),
-        str(cert_dict.get("winch_drum", "Drum A")),
-        str(cert_dict.get("weak_point", "Main Line")),
-        float(cert_dict.get("mbl_55_limit", 0.0)),
-        str(cert_dict.get("has_geolink", "NO")),
-        float(cert_dict.get("geolink_mbl", 0.0)),
-        str(cert_dict.get("has_tail", "NO")),
-        str(cert_dict.get("tail_material", "N/A")),
-        float(cert_dict.get("tail_diameter", 0.0)),
-        float(cert_dict.get("tail_mbl", 0.0)),
-        float(cert_dict.get("tail_length", 0.0)),
-        str(cert_dict.get("standard", "MEG4")),
-        str(cert_dict.get("issue_date", ""))
-    )
-
-    placeholders = ", ".join(["?"] * len(fields))
-    columns_str = ", ".join(fields)
-    sql = f"INSERT OR REPLACE INTO certificates ({columns_str}) VALUES ({placeholders})"
-
-    with get_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute(sql, values)
-        conn.commit()
-
-
 def assign_line_to_slot(cert_id: str, station: str, storage_type: str, assigned_slot: str, winch_drum: str = "Drum A"):
-    init_db()
-    with get_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            UPDATE certificates 
-            SET assigned_slot = 'Nessuna', storage_type = 'Spare Line', winch_drum = 'N/D'
-            WHERE station = ? AND assigned_slot = ? AND winch_drum = ? AND cert_id != ?
-        """, (station, assigned_slot, winch_drum, cert_id))
-
-        cursor.execute("""
-            UPDATE certificates
-            SET station = ?, storage_type = ?, assigned_slot = ?, winch_drum = ?
-            WHERE cert_id = ?
-        """, (station, storage_type, assigned_slot, winch_drum, cert_id))
-
-        conn.commit()
-
-
-def load_certificates_from_db() -> pd.DataFrame:
+    """Sincronizza l'assegnazione di un cavo rilasciando eventuali slot precedenti, distinguendo tra Drum A e Drum B."""
     init_db()
     conn = get_connection()
-    df = pd.read_sql_query("SELECT * FROM certificates", conn)
+    cursor = conn.cursor()
+    
+    cursor.execute("""
+        UPDATE certificates 
+        SET assigned_slot = 'Nessuna', storage_type = 'Spare Line', winch_drum = 'N/D'
+        WHERE station = ? AND assigned_slot = ? AND winch_drum = ? AND cert_id != ?
+    """, (station, assigned_slot, winch_drum, cert_id))
+
+    cursor.execute("""
+        UPDATE certificates
+        SET station = ?, storage_type = ?, assigned_slot = ?, winch_drum = ?
+        WHERE cert_id = ?
+    """, (station, storage_type, assigned_slot, winch_drum, cert_id))
+
+    conn.commit()
     conn.close()
-    return df
 
 
 def get_port_mooring_setups(port_name: str) -> dict:
-    init_db()
     conn = get_connection()
-    df = pd.read_sql_query("SELECT * FROM port_mooring_setups WHERE port_name = ?", conn, params=(port_name,))
+    df = pd.read_sql_query(
+        "SELECT * FROM port_mooring_setups WHERE port_name = ?", 
+        conn, 
+        params=(port_name,)
+    )
     conn.close()
 
     if df.empty:
         lines_df = load_lines_inventory_from_db()
+
         default_records = []
         if not lines_df.empty and "line_id" in lines_df.columns:
             for l_id in lines_df["line_id"].unique():
@@ -289,20 +252,30 @@ def get_port_mooring_setups(port_name: str) -> dict:
     setups_dict = {}
     for setup_name, group in df.groupby("setup_name"):
         setups_dict[setup_name] = group[["line_id", "mbl_percentage"]].reset_index(drop=True)
+
     return setups_dict
 
 
 def save_port_mooring_setup(port_name: str, setup_name: str, setup_df: pd.DataFrame, is_default: bool = False):
-    init_db()
     conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute("DELETE FROM port_mooring_setups WHERE port_name = ? AND setup_name = ?", (port_name, setup_name))
+
+    cursor.execute(
+        "DELETE FROM port_mooring_setups WHERE port_name = ? AND setup_name = ?", 
+        (port_name, setup_name)
+    )
 
     for _, row in setup_df.iterrows():
         cursor.execute("""
             INSERT INTO port_mooring_setups (port_name, setup_name, line_id, mbl_percentage, is_default)
             VALUES (?, ?, ?, ?, ?)
-        """, (port_name, setup_name, str(row.get("line_id")), float(row.get("mbl_percentage", 15.0)), 1 if is_default else 0))
+        """, (
+            port_name, 
+            setup_name, 
+            str(row.get("line_id")), 
+            float(row.get("mbl_percentage", 15.0)), 
+            1 if is_default else 0
+        ))
 
     conn.commit()
     conn.close()
@@ -311,11 +284,23 @@ def save_port_mooring_setup(port_name: str, setup_name: str, setup_df: pd.DataFr
 def save_line_history(history_df: pd.DataFrame):
     if history_df.empty:
         return
-    init_db()
+
     conn = get_connection()
     cursor = conn.cursor()
 
     for _, row in history_df.iterrows():
+        l_id = str(row.get("line_id", row.get("id", "")))
+        last_port = str(row.get("last_port", "N/D"))
+        current_setup = str(row.get("current_setup", "N/D"))
+        applied_tension = float(row.get("applied_tension_mbl_pct", 0.0))
+        total_hours = float(row.get("total_hours", 0.0))
+        accumulated_stress = float(row.get("accumulated_stress_index", 0.0))
+        wear_pct = int(row.get("wear_percentage", row.get("wear_pct", 0)))
+        status = str(row.get("status", row.get("condition", "BUONO")))
+        last_insp = str(row.get("last_inspection", row.get("last_inspection_date", "")))
+        notes = str(row.get("notes", row.get("last_inspection_note", "")))
+        last_sync = str(row.get("last_auto_sync", ""))
+
         cursor.execute("""
             INSERT INTO line_life_history (
                 line_id, last_port, current_setup, applied_tension_mbl_pct, 
@@ -333,26 +318,13 @@ def save_line_history(history_df: pd.DataFrame):
                 last_inspection = excluded.last_inspection,
                 notes = excluded.notes,
                 last_auto_sync = excluded.last_auto_sync
-        """, (
-            str(row.get("line_id", row.get("id", ""))),
-            str(row.get("last_port", "N/D")),
-            str(row.get("current_setup", "N/D")),
-            float(row.get("applied_tension_mbl_pct", 0.0)),
-            float(row.get("total_hours", 0.0)),
-            float(row.get("accumulated_stress_index", 0.0)),
-            int(row.get("wear_percentage", row.get("wear_pct", 0))),
-            str(row.get("status", row.get("condition", "BUONO"))),
-            str(row.get("last_inspection", row.get("last_inspection_date", ""))),
-            str(row.get("notes", row.get("last_inspection_note", ""))),
-            str(row.get("last_auto_sync", ""))
-        ))
+        """, (l_id, last_port, current_setup, applied_tension, total_hours, accumulated_stress, wear_pct, status, last_insp, notes, last_sync))
 
     conn.commit()
     conn.close()
 
 
 def get_line_history() -> pd.DataFrame:
-    init_db()
     conn = get_connection()
     df = pd.read_sql_query("SELECT * FROM line_life_history", conn)
     conn.close()
@@ -377,7 +349,6 @@ def get_line_history() -> pd.DataFrame:
 
 
 def save_port_bollards_to_db(port_name: str, bollards_df: pd.DataFrame):
-    init_db()
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("DELETE FROM port_bollards WHERE port_name = ?", (port_name,))
@@ -401,7 +372,6 @@ def save_port_bollards_to_db(port_name: str, bollards_df: pd.DataFrame):
 
 
 def load_port_bollards_from_db(port_name: str) -> pd.DataFrame:
-    init_db()
     conn = get_connection()
     df = pd.read_sql_query("SELECT * FROM port_bollards WHERE port_name = ?", conn, params=(port_name,))
     conn.close()
@@ -429,15 +399,60 @@ def load_port_bollards_from_db(port_name: str) -> pd.DataFrame:
     return df
 
 
-def save_lines_inventory_to_db(lines_df: pd.DataFrame):
+def save_certificate_to_db(cert_dict: dict):
+    """Salva il certificato supportando sia i vecchi che i nuovi campi senza fallire."""
     init_db()
+    conn = get_connection()
+    cursor = conn.cursor()
+    
+    cursor.execute("""
+        INSERT OR REPLACE INTO certificates (
+            cert_id, manufacturer, material, diameter_mm, mbl_tons, length_m,
+            station, assigned_slot, storage_type, winch_drum, weak_point, mbl_55_limit,
+            has_geolink, geolink_mbl, has_tail, tail_material, tail_diameter, tail_mbl, tail_length, standard, issue_date
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        str(cert_dict.get("cert_id", "")), 
+        str(cert_dict.get("manufacturer", "")), 
+        str(cert_dict.get("material", "")),
+        float(cert_dict.get("diameter_mm", 0.0)), 
+        float(cert_dict.get("mbl_tons", 0.0)), 
+        float(cert_dict.get("length_m", 220.0)),
+        str(cert_dict.get("station", "FWD")), 
+        str(cert_dict.get("assigned_slot", cert_dict.get("winch", cert_dict.get("line_id", "Nessuna")))), 
+        str(cert_dict.get("storage_type", "Winch")),
+        str(cert_dict.get("winch_drum", "Drum A")),
+        str(cert_dict.get("weak_point", "Main Line")),
+        float(cert_dict.get("mbl_55_limit", 0.0)),
+        str(cert_dict.get("has_geolink", "NO")), 
+        float(cert_dict.get("geolink_mbl", 0.0)),
+        str(cert_dict.get("has_tail", "NO")), 
+        str(cert_dict.get("tail_material", "N/A")),
+        float(cert_dict.get("tail_diameter", 0.0)), 
+        float(cert_dict.get("tail_mbl", 0.0)),
+        float(cert_dict.get("tail_length", 0.0)), 
+        str(cert_dict.get("standard", "MEG4")), 
+        str(cert_dict.get("issue_date", ""))
+    ))
+    conn.commit()
+    conn.close()
+
+
+def load_certificates_from_db() -> pd.DataFrame:
+    init_db()
+    conn = get_connection()
+    df = pd.read_sql_query("SELECT * FROM certificates", conn)
+    conn.close()
+    return df
+
+
+def save_lines_inventory_to_db(lines_df: pd.DataFrame):
     conn = get_connection()
     lines_df.to_sql("lines_inventory", conn, if_exists="replace", index=False)
     conn.close()
 
 
 def load_lines_inventory_from_db() -> pd.DataFrame:
-    init_db()
     conn = get_connection()
     df = pd.read_sql_query("SELECT * FROM lines_inventory", conn)
     conn.close()
@@ -445,7 +460,6 @@ def load_lines_inventory_from_db() -> pd.DataFrame:
 
 
 def save_station_image_file(station_name: str, file_bytes: bytes, file_ext: str) -> str:
-    init_db()
     safe_name = station_name.replace(" ", "_").replace("(", "").replace(")", "").lower()
     filename = f"plan_{safe_name}{file_ext}"
     filepath = os.path.join(PLANS_DIR, filename)
@@ -466,7 +480,6 @@ def save_station_image_file(station_name: str, file_bytes: bytes, file_ext: str)
 
 
 def get_station_image_path(station_name: str) -> str:
-    init_db()
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT image_path FROM station_metadata WHERE station_name = ?", (station_name,))
@@ -479,22 +492,37 @@ def get_station_image_path(station_name: str) -> str:
 
 
 def save_mooring_station_components(components_list: list, station_name: str):
-    init_db()
+    """Salva i componenti della stazione gestendo la mappatura flessibile dei campi del DB."""
     conn = get_connection()
     cursor = conn.cursor()
+    
+    cursor.execute("PRAGMA table_info(station_components)")
+    existing_cols = [row[1] for row in cursor.fetchall()]
+    if "last_inspection_date" not in existing_cols:
+        cursor.execute("ALTER TABLE station_components ADD COLUMN last_inspection_date TEXT DEFAULT ''")
+    if "last_inspection_note" not in existing_cols:
+        cursor.execute("ALTER TABLE station_components ADD COLUMN last_inspection_note TEXT DEFAULT ''")
 
     cursor.execute("DELETE FROM station_components WHERE station_name = ?", (station_name,))
 
     for item in components_list:
-        comp_id = str(item.get("slot_id", item.get("comp_id", item.get("component_id", "SLOT"))))
-        comp_type = str(item.get("comp_type", item.get("component_type", "WINCH")))
+        comp_id = str(item.get("comp_id", item.get("component_id", item.get("id", "ELEMENTO"))))
+        comp_type = str(item.get("comp_type", item.get("component_type", item.get("type", "WINCH"))))
+        
         pos_x = float(item.get("pos_x", item.get("x_pos", item.get("x", 0.0))))
         pos_y = float(item.get("pos_y", item.get("y_pos", item.get("y", 0.0))))
-        line_assigned = str(item.get("assigned_line", item.get("line_drum_a", item.get("line_id", "Nessuna"))))
-        wear_pct = int(item.get("wear_pct", item.get("wear_percentage", 0)))
-        condition = str(item.get("condition", item.get("status", "BUONO")))
-        last_insp_date = str(item.get("last_inspection_date", item.get("last_inspection", "")))
-        last_insp_note = str(item.get("last_inspection_note", item.get("notes", "")))
+        
+        line_id = str(item.get("line_id", "N/D"))
+        line_drum_a = str(item.get("line_drum_a", "Nessuna"))
+        line_drum_b = str(item.get("line_drum_b", "Nessuna"))
+        line_capstan = str(item.get("line_capstan", "Nessuna"))
+        assigned_line_id = str(item.get("assigned_line_id", "N/D"))
+        source_basket = str(item.get("source_basket", "Nessuno"))
+        
+        wear_pct = int(item.get("wear_pct", 0))
+        condition = str(item.get("condition", "BUONO"))
+        last_insp_date = str(item.get("last_inspection_date", ""))
+        last_insp_note = str(item.get("last_inspection_note", ""))
 
         cursor.execute("""
             INSERT INTO station_components (
@@ -503,8 +531,8 @@ def save_mooring_station_components(components_list: list, station_name: str):
                 wear_pct, condition, last_inspection_date, last_inspection_note
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
-            station_name, comp_id, comp_type, pos_x, pos_y, line_assigned,
-            line_assigned, "Nessuna", "Nessuna", line_assigned, "Nessuno",
+            station_name, comp_id, comp_type, pos_x, pos_y, line_id,
+            line_drum_a, line_drum_b, line_capstan, assigned_line_id, source_basket,
             wear_pct, condition, last_insp_date, last_insp_note
         ))
 
@@ -513,36 +541,13 @@ def save_mooring_station_components(components_list: list, station_name: str):
 
 
 def get_mooring_station_components(station_name: str) -> pd.DataFrame:
-    init_db()
     conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute("PRAGMA table_info(station_components)")
-    cols = [row[1] for row in cursor.fetchall()]
-    conn.close()
-
-    if not cols:
-        return pd.DataFrame()
-
-    query = """
-        SELECT 
-            component_id AS slot_id,
-            component_type AS comp_type,
-            line_drum_a AS assigned_line,
-            wear_pct,
-            condition,
-            last_inspection_date,
-            last_inspection_note
-        FROM station_components 
-        WHERE station_name = ?
-    """
-    conn = get_connection()
-    df = pd.read_sql_query(query, conn, params=(station_name,))
+    df = pd.read_sql_query("SELECT * FROM station_components WHERE station_name = ?", conn, params=(station_name,))
     conn.close()
     return df
 
 
 def log_mooring_session(results_df: pd.DataFrame, port_name: str):
-    init_db()
     conn = get_connection()
     cursor = conn.cursor()
     for _, r in results_df.iterrows():
