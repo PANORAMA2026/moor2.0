@@ -55,7 +55,7 @@ st.set_page_config(
     layout="wide",
 )
 
-# Persistenza calendario
+# Perche salviamo su disco
 CALENDAR_STORAGE_PATH = os.path.join(os.path.dirname(__file__), "database", "saved_schedule.parquet")
 
 # =============================================================================
@@ -321,6 +321,7 @@ if schedule_file is not None:
     try:
         parsed_df = load_and_parse_itinerary(schedule_file)
         st.session_state["port_schedule"] = parsed_df
+        # Salvataggio fisico su disco per persistenza tra riavvii
         os.makedirs(os.path.dirname(CALENDAR_STORAGE_PATH), exist_ok=True)
         parsed_df.to_parquet(CALENDAR_STORAGE_PATH)
         st.sidebar.success("✅ Calendario caricato e salvato in memoria permanente!")
