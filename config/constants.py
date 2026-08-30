@@ -76,7 +76,7 @@ DEFAULT_SHIP = {
     "LOA": 323.44,
     "Beam": 37.20,
     "Beam_Max": 49.40,
-    "Draft": 8.25,
+    "Draft": 8.5,
     "Freeboard": 2.65,
     "Air_Draft_Funnel": 61.75,
     "Air_Draft_Mast": 63.25,
