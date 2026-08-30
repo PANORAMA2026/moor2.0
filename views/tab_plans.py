@@ -271,21 +271,25 @@ def open_ai_inspection_dialog(row, idx, station_sel, st_df):
 def render_tab_plans():
     st.header("🏗️ Mappatura Stazioni d'Ormeggio & Pianetti Interattivi")
 
-    stations_list = ["Prua (Forward Station)", "Poppa (Aft Station)"]
+    stations_list = [
+        "Prua (Forward Station)",
+        "Poppa (Aft Station)",
+        "Centro Prua (Mid FWD)",
+        "Centro Poppa (Mid AFT)"
+    ]
 
-    # Inizializzazione corretta di session_state: carica da DB SOLO se la chiave non esiste
+    # Carica la mappa delle stazioni in session_state, ripescando direttamente dal DB
     if "mooring_stations" not in st.session_state:
         st.session_state.mooring_stations = {}
 
-    for stat in stations_list:
-        if stat not in st.session_state.mooring_stations:
-            st.session_state.mooring_stations[stat] = load_station_data_from_db(stat)
-
-    station_sel = st.selectbox("Seleziona Stazione d'Ormeggio", stations_list)
+    station_sel = st.selectbox("Seleziona Stazione d'Ormeggio", stations_list, key="selected_mooring_station")
     if not station_sel:
         return
 
-    st_df = st.session_state.mooring_stations[station_sel]
+    # FORZA SEMPRE IL RIPESCAGGIO DA DB AD OGNI SELEZIONE PER EVITARE DISCORDANZE TRA RESTART
+    st_df = load_station_data_from_db(station_sel)
+    st.session_state.mooring_stations[station_sel] = st_df
+    
     st_code = "FWD" if "Prua" in station_sel else "AFT"
 
     # SELEZIONE CIME INVENTARIO / CERTIFICATI
@@ -318,7 +322,7 @@ def render_tab_plans():
     if saved_img_path and os.path.exists(saved_img_path):
         raw_img = Image.open(saved_img_path)
     else:
-        st.warning("⚠️ Nessun disegno caricato. Carica un file immagine sopra.")
+        st.warning("⚠️ Nessun disegno caricato per questa stazione. Carica un file immagine sopra.")
         raw_img = Image.new('RGB', (650, 380), color=(240, 240, 240))
 
     TARGET_WIDTH = 650
@@ -353,8 +357,8 @@ def render_tab_plans():
         curr_y = st.session_state[key_click]["y"]
         st.info(f"Punto Cliccato: **X={curr_x} px, Y={curr_y} px**")
 
-        comp_type = st.selectbox("Tipologia Elemento", ["WINCH", "BASKET", "CHOCK", "CAPSTAN"])
-        comp_id = st.text_input("Identificativo Componente", f"{comp_type[0]}_{len(st_df)+1}")
+        comp_type = st.selectbox("Tipologia Elemento", ["WINCH", "BASKET", "CHOCK", "CAPSTAN"], key=f"comp_type_{station_sel}")
+        comp_id = st.text_input("Identificativo Componente", f"{comp_type[0]}_{len(st_df)+1}", key=f"comp_id_{station_sel}")
 
         basket_options = ["Nessuno"]
         if not st_df.empty:
@@ -374,17 +378,17 @@ def render_tab_plans():
             st.caption("⚙️ Assegnazione Cime")
             line_drum_a = st.selectbox("Cima - Tamburo A", line_options, key=f"dr_a_{station_sel}")
             line_drum_b = st.selectbox("Cima - Tamburo B", line_options, key=f"dr_b_{station_sel}")
-            if st.checkbox("Collega cavo alla Capstan del Winch"):
+            if st.checkbox("Collega cavo alla Capstan del Winch", key=f"chk_cap_{station_sel}"):
                 line_capstan = st.selectbox("Cima su Capstan", line_options, key=f"cap_{station_sel}")
-                source_basket = st.selectbox("Origine Cima (Basket)", basket_options)
+                source_basket = st.selectbox("Origine Cima (Basket)", basket_options, key=f"src_bsk_winch_{station_sel}")
         elif comp_type == "BASKET":
-            assigned_line = st.selectbox("Cima stivata nel Basket", line_options)
+            assigned_line = st.selectbox("Cima stivata nel Basket", line_options, key=f"bsk_line_{station_sel}")
         elif comp_type == "CAPSTAN":
-            line_capstan = st.selectbox("Cima d'Ormeggio collegata", line_options)
-            source_basket = st.selectbox("Origine Cima (Basket)", basket_options)
+            line_capstan = st.selectbox("Cima d'Ormeggio collegata", line_options, key=f"cap_standalone_{station_sel}")
+            source_basket = st.selectbox("Origine Cima (Basket)", basket_options, key=f"src_bsk_cap_{station_sel}")
 
-        # SALVATAGGIO NUOVO ELEMENTO
-        if st.button("➕ Salva ed Inserisci sul Pianetto", use_container_width=True, type="primary"):
+        # SALVATAGGIO NUOVO ELEMENTO PERSISTENTE
+        if st.button("➕ Salva ed Inserisci sul Pianetto", use_container_width=True, type="primary", key=f"btn_add_{station_sel}"):
             new_row = pd.DataFrame([{
                 "comp_type": comp_type,
                 "comp_id": comp_id,
@@ -430,7 +434,7 @@ def render_tab_plans():
     with col_banner:
         st.info("ℹ️ Premi **'Conferma Tutti OK'** per registrare l'ispezione standard senza problemi.")
     with col_confirm_all:
-        if st.button("✅ Conferma Tutti OK", type="primary", use_container_width=True):
+        if st.button("✅ Conferma Tutti OK", type="primary", use_container_width=True, key=f"btn_ok_all_{station_sel}"):
             today_str = str(date.today())
             for idx in st_df.index:
                 st_df.loc[idx, "last_inspection_date"] = today_str
@@ -464,7 +468,7 @@ def render_tab_plans():
         st_df, num_rows="dynamic", use_container_width=True, key=f"editor_{station_sel}"
     )
 
-    if st.button("💾 Sincronizza Tabella su DB"):
+    if st.button("💾 Sincronizza Tabella su DB", key=f"btn_sync_editor_{station_sel}"):
         if not edited_df.empty:
             if "pos_x" in edited_df.columns:
                 edited_df["pos_x"] = pd.to_numeric(edited_df["pos_x"], errors="coerce").fillna(0.0)
@@ -499,7 +503,7 @@ def render_tab_plans():
                 st.rerun()
 
         st.caption("")
-        if st.button(f"🗑️ Rimuovi Tutti gli Elementi di {station_sel}", type="secondary"):
+        if st.button(f"🗑️ Rimuovi Tutti gli Elementi di {station_sel}", type="secondary", key=f"del_all_{station_sel}"):
             empty_df = pd.DataFrame(columns=st_df.columns)
             st.session_state.mooring_stations[station_sel] = empty_df
             save_mooring_station_components([], station_sel)
