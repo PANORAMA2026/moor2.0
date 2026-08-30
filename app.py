@@ -321,7 +321,6 @@ if schedule_file is not None:
     try:
         parsed_df = load_and_parse_itinerary(schedule_file)
         st.session_state["port_schedule"] = parsed_df
-        # Salvataggio fisico su disco per persistenza tra riavvii
         os.makedirs(os.path.dirname(CALENDAR_STORAGE_PATH), exist_ok=True)
         parsed_df.to_parquet(CALENDAR_STORAGE_PATH)
         st.sidebar.success("✅ Calendario caricato e salvato in memoria permanente!")
