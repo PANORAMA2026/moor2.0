@@ -205,23 +205,22 @@ def init_db(default_lines_df: pd.DataFrame = None):
 def assign_line_to_slot(cert_id: str, station: str, storage_type: str, assigned_slot: str, winch_drum: str = "Drum A"):
     """Sincronizza l'assegnazione di un cavo rilasciando eventuali slot precedenti."""
     init_db()
-    conn = get_connection()
-    cursor = conn.cursor()
-    
-    cursor.execute("""
-        UPDATE certificates 
-        SET assigned_slot = 'Nessuna', storage_type = 'Spare Line', winch_drum = 'N/D'
-        WHERE station = ? AND assigned_slot = ? AND winch_drum = ? AND cert_id != ?
-    """, (station, assigned_slot, winch_drum, cert_id))
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            UPDATE certificates 
+            SET assigned_slot = 'Nessuna', storage_type = 'Spare Line', winch_drum = 'N/D'
+            WHERE station = ? AND assigned_slot = ? AND winch_drum = ? AND cert_id != ?
+        """, (station, assigned_slot, winch_drum, cert_id))
 
-    cursor.execute("""
-        UPDATE certificates
-        SET station = ?, storage_type = ?, assigned_slot = ?, winch_drum = ?
-        WHERE cert_id = ?
-    """, (station, storage_type, assigned_slot, winch_drum, cert_id))
+        cursor.execute("""
+            UPDATE certificates
+            SET station = ?, storage_type = ?, assigned_slot = ?, winch_drum = ?
+            WHERE cert_id = ?
+        """, (station, storage_type, assigned_slot, winch_drum, cert_id))
 
-    conn.commit()
-    conn.close()
+        conn.commit()
 
 
 def get_port_mooring_setups(port_name: str) -> dict:
@@ -406,41 +405,49 @@ def load_port_bollards_from_db(port_name: str) -> pd.DataFrame:
 
 
 def save_certificate_to_db(cert_dict: dict):
+    """Salva o aggiorna un certificato nel database SQLite in modo atomico."""
     init_db()
-    conn = get_connection()
-    cursor = conn.cursor()
     
-    cursor.execute("""
+    cert_id = str(cert_dict.get("cert_id", ""))
+    manufacturer = str(cert_dict.get("manufacturer", ""))
+    material = str(cert_dict.get("material", ""))
+    diameter_mm = float(cert_dict.get("diameter_mm", 0.0))
+    mbl_tons = float(cert_dict.get("mbl_tons", 0.0))
+    length_m = float(cert_dict.get("length_m", 220.0))
+    station = str(cert_dict.get("station", "FWD"))
+    assigned_slot = str(cert_dict.get("assigned_slot", cert_dict.get("winch", cert_dict.get("line_id", "Nessuna"))))
+    storage_type = str(cert_dict.get("storage_type", "Winch"))
+    winch_drum = str(cert_dict.get("winch_drum", "Drum A"))
+    weak_point = str(cert_dict.get("weak_point", "Main Line"))
+    mbl_55_limit = float(cert_dict.get("mbl_55_limit", 0.0))
+    has_geolink = str(cert_dict.get("has_geolink", "NO"))
+    geolink_mbl = float(cert_dict.get("geolink_mbl", 0.0))
+    has_tail = str(cert_dict.get("has_tail", "NO"))
+    tail_material = str(cert_dict.get("tail_material", "N/A"))
+    tail_diameter = float(cert_dict.get("tail_diameter", 0.0))
+    tail_mbl = float(cert_dict.get("tail_mbl", 0.0))
+    tail_length = float(cert_dict.get("tail_length", 0.0))
+    standard = str(cert_dict.get("standard", "MEG4"))
+    issue_date = str(cert_dict.get("issue_date", ""))
+
+    query = """
         INSERT OR REPLACE INTO certificates (
             cert_id, manufacturer, material, diameter_mm, mbl_tons, length_m,
             station, assigned_slot, storage_type, winch_drum, weak_point, mbl_55_limit,
             has_geolink, geolink_mbl, has_tail, tail_material, tail_diameter, tail_mbl, tail_length, standard, issue_date
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (
-        str(cert_dict.get("cert_id", "")), 
-        str(cert_dict.get("manufacturer", "")), 
-        str(cert_dict.get("material", "")),
-        float(cert_dict.get("diameter_mm", 0.0)), 
-        float(cert_dict.get("mbl_tons", 0.0)), 
-        float(cert_dict.get("length_m", 220.0)),
-        str(cert_dict.get("station", "FWD")), 
-        str(cert_dict.get("assigned_slot", cert_dict.get("winch", cert_dict.get("line_id", "Nessuna")))), 
-        str(cert_dict.get("storage_type", "Winch")),
-        str(cert_dict.get("winch_drum", "Drum A")),
-        str(cert_dict.get("weak_point", "Main Line")),
-        float(cert_dict.get("mbl_55_limit", 0.0)),
-        str(cert_dict.get("has_geolink", "NO")), 
-        float(cert_dict.get("geolink_mbl", 0.0)),
-        str(cert_dict.get("has_tail", "NO")), 
-        str(cert_dict.get("tail_material", "N/A")),
-        float(cert_dict.get("tail_diameter", 0.0)), 
-        float(cert_dict.get("tail_mbl", 0.0)),
-        float(cert_dict.get("tail_length", 0.0)), 
-        str(cert_dict.get("standard", "MEG4")), 
-        str(cert_dict.get("issue_date", ""))
-    ))
-    conn.commit()
-    conn.close()
+    """
+    
+    params = (
+        cert_id, manufacturer, material, diameter_mm, mbl_tons, length_m,
+        station, assigned_slot, storage_type, winch_drum, weak_point, mbl_55_limit,
+        has_geolink, geolink_mbl, has_tail, tail_material, tail_diameter, tail_mbl, tail_length, standard, issue_date
+    )
+
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(query, params)
+        conn.commit()
 
 
 def load_certificates_from_db() -> pd.DataFrame:
