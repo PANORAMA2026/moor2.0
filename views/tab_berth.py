@@ -1,8 +1,9 @@
 """
 views/tab_berth.py
 Gestione layout banchina separata in due stazioni (Prua e Poppa).
-Calcolo coordinate 3D (con Azimut), calcolo rigidezza con pretensione e passaggio dati allo State.
-Modello 3D da file CAD (.glb) allineato e accostato a banchina (Port Side / Starboard Side).
+Calcolo coordinate 3D (con Azimut) basato sulle altezze stimate delle Mooring Stations,
+calcolo rigidezza con pretensione e passaggio dati allo State.
+Modello 3D da file CAD (.glb) scalato interamente su DEFAULT_SHIP (LOA, Beam, Draft = 8.5m).
 """
 
 import os
@@ -19,11 +20,13 @@ except ImportError:
     calculate_line_geometry = None
     solve_line_tensions_3d = None
 
+from config.constants import DEFAULT_SHIP, OFFSET_PLATFORM_FWD_M, OFFSET_PLATFORM_AFT_M
 from database.db_manager import save_port_bollards_to_db, load_port_bollards_from_db
 from utils.telemetry import calculate_bollard_coords
 
-OFFSET_PLATFORM_FWD_M = 25.0
-OFFSET_PLATFORM_AFT_M = 14.0
+# Valori stimati di default per le altezze dal livello del mare (Z=0)
+DEFAULT_OBS_HEIGHT_FWD = 12.0  # m (Ponte d'ormeggio/stazione Prua)
+DEFAULT_OBS_HEIGHT_AFT = 7.5   # m (Ponte d'ormeggio/stazione Poppa)
 
 
 def calculate_bollard_coordinates(
@@ -31,43 +34,56 @@ def calculate_bollard_coordinates(
     dist_inc: float,
     slope_deg: float,
     azimuth_deg: float,
-    ship_loa: float,
-    ship_beam: float,
+    ship_dict: dict,
     berth_side: str = "Port Side",
 ):
-    """Wrapper di supporto per calcolare le coordinate 3D delle bitte sulla banchina."""
+    """
+    Calcola le coordinate 3D delle bitte considerando l'altezza della stazione telemetrica.
+    """
+    loa = ship_dict.get("LOA", DEFAULT_SHIP["LOA"])
+    beam = ship_dict.get("Beam", DEFAULT_SHIP["Beam"])
+
+    z_obs = (
+        ship_dict.get("Obs_Platform_Fwd_Height", DEFAULT_OBS_HEIGHT_FWD)
+        if position_type == "Prua"
+        else ship_dict.get("Obs_Platform_Aft_Height", DEFAULT_OBS_HEIGHT_AFT)
+    )
+
     platform_offset = (
         OFFSET_PLATFORM_FWD_M if position_type == "Prua" else OFFSET_PLATFORM_AFT_M
     )
     platform_type = "bow" if position_type == "Prua" else "stern"
 
-    x_calc, y_calc, z_calc = calculate_bollard_coords(
+    x_calc, y_calc, z_rel = calculate_bollard_coords(
         distance_inc=dist_inc,
         pitch_angle_deg=slope_deg,
         azimuth_deg=azimuth_deg,
         platform_type=platform_type,
-        loa=ship_loa,
+        loa=loa,
         platform_offset=platform_offset,
     )
 
-    # Offset Y reale: le bitte sono posizionate lungo la banchina a filo murata + offset misurato
     side_sign = 1.0 if berth_side == "Port Side" else -1.0
-    y_final = (ship_beam / 2.0 + abs(y_calc)) * side_sign
+    y_final = (beam / 2.0 + abs(y_calc)) * side_sign
 
+    # Quota Z banchina/bitta rispetto al mare: Z_stazione - Delta_Z
+    z_final = z_obs - abs(z_rel)
     dist_horiz = dist_inc * np.cos(np.radians(slope_deg))
 
-    return round(dist_horiz, 2), x_calc, y_final, z_calc
+    return round(dist_horiz, 2), x_calc, y_final, z_final
 
 
-def generate_detailed_3d_ship(ship_dict, offset_fugro: float = 0.0):
+def generate_detailed_3d_ship(ship_dict: dict, offset_fugro: float = 0.0):
     """
-    Carica il modello CAD 3D .glb, allinea l'orientamento Prua (+X) / Poppa (-X)
-    e posiziona la linea di galleggiamento a Z=0.
+    Carica il modello CAD 3D .glb, lo scala esattamente sulle dimensioni di DEFAULT_SHIP
+    e posiziona la chiglia a -Draft (-8.5 m dal galleggiamento Z=0).
     """
-    loa = ship_dict.get("LOA", 323.44)
-    beam = ship_dict.get("Beam", 37.20)
-    bridge_bow = ship_dict.get("Bridge_To_Bow", 39.50)
-    bridge_eye_h = ship_dict.get("Bridge_Eye_Height", 26.40)
+    loa = ship_dict.get("LOA", DEFAULT_SHIP["LOA"])
+    beam = ship_dict.get("Beam", DEFAULT_SHIP["Beam"])
+    draft = ship_dict.get("Draft", DEFAULT_SHIP["Draft"])
+    beam_max = ship_dict.get("Beam_Max", DEFAULT_SHIP["Beam_Max"])
+    bridge_bow = ship_dict.get("Bridge_To_Bow", DEFAULT_SHIP["Bridge_To_Bow"])
+    bridge_eye_h = ship_dict.get("Bridge_Eye_Height", DEFAULT_SHIP["Bridge_Eye_Height"])
 
     base_dir = Path(__file__).resolve().parent.parent
     mesh_path = base_dir / "asset" / "carnivalpanorama.glb"
@@ -77,47 +93,43 @@ def generate_detailed_3d_ship(ship_dict, offset_fugro: float = 0.0):
     if mesh_path.exists():
         try:
             loaded = trimesh.load(str(mesh_path), force="mesh")
-            if isinstance(loaded, trimesh.Scene):
-                mesh = loaded.dump(concatenate=True)
-            else:
-                mesh = loaded
+            mesh = (
+                loaded.dump(concatenate=True)
+                if isinstance(loaded, trimesh.Scene)
+                else loaded
+            )
 
-            # 1. Identifica gli assi CAD originali ordinati per dimensione decrescente
+            # Ordinamento assi CAD (0: LOA, 1: Altezza, 2: Beam)
             orig_extents = mesh.extents
-            axis_order = np.argsort(orig_extents)[::-1] 
-            
-            idx_loa = axis_order[0]   # Asse più lungo -> LOA (X)
-            idx_h = axis_order[1]     # Asse intermedio -> Altezza (Z)
-            idx_beam = axis_order[2]  # Asse più corto -> Beam (Y)
+            axis_order = np.argsort(orig_extents)[::-1]
+            idx_loa, idx_h, idx_beam = axis_order[0], axis_order[1], axis_order[2]
 
-            # 2. Matrice di riordinamento degli assi (Invertiamo X per mettere la prua a +X)
+            # Orientamento: Inversione X per prua a +X
             R_align = np.zeros((4, 4))
-            R_align[0, idx_loa] = -1.0  # Inversione polo prua/poppa
-            R_align[1, idx_beam] = 1.0  # Y = Beam
-            R_align[2, idx_h] = 1.0     # Z = Altezza
+            R_align[0, idx_loa] = -1.0
+            R_align[1, idx_beam] = 1.0
+            R_align[2, idx_h] = 1.0
             R_align[3, 3] = 1.0
-
             mesh.apply_transform(R_align)
 
-            # 3. Limiti e scaling
+            # Scaling tridimensionale guidato dalle specifiche della nave
             extents = mesh.extents
-            bounds = mesh.bounds
-
             scale_x = loa / extents[0] if extents[0] != 0 else 1.0
             scale_y = beam / extents[1] if extents[1] != 0 else 1.0
             scale_z = scale_y
 
             vertices = mesh.vertices.copy()
-            vertices[:, 0] = vertices[:, 0] * scale_x
-            vertices[:, 1] = vertices[:, 1] * scale_y
-            vertices[:, 2] = vertices[:, 2] * scale_z
+            vertices[:, 0] *= scale_x
+            vertices[:, 1] *= scale_y
+            vertices[:, 2] *= scale_z
 
-            # 4. Centratura X=0 e galleggiamento Z=0
-            x_center = ((bounds[0][0] + bounds[1][0]) / 2.0) * scale_x
-            z_min = bounds[0][2] * scale_z
+            # Centratura X=0 (Centro nave) e Chiglia a -Draft (-8.5m)
+            bounds = mesh.bounds
+            x_center = (bounds[0][0] + bounds[1][0]) / 2.0
+            z_min = bounds[0][2]
 
             vertices[:, 0] = (vertices[:, 0] - x_center) + offset_fugro
-            vertices[:, 2] = vertices[:, 2] - z_min
+            vertices[:, 2] = (vertices[:, 2] - z_min) - draft
 
             traces.append(
                 go.Mesh3d(
@@ -141,7 +153,7 @@ def generate_detailed_3d_ship(ship_dict, offset_fugro: float = 0.0):
 
     # Alette di Plancia
     bridge_x = (loa / 2.0 - bridge_bow) + offset_fugro
-    wing_y = ship_dict.get("Beam_Max", 49.40) / 2.0
+    wing_y = beam_max / 2.0
     traces.append(
         go.Scatter3d(
             x=[bridge_x, bridge_x],
@@ -161,14 +173,22 @@ def generate_detailed_3d_ship(ship_dict, offset_fugro: float = 0.0):
 def render_tab_berth(selected_port, ship_dict):
     st.header(f"🗺️ Layout Banchina — {selected_port}")
 
+    # Applica parametri default se mancanti
+    for key, val in DEFAULT_SHIP.items():
+        ship_dict.setdefault(key, val)
+
+    ship_dict.setdefault("Obs_Platform_Fwd_Height", DEFAULT_OBS_HEIGHT_FWD)
+    ship_dict.setdefault("Obs_Platform_Aft_Height", DEFAULT_OBS_HEIGHT_AFT)
+
     offset_fugro = float(st.session_state.get("offset_fugro_m", 0.0))
 
     # Selettore Murata di Ormeggio
     col_info, col_side = st.columns([2, 1])
     with col_info:
         st.caption(
-            f"🚢 **{ship_dict.get('Name')}** | LOA: **{ship_dict.get('LOA')}m** |"
-            f" Offset FUGRO: **{offset_fugro:+.2f} m**"
+            f"🚢 **{ship_dict.get('Name')}** | LOA: **{ship_dict.get('LOA')}m** | "
+            f"Beam: **{ship_dict.get('Beam')}m** | Draft: **{ship_dict.get('Draft')}m** | "
+            f"Offset FUGRO: **{offset_fugro:+.2f} m**"
         )
     with col_side:
         berth_side = st.radio(
@@ -199,7 +219,9 @@ def render_tab_berth(selected_port, ship_dict):
             " Pendenza Verticale e Azimut per ogni bitta."
         )
 
-        st.subheader("⚓ Stazione di Prua (Fwd Observation Platform)")
+        st.subheader(
+            f"⚓ Stazione Prua (Quota Obs: {ship_dict['Obs_Platform_Fwd_Height']}m)"
+        )
         df_prua = (
             df_bollards[df_bollards["Posizione"] == "Prua"].copy()
             if not df_bollards.empty
@@ -219,18 +241,34 @@ def render_tab_berth(selected_port, ship_dict):
             use_container_width=True,
             key="editor_prua",
             column_config={
-                "bollard_id": st.column_config.TextColumn("ID Bitta", required=True),
-                "Dist_Inclinata_m": st.column_config.NumberColumn("Dist. Telemetro (m)", default=0.0, step=0.5),
-                "Pendenza_deg": st.column_config.NumberColumn("Pendenza (°)", default=0.0, step=1.0),
-                "Azimut_deg": st.column_config.NumberColumn("Azimut (°)", default=0.0, step=1.0),
-                "SWL_Bitta_t": st.column_config.NumberColumn("SWL (t)", default=100.0, min_value=10.0),
-                "Stato": st.column_config.SelectboxColumn("Stato", options=["In Uso", "Disponibile", "Danneggiata"], default="Disponibile"),
+                "bollard_id": st.column_config.TextColumn(
+                    "ID Bitta", required=True
+                ),
+                "Dist_Inclinata_m": st.column_config.NumberColumn(
+                    "Dist. Telemetro (m)", default=0.0, step=0.5
+                ),
+                "Pendenza_deg": st.column_config.NumberColumn(
+                    "Pendenza (°)", default=0.0, step=1.0
+                ),
+                "Azimut_deg": st.column_config.NumberColumn(
+                    "Azimut (°)", default=0.0, step=1.0
+                ),
+                "SWL_Bitta_t": st.column_config.NumberColumn(
+                    "SWL (t)", default=100.0, min_value=10.0
+                ),
+                "Stato": st.column_config.SelectboxColumn(
+                    "Stato",
+                    options=["In Uso", "Disponibile", "Danneggiata"],
+                    default="Disponibile",
+                ),
             },
         )
 
         st.divider()
 
-        st.subheader("⚓ Stazione di Poppa (Aft Observation Platform)")
+        st.subheader(
+            f"⚓ Stazione Poppa (Quota Obs: {ship_dict['Obs_Platform_Aft_Height']}m)"
+        )
         df_poppa = (
             df_bollards[df_bollards["Posizione"] == "Poppa"].copy()
             if not df_bollards.empty
@@ -250,12 +288,26 @@ def render_tab_berth(selected_port, ship_dict):
             use_container_width=True,
             key="editor_poppa",
             column_config={
-                "bollard_id": st.column_config.TextColumn("ID Bitta", required=True),
-                "Dist_Inclinata_m": st.column_config.NumberColumn("Dist. Telemetro (m)", default=0.0, step=0.5),
-                "Pendenza_deg": st.column_config.NumberColumn("Pendenza (°)", default=0.0, step=1.0),
-                "Azimut_deg": st.column_config.NumberColumn("Azimut (°)", default=0.0, step=1.0),
-                "SWL_Bitta_t": st.column_config.NumberColumn("SWL (t)", default=100.0, min_value=10.0),
-                "Stato": st.column_config.SelectboxColumn("Stato", options=["In Uso", "Disponibile", "Danneggiata"], default="Disponibile"),
+                "bollard_id": st.column_config.TextColumn(
+                    "ID Bitta", required=True
+                ),
+                "Dist_Inclinata_m": st.column_config.NumberColumn(
+                    "Dist. Telemetro (m)", default=0.0, step=0.5
+                ),
+                "Pendenza_deg": st.column_config.NumberColumn(
+                    "Pendenza (°)", default=0.0, step=1.0
+                ),
+                "Azimut_deg": st.column_config.NumberColumn(
+                    "Azimut (°)", default=0.0, step=1.0
+                ),
+                "SWL_Bitta_t": st.column_config.NumberColumn(
+                    "SWL (t)", default=100.0, min_value=10.0
+                ),
+                "Stato": st.column_config.SelectboxColumn(
+                    "Stato",
+                    options=["In Uso", "Disponibile", "Danneggiata"],
+                    default="Disponibile",
+                ),
             },
         )
 
@@ -263,7 +315,10 @@ def render_tab_berth(selected_port, ship_dict):
             updated_rows = []
 
             for idx, row in edited_prua.iterrows():
-                b_id = str(row.get("bollard_id", f"BP{idx+1}")).strip() or f"BP{idx+1}"
+                b_id = (
+                    str(row.get("bollard_id", f"BP{idx+1}")).strip()
+                    or f"BP{idx+1}"
+                )
                 d_inc = float(row.get("Dist_Inclinata_m", 0.0) or 0.0)
                 p_deg = float(row.get("Pendenza_deg", 0.0) or 0.0)
                 az_deg = float(row.get("Azimut_deg", 0.0) or 0.0)
@@ -273,8 +328,7 @@ def render_tab_berth(selected_port, ship_dict):
                     d_inc,
                     p_deg,
                     az_deg,
-                    ship_dict["LOA"],
-                    ship_dict["Beam"],
+                    ship_dict,
                     berth_side=berth_side,
                 )
                 updated_rows.append({
@@ -290,13 +344,18 @@ def render_tab_berth(selected_port, ship_dict):
                     "bollard_x_m": x_calc,
                     "bollard_y_m": y_calc,
                     "bollard_z_m": z_calc,
-                    "SWL_Bitta_t": float(row.get("SWL_Bitta_t", 100.0) or 100.0),
+                    "SWL_Bitta_t": float(
+                        row.get("SWL_Bitta_t", 100.0) or 100.0
+                    ),
                     "Stato": row.get("Stato", "Disponibile"),
                     "is_frozen": True,
                 })
 
             for idx, row in edited_poppa.iterrows():
-                b_id = str(row.get("bollard_id", f"BA{idx+1}")).strip() or f"BA{idx+1}"
+                b_id = (
+                    str(row.get("bollard_id", f"BA{idx+1}")).strip()
+                    or f"BA{idx+1}"
+                )
                 d_inc = float(row.get("Dist_Inclinata_m", 0.0) or 0.0)
                 p_deg = float(row.get("Pendenza_deg", 0.0) or 0.0)
                 az_deg = float(row.get("Azimut_deg", 0.0) or 0.0)
@@ -306,8 +365,7 @@ def render_tab_berth(selected_port, ship_dict):
                     d_inc,
                     p_deg,
                     az_deg,
-                    ship_dict["LOA"],
-                    ship_dict["Beam"],
+                    ship_dict,
                     berth_side=berth_side,
                 )
                 updated_rows.append({
@@ -323,7 +381,9 @@ def render_tab_berth(selected_port, ship_dict):
                     "bollard_x_m": x_calc,
                     "bollard_y_m": y_calc,
                     "bollard_z_m": z_calc,
-                    "SWL_Bitta_t": float(row.get("SWL_Bitta_t", 100.0) or 100.0),
+                    "SWL_Bitta_t": float(
+                        row.get("SWL_Bitta_t", 100.0) or 100.0
+                    ),
                     "Stato": row.get("Stato", "Disponibile"),
                     "is_frozen": True,
                 })
@@ -332,20 +392,24 @@ def render_tab_berth(selected_port, ship_dict):
             st.session_state.ports_bollards[selected_port] = final_df
 
             save_port_bollards_to_db(selected_port, final_df)
-            st.success(f"Layout salvato nel database per {selected_port} ({berth_side})!")
+            st.success(
+                f"Layout salvato nel database per {selected_port} ({berth_side})!"
+            )
             st.rerun()
 
     with col_map:
         st.subheader("🧊 Modellazione 3D Volumetric")
         fig = go.Figure()
 
-        for trace in generate_detailed_3d_ship(ship_dict, offset_fugro=offset_fugro):
+        for trace in generate_detailed_3d_ship(
+            ship_dict, offset_fugro=offset_fugro
+        ):
             fig.add_trace(trace)
 
-        loa = ship_dict.get("LOA", 323.44)
-        beam = ship_dict.get("Beam", 37.20)
+        loa = ship_dict.get("LOA", DEFAULT_SHIP["LOA"])
+        beam = ship_dict.get("Beam", DEFAULT_SHIP["Beam"])
 
-        # Posizionamento banchina a filo murata (Port Side = Y positivo, Starboard = Y negativo)
+        # Posizionamento banchina a filo murata
         side_multiplier = 1.0 if berth_side == "Port Side" else -1.0
         berth_y_start = (beam / 2.0) * side_multiplier
         berth_y_end = berth_y_start + (12.0 * side_multiplier)
@@ -372,7 +436,7 @@ def render_tab_berth(selected_port, ship_dict):
                     berth_y_end,
                     berth_y_end,
                 ],
-                z=[-6, -6, -6, -6, 0, 0, 0, 0],
+                z=[-12, -12, -12, -12, 0, 0, 0, 0],
                 i=[0, 0, 4, 4, 0, 0, 1, 1, 2, 2, 0, 0],
                 j=[1, 2, 5, 6, 1, 5, 2, 6, 3, 7, 3, 4],
                 k=[2, 3, 6, 7, 5, 4, 6, 5, 7, 6, 4, 7],
@@ -396,7 +460,10 @@ def render_tab_berth(selected_port, ship_dict):
                 )
             )
 
-        if calculate_line_geometry is not None and "lines_inventory" in st.session_state:
+        if (
+            calculate_line_geometry is not None
+            and "lines_inventory" in st.session_state
+        ):
             try:
                 lines_inv = st.session_state.lines_inventory
                 geom_df = calculate_line_geometry(
@@ -410,7 +477,11 @@ def render_tab_berth(selected_port, ship_dict):
                     if solve_line_tensions_3d is not None:
                         sim_df = solve_line_tensions_3d(
                             geom_df,
-                            {"Fx_total_t": 0.0, "Fy_total_t": 0.0, "Mz_total_tm": 0.0},
+                            {
+                                "Fx_total_t": 0.0,
+                                "Fy_total_t": 0.0,
+                                "Mz_total_tm": 0.0,
+                            },
                             pretension_pct=10.0,
                         )
                         st.session_state["latest_mooring_results"] = sim_df
