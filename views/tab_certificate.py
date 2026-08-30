@@ -1,7 +1,6 @@
 """
 views/tab_certificate.py
 Vista per la gestione, caricamento e parsing dei certificati cavi multi-componente.
-Identifica l'anello debole (Weak Point) e permette l'associazione diretta a Mooring Station, Winch Drum (Drum A / Drum B) e Basket.
 """
 
 import pandas as pd
@@ -45,11 +44,9 @@ def render_tab_certificate():
             st.session_state["parsed_cert_temp"] = cert_data
             st.success("✅ Parsing completato con successo!")
 
-    # VISUALIZZAZIONE COMPONENTI, WEAK POINT E ASSOCIAZIONE POSTAZIONE
     if "parsed_cert_temp" in st.session_state:
         cd = st.session_state["parsed_cert_temp"]
 
-        # Calcolo anello debole (Weak Point)
         components = {
             "Main Line": cd.get("main_mbl_tons", 0.0),
         }
@@ -70,7 +67,6 @@ def render_tab_certificate():
                 f" {cd.get('manufacturer')}"
             )
 
-            # Scomposizione 3 parti
             st.markdown("#### 🔗 Scomposizione Componenti Cavo")
             c1, c2, c3 = st.columns(3)
 
@@ -106,41 +102,26 @@ def render_tab_certificate():
                 else:
                     st.caption("Tail: Non Presente")
 
-            # Box Weak Point
             st.warning(
                 f"⚠️ **WEAK POINT IDENTIFICATO:** **{weak_point_name}**\n\n"
                 f"• **MBL Minimo Assieme:** **{weak_point_mbl:.2f} t**\n\n"
-                f"• **Limite Operativo MEG4 (55% MBL):** **{limite_55_mbl:.2f} t**\n\n"
-                f"*Valore di calcolo per le tensioni d'ormeggio.*"
+                f"• **Limite Operativo MEG4 (55% MBL):** **{limite_55_mbl:.2f} t**"
             )
 
-            # ASSOCIAZIONE MOORING STATION / WINCH / BASKET / DRUMS
             st.markdown("#### ⚓ Assegnazione Postazione d'Ormeggio & Tamburo Winch")
             col_a, col_b, col_c, col_d = st.columns([1, 1, 0.8, 1])
 
             with col_a:
                 station = st.selectbox(
                     "Mooring Station",
-                    [
-                        "FWD (Prora)",
-                        "AFT (Poppa)",
-                        "MID FWD (Centro Prora)",
-                        "MID AFT (Centro Poppa)",
-                    ],
+                    ["FWD (Prora)", "AFT (Poppa)", "MID FWD (Centro Prora)", "MID AFT (Centro Poppa)"],
                     key="sel_station",
                 )
 
             with col_b:
                 winch_name = st.selectbox(
                     "Winch",
-                    [
-                        "Winch 1",
-                        "Winch 2",
-                        "Winch 3",
-                        "Winch 4",
-                        "Winch 5",
-                        "Winch 6",
-                    ],
+                    ["Winch 1", "Winch 2", "Winch 3", "Winch 4", "Winch 5", "Winch 6"],
                     key="sel_winch",
                 )
 
@@ -152,9 +133,7 @@ def render_tab_certificate():
                 )
 
             with col_d:
-                basket_id = st.text_input(
-                    "Basket / Line ID", value="G1-GT1 FWD", key="sel_basket"
-                )
+                basket_id = st.text_input("Basket / Line ID", value="G1-GT1 FWD", key="sel_basket")
 
             if st.button("💾 Salva & Associa Certificato", type="primary"):
                 record = {
@@ -186,14 +165,10 @@ def render_tab_certificate():
                 assign_line_to_slot(record["cert_id"], station, "Winch", winch_name, winch_drum)
                 st.session_state.certificates_db = load_certificates_from_db()
                 st.success(
-                    f"✅ Cavo {basket_id} associato a {station} - {winch_name} [{winch_drum}]! MBL"
-                    f" operativo: {weak_point_mbl:.2f} t (Limite 55%:"
-                    f" {limite_55_mbl:.2f} t)."
+                    f"✅ Cavo {basket_id} associato a {station} - {winch_name} [{winch_drum}]!"
                 )
 
     st.divider()
-
-    # REGISTRO CERTIFICATI E ASSEGNAZIONI
     st.subheader("📚 Registro Cavi & Assegnazioni Salvate")
     df_certs = load_certificates_from_db()
     if not df_certs.empty:
