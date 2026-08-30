@@ -1,25 +1,28 @@
 """
 views/tab_plans.py
-Pianetti Mooring Station: Gestione Usura Cime & Assegnazione Posizioni Ormeggio.
+Pianetti Mooring Station: Sincronizzazione PERMANENTE su DB e stato persistente senza perdite.
 """
 
 import os
 import pandas as pd
 import streamlit as st
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 from datetime import date
+from streamlit_image_coordinates import streamlit_image_coordinates
 
 from database.db_manager import (
     get_line_history,
     save_mooring_station_components,
     get_mooring_station_components,
+    save_station_image_file,
+    get_station_image_path,
     save_line_history,
     assign_line_to_slot,
     load_certificates_from_db
 )
 
 # -----------------------------------------------------------------------------
-# REFERENCE LIBRARY ISO 2307 / CI 2001 & AI SIMULATION
+# REFERENCE LIBRARY ISO 2307 / CI 2001
 # -----------------------------------------------------------------------------
 DAMAGE_REFERENCE_LIBRARY = {
     "Abrasione Superficiale": {
@@ -58,31 +61,79 @@ def analyze_damage_with_ai(image_file):
     }
 
 # -----------------------------------------------------------------------------
-# PRESET ESTRUTTURALE PER STAZIONI DI ORMEGGIO
+# DISEGNO COMPONENTI SUL PIANETTO (MARCATORI VISIBILI)
 # -----------------------------------------------------------------------------
-DEFAULT_STATION_PRESETS = {
-    "Prua (Forward Station)": [
-        {"slot_id": "W1 (Drum A)", "comp_type": "WINCH", "assigned_line": "Nessuna"},
-        {"slot_id": "W1 (Drum B)", "comp_type": "WINCH", "assigned_line": "Nessuna"},
-        {"slot_id": "W2 (Drum A)", "comp_type": "WINCH", "assigned_line": "Nessuna"},
-        {"slot_id": "W2 (Drum B)", "comp_type": "WINCH", "assigned_line": "Nessuna"},
-        {"slot_id": "Cesta Prua 1", "comp_type": "BASKET", "assigned_line": "Nessuna"},
-        {"slot_id": "Cesta Prua 2", "comp_type": "BASKET", "assigned_line": "Nessuna"},
-    ],
-    "Poppa (Aft Station)": [
-        {"slot_id": "W3 (Drum A)", "comp_type": "WINCH", "assigned_line": "Nessuna"},
-        {"slot_id": "W3 (Drum B)", "comp_type": "WINCH", "assigned_line": "Nessuna"},
-        {"slot_id": "W4 (Drum A)", "comp_type": "WINCH", "assigned_line": "Nessuna"},
-        {"slot_id": "W4 (Drum B)", "comp_type": "WINCH", "assigned_line": "Nessuna"},
-        {"slot_id": "Cesta Poppa 1", "comp_type": "BASKET", "assigned_line": "Nessuna"},
-    ]
-}
+def draw_components_on_image(image: Image.Image, components_df: pd.DataFrame) -> Image.Image:
+    """Disegna marcatori ed etichette con coordinamento x, y su immagine."""
+    img_copy = image.copy().convert("RGB")
+    draw = ImageDraw.Draw(img_copy)
+
+    color_map = {
+        "WINCH": (255, 75, 75),       # Rosso
+        "BASKET": (255, 165, 0),     # Arancione
+        "CHOCK": (0, 200, 83),       # Verde
+        "CAPSTAN": (153, 50, 204)    # Viola
+    }
+    marker_size = 8
+
+    try:
+        font = ImageFont.truetype("arial.ttf", 11)
+    except IOError:
+        font = ImageFont.load_default()
+
+    if components_df is not None and not components_df.empty:
+        for _, row in components_df.iterrows():
+            try:
+                x = float(row.get("pos_x", row.get("x_pos", row.get("x", 0))))
+                y = float(row.get("pos_y", row.get("y_pos", row.get("y", 0))))
+            except (ValueError, TypeError):
+                continue
+
+            c_type = str(row.get("comp_type", row.get("component_type", "WINCH")))
+            c_id = str(row.get("comp_id", row.get("component_id", "")))
+            color = color_map.get(c_type, (0, 123, 255))
+
+            # Disegna Quadrato Marcatore
+            draw.rectangle(
+                [x - marker_size, y - marker_size, x + marker_size, y + marker_size],
+                fill=color, outline=(255, 255, 255), width=2
+            )
+
+            # Informazioni Cima
+            line_info = ""
+            if c_type == "WINCH":
+                l1 = str(row.get("line_drum_a", "Nessuna"))
+                if l1 and l1 != "Nessuna":
+                    line_info = f" ({l1.split(' ')[0]})"
+            elif c_type == "BASKET":
+                assigned = str(row.get("assigned_line_id", "Nessuna"))
+                if assigned and assigned != "Nessuna":
+                    line_info = f" [{assigned.split(' ')[0]}]"
+
+            label_text = f"{c_id}{line_info}"
+
+            # Sfondo Etichetta
+            bbox = draw.textbbox((0, 0), label_text, font=font)
+            text_w = bbox[2] - bbox[0]
+            text_h = bbox[3] - bbox[1]
+
+            pad = 3
+            text_x = x - (text_w / 2)
+            text_y = y - marker_size - text_h - 6
+
+            draw.rectangle(
+                [text_x - pad, text_y - pad, text_x + text_w + pad, text_y + text_h + pad],
+                fill=(255, 255, 255), outline=(0, 0, 0), width=1
+            )
+            draw.text((text_x, text_y), label_text, fill=(0, 0, 0), font=font)
+
+    return img_copy
 
 # -----------------------------------------------------------------------------
-# GESTIONE DATABASE & SINCRONIZZAZIONE CIME
+# CARICAMENTO DB RIGIDO (NO OVERWRITE)
 # -----------------------------------------------------------------------------
-def load_station_slots(station_name: str) -> pd.DataFrame:
-    """Carica gli slot della stazione dal DB o applica il preset di default."""
+def load_station_data_from_db(station_name: str) -> pd.DataFrame:
+    """Carica i componenti salvati nel DB e gestisce le chiavi mancanti."""
     db_data = get_mooring_station_components(station_name)
     records = []
 
@@ -91,45 +142,54 @@ def load_station_slots(station_name: str) -> pd.DataFrame:
     elif isinstance(db_data, list) and len(db_data) > 0:
         records = db_data
 
-    if not records and station_name in DEFAULT_STATION_PRESETS:
-        records = DEFAULT_STATION_PRESETS[station_name]
-        save_mooring_station_components(records, station_name)
-
     clean_records = []
     for r in records:
         clean_records.append({
-            "slot_id": r.get("slot_id", r.get("comp_id", "SLOT")),
-            "comp_type": r.get("comp_type", "WINCH"),
-            "assigned_line": r.get("assigned_line", r.get("line_drum_a", "Nessuna"))
+            "comp_type": r.get("comp_type", r.get("type", r.get("component_type", "WINCH"))),
+            "comp_id": r.get("comp_id", r.get("id", r.get("component_id", "ELEMENTO"))),
+            "pos_x": float(r.get("pos_x", r.get("x", r.get("x_pos", 0)))),
+            "pos_y": float(r.get("pos_y", r.get("y", r.get("y_pos", 0)))),
+            "line_drum_a": r.get("line_drum_a", "Nessuna"),
+            "line_drum_b": r.get("line_drum_b", "Nessuna"),
+            "line_capstan": r.get("line_capstan", "Nessuna"),
+            "assigned_line_id": r.get("assigned_line_id", "N/D"),
+            "source_basket": r.get("source_basket", "Nessuno"),
+            "wear_pct": int(r.get("wear_pct", 0)),
+            "condition": r.get("condition", "BUONO"),
+            "last_inspection_date": r.get("last_inspection_date", str(date.today())),
+            "last_inspection_note": r.get("last_inspection_note", "")
         })
 
-    return pd.DataFrame(clean_records)
+    cols = ["comp_type", "comp_id", "pos_x", "pos_y", "line_drum_a", "line_drum_b", "line_capstan", "assigned_line_id", "source_basket", "wear_pct", "condition", "last_inspection_date", "last_inspection_note"]
+    if clean_records:
+        return pd.DataFrame(clean_records)
+    return pd.DataFrame(columns=cols)
 
 
-def update_line_wear_in_db(line_id: str, new_wear: int, status: str, note: str):
-    """Aggiorna lo stato di usura della cima nell'inventario globale."""
-    if not line_id or line_id == "Nessuna":
+def update_line_inventory_and_history(line_name: str, new_wear: int, condition: str, note: str):
+    """Sincronizza permanentemente con l'inventario generale e lo storico cime."""
+    if not line_name or line_name == "Nessuna":
         return
-
-    clean_id = line_id.split(" ")[0]
+    
+    clean_line_id = line_name.split(" ")[0]
     lines_df = get_line_history()
+    
     id_col = "line_id" if "line_id" in lines_df.columns else "id"
-
-    if not lines_df.empty and clean_id in lines_df[id_col].astype(str).values:
-        lines_df.loc[lines_df[id_col].astype(str) == clean_id, "wear_percentage"] = new_wear
-        lines_df.loc[lines_df[id_col].astype(str) == clean_id, "status"] = status
-        lines_df.loc[lines_df[id_col].astype(str) == clean_id, "last_inspection"] = str(date.today())
-        lines_df.loc[lines_df[id_col].astype(str) == clean_id, "notes"] = note
+    if not lines_df.empty and clean_line_id in lines_df[id_col].astype(str).values:
+        lines_df.loc[lines_df[id_col].astype(str) == clean_line_id, "wear_percentage"] = new_wear
+        lines_df.loc[lines_df[id_col].astype(str) == clean_line_id, "status"] = condition
+        lines_df.loc[lines_df[id_col].astype(str) == clean_line_id, "last_inspection"] = str(date.today())
+        lines_df.loc[lines_df[id_col].astype(str) == clean_line_id, "notes"] = note
     else:
         new_row = pd.DataFrame([{
-            "line_id": clean_id,
+            "line_id": clean_line_id,
             "last_port": "N/D",
             "current_setup": "N/D",
             "applied_tension_mbl_pct": 0.0,
             "total_hours": 0.0,
             "accumulated_stress_index": 0.0,
             "wear_percentage": new_wear,
-            "status": status,
+            "status": condition,
             "last_inspection": str(date.today()),
             "notes": note,
             "last_auto_sync": str(date.today())
@@ -138,14 +198,12 @@ def update_line_wear_in_db(line_id: str, new_wear: int, status: str, note: str):
 
     save_line_history(lines_df)
 
-# -----------------------------------------------------------------------------
-# DIALOG AI INSPECTION PER CIMA
-# -----------------------------------------------------------------------------
-@st.dialog("📸 Ispezione & Analisi Danno Cima", width="large")
-def open_line_inspection_dialog(line_id: str, current_wear: int):
-    st.write(f"Ispezione Cima: **{line_id}**")
+
+@st.dialog("📸 Analisi Foto Danno Cima (AI + Reference Library)", width="large")
+def open_ai_inspection_dialog(row, idx, station_sel, st_df):
+    st.write(f"Ispezione rapida: **{row.get('comp_id')}** — Cima: `{row.get('line_drum_a', 'Nessuna')}`")
     
-    img_file = st.camera_input("Scatta foto al danno della cima")
+    img_file = st.camera_input("Scatta foto al danno sulla cima")
     if not img_file:
         img_file = st.file_uploader("Oppure carica foto dalla galleria", type=["jpg", "png", "jpeg"])
 
@@ -158,7 +216,7 @@ def open_line_inspection_dialog(line_id: str, current_wear: int):
         st.markdown("---")
         col_snap, col_ref = st.columns(2)
         with col_snap:
-            st.caption("📷 Foto Danno Rilevato")
+            st.caption("📷 Foto Scattata a Bordo")
             st.image(Image.open(img_file), use_container_width=True)
         with col_ref:
             st.caption(f"📚 Catalogo Ufficiale ISO: **{ai_res['damage_type']}**")
@@ -168,173 +226,286 @@ def open_line_inspection_dialog(line_id: str, current_wear: int):
                 st.info(f"**Descrizione:** {ref_data['description']}\n\n**Gravità ISO:** `{ref_data['iso_severity']}`")
 
         st.markdown("---")
-        st.write("**Valutazione Incremento Usura Cima:**")
+        st.write("**Conferma o Correggi Valutazione Usura Extra:**")
+        
+        if f"selected_wear_{idx}" not in st.session_state:
+            st.session_state[f"selected_wear_{idx}"] = ai_res["suggested_extra_wear"]
 
         c_low, c_ai, c_high = st.columns(3)
-        extra_wear = ai_res["suggested_extra_wear"]
-        
         if c_low.button("📉 Lieve (+15%)"):
-            extra_wear = 15
-        if c_ai.button(f"🤖 AI (+{ai_res['suggested_extra_wear']}%)"):
-            extra_wear = ai_res["suggested_extra_wear"]
+            st.session_state[f"selected_wear_{idx}"] = 15
+        if c_ai.button(f"🤖 AI Default (+{ai_res['suggested_extra_wear']}%)"):
+            st.session_state[f"selected_wear_{idx}"] = ai_res["suggested_extra_wear"]
         if c_high.button("📈 Severo (+45%)"):
-            extra_wear = 45
+            st.session_state[f"selected_wear_{idx}"] = 45
 
-        new_total_wear = min(100, current_wear + extra_wear)
-        st.metric("Nuova Usura Totale Cima", f"{new_total_wear}%", delta=f"+{extra_wear}%")
+        final_extra = st.session_state[f"selected_wear_{idx}"]
+        current_wear = int(row.get("wear_pct", 0))
+        new_total_wear = min(100, current_wear + final_extra)
 
-        if st.button("💾 Salvataggio Permanente Ispezione Cima", type="primary", use_container_width=True):
-            status_str = "CRITICO" if new_total_wear > 60 else "USURATO"
-            note_str = f"AI: {ai_res['damage_type']} (+{extra_wear}%)"
+        st.metric("Usura Totale Calcolata", f"{new_total_wear}%", delta=f"+{final_extra}% applicati")
+
+        if st.button("💾 Conferma ed Aggiorna Tutti i Tab", type="primary", use_container_width=True):
+            st_df.loc[idx, "wear_pct"] = new_total_wear
+            st_df.loc[idx, "condition"] = "DANNEGGIATO" if new_total_wear > 60 else "USURATO"
+            st_df.loc[idx, "last_inspection_date"] = str(date.today())
+            st_df.loc[idx, "last_inspection_note"] = f"AI Danno: {ai_res['damage_type']} (+{final_extra}%)"
+
+            # 1. Salvataggio Stazione d'Ormeggio DB
+            st.session_state.mooring_stations[station_sel] = st_df
+            save_mooring_station_components(st_df.to_dict(orient="records"), station_sel)
             
-            update_line_wear_in_db(line_id, new_total_wear, status_str, note_str)
-            st.success(f"Usura della cima {line_id} aggiornata al {new_total_wear}%!")
+            # 2. Sincronizzazione permanente su Inventario e Storico Cime DB
+            target_line = row.get("line_drum_a", row.get("assigned_line_id", "Nessuna"))
+            update_line_inventory_and_history(
+                target_line, new_total_wear, str(st_df.loc[idx, "condition"]), str(st_df.loc[idx, "last_inspection_note"])
+            )
+
+            del st.session_state[f"selected_wear_{idx}"]
+            st.success("Dati salvati permanentemente in memoria e registrati in tutti i Tab!")
             st.rerun()
 
 # -----------------------------------------------------------------------------
 # MAIN TAB PLANS
 # -----------------------------------------------------------------------------
 def render_tab_plans():
-    st.header("🪢 Gestione Cime & Assegnazione Posizioni d'Ormeggio")
+    st.header("🏗️ Mappatura Stazioni d'Ormeggio & Pianetti Interattivi")
 
-    stations_list = list(DEFAULT_STATION_PRESETS.keys())
+    stations_list = [
+        "Prua (Forward Station)",
+        "Poppa (Aft Station)",
+        "Centro Prua (Mid FWD)",
+        "Centro Poppa (Mid AFT)"
+    ]
+
+    # Carica la mappa delle stazioni in session_state, ripescando direttamente dal DB
+    if "mooring_stations" not in st.session_state:
+        st.session_state.mooring_stations = {}
+
     station_sel = st.selectbox("Seleziona Stazione d'Ormeggio", stations_list, key="selected_mooring_station")
+    if not station_sel:
+        return
+
+    # FORZA SEMPRE IL RIPESCAGGIO DA DB AD OGNI SELEZIONE PER EVITARE DISCORDANZE TRA RESTART
+    st_df = load_station_data_from_db(station_sel)
+    st.session_state.mooring_stations[station_sel] = st_df
+    
     st_code = "FWD" if "Prua" in station_sel else "AFT"
 
-    # Caricamento Slot Stazione e Storico Cime
-    slots_df = load_station_slots(station_sel)
-    lines_history_df = get_line_history()
+    # SELEZIONE CIME INVENTARIO / CERTIFICATI
     certs_df = load_certificates_from_db()
-
-    # Elenco cime disponibili da certificati/inventario
-    available_lines = ["Nessuna"]
+    line_options = ["Nessuna"]
     if not certs_df.empty and "cert_id" in certs_df.columns:
         for _, c_row in certs_df.iterrows():
             c_id = str(c_row["cert_id"])
             c_mat = str(c_row.get("material", ""))
             c_dia = str(c_row.get("diameter_mm", ""))
             desc = f"{c_id} ({c_mat} - {c_dia}mm)" if c_mat else c_id
-            available_lines.append(desc)
+            line_options.append(desc)
 
-    # AZIONI RAPIDE
-    st.markdown("---")
-    c_act1, c_act2 = st.columns([1, 1])
-    
-    with c_act1:
-        if st.button("🔄 Ripristina Layout Posizioni Standard", use_container_width=True):
-            slots_df = pd.DataFrame(DEFAULT_STATION_PRESETS[station_sel])
-            save_mooring_station_components(slots_df.to_dict(orient="records"), station_sel)
-            st.success("Layout stazioni ripristinato!")
-            st.rerun()
+    # GESTIONE E RIDIMENSIONAMENTO IMMAGINE PIANETTO
+    saved_img_path = get_station_image_path(station_sel)
 
-    with c_act2:
-        if st.button("✅ Ispezione Rapida: Tutte le Cime OK", type="primary", use_container_width=True):
-            for _, r in slots_df.iterrows():
-                line = r["assigned_line"]
-                if line != "Nessuna":
-                    update_line_wear_in_db(line, 0, "OTTIMO", "Ispezione Standard OK")
-            st.success("Tutte le cime attive confermate in ottimo stato!")
-            st.rerun()
+    uploaded_image = st.file_uploader(
+        f"📷 Carica/Sostituisci Pianetta per: {station_sel}",
+        type=["png", "jpg", "jpeg"],
+        key=f"uploader_{station_sel}"
+    )
 
-    # PANNELLO CIME PER SLOT
-    st.markdown("### ⚓ Cime Attive in Stazione")
-
-    has_changes = False
-
-    for idx, row in slots_df.iterrows():
-        slot_id = str(row["slot_id"])
-        comp_type = str(row["comp_type"])
-        curr_line = str(row["assigned_line"])
-
-        # Recupera usura e stato attuale della cima dal DB inventario
-        line_wear = 0
-        line_status = "NON ASSEGNATA"
-        
-        if curr_line != "Nessuna":
-            clean_id = curr_line.split(" ")[0]
-            if not lines_history_df.empty:
-                id_col = "line_id" if "line_id" in lines_history_df.columns else "id"
-                match = lines_history_df[lines_history_df[id_col].astype(str) == clean_id]
-                if not match.empty:
-                    line_wear = int(match.iloc[0].get("wear_percentage", 0))
-                    line_status = str(match.iloc[0].get("status", "OTTIMO"))
-
-        # Indicatore visivo usura cima
-        if curr_line == "Nessuna":
-            badge = "⚪"
-        elif line_wear < 40:
-            badge = "🟢"
-        elif line_wear < 70:
-            badge = "🟡"
-        else:
-            badge = "🔴"
-
-        card_title = f"{badge} Slot: **{slot_id}** | Cima: `{curr_line}` | Usura: **{line_wear}%**"
-        
-        with st.expander(card_title, expanded=True):
-            c_sel, c_info, c_inspect = st.columns([2.5, 2, 1.5])
-
-            with c_sel:
-                line_idx = available_lines.index(curr_line) if curr_line in available_lines else 0
-                selected_line = st.selectbox(
-                    f"Seleziona Cima per {slot_id}",
-                    available_lines,
-                    index=line_idx,
-                    key=f"select_line_{station_sel}_{idx}"
-                )
-
-                if selected_line != curr_line:
-                    slots_df.loc[idx, "assigned_line"] = selected_line
-                    has_changes = True
-                    if selected_line != "Nessuna":
-                        clean_sel_id = selected_line.split(" ")[0]
-                        slot_type_desc = "Winch (Drum Winch)" if comp_type == "WINCH" else "Cesta (Basket / Rope Locker)"
-                        assign_line_to_slot(clean_sel_id, st_code, slot_type_desc, slot_id)
-
-            with c_info:
-                st.write("**Stato Cima**")
-                if curr_line != "Nessuna":
-                    st.caption(f"Stato: `{line_status}`")
-                    st.progress(line_wear / 100)
-                else:
-                    st.caption("Nessuna cima montata su questo tamburo/cesta.")
-
-            with c_inspect:
-                st.write("**Ispezione Danno**")
-                if curr_line != "Nessuna":
-                    if st.button("📸 Ispeziona AI", key=f"btn_ai_{station_sel}_{idx}", use_container_width=True):
-                        open_line_inspection_dialog(curr_line, line_wear)
-                else:
-                    st.button("📸 Ispeziona AI", key=f"btn_ai_dis_{station_sel}_{idx}", disabled=True, use_container_width=True)
-
-    if has_changes:
-        save_mooring_station_components(slots_df.to_dict(orient="records"), station_sel)
-        st.toast("Assegnazione cime aggiornata!", icon="💾")
+    if uploaded_image is not None:
+        file_bytes = uploaded_image.getvalue()
+        _, ext = os.path.splitext(uploaded_image.name)
+        saved_img_path = save_station_image_file(station_sel, file_bytes, ext)
+        st.success("Immagine salvata!")
         st.rerun()
 
-    # TABELLA RIASSUNTIVA DELLE CIME NELLA STAZIONE
+    if saved_img_path and os.path.exists(saved_img_path):
+        raw_img = Image.open(saved_img_path)
+    else:
+        st.warning("⚠️ Nessun disegno caricato per questa stazione. Carica un file immagine sopra.")
+        raw_img = Image.new('RGB', (650, 380), color=(240, 240, 240))
+
+    TARGET_WIDTH = 650
+    w_percent = TARGET_WIDTH / float(raw_img.size[0])
+    target_height = int(float(raw_img.size[1]) * float(w_percent))
+    bg_img = raw_img.resize((TARGET_WIDTH, target_height), Image.Resampling.LANCZOS)
+
+    key_click = f"click_pos_{station_sel}"
+    if key_click not in st.session_state:
+        st.session_state[key_click] = {"x": int(TARGET_WIDTH / 2), "y": int(target_height / 2)}
+
+    # Disegno Marcatori su Immagine
+    annotated_img = draw_components_on_image(bg_img, st_df)
+
     st.markdown("---")
-    st.subheader("📋 Tabella Riassuntiva Cime Stazione")
-    
-    summary_data = []
-    for _, r in slots_df.iterrows():
-        l_name = r["assigned_line"]
-        wear_val = 0
-        st_val = "N/D"
-        if l_name != "Nessuna" and not lines_history_df.empty:
-            clean_id = l_name.split(" ")[0]
-            id_col = "line_id" if "line_id" in lines_history_df.columns else "id"
-            match = lines_history_df[lines_history_df[id_col].astype(str) == clean_id]
-            if not match.empty:
-                wear_val = int(match.iloc[0].get("wear_percentage", 0))
-                st_val = str(match.iloc[0].get("status", "OTTIMO"))
+    col_map, col_form = st.columns([1.7, 1.1])
 
-        summary_data.append({
-            "Posizione/Slot": r["slot_id"],
-            "Tipologia Supporto": r["comp_type"],
-            "Cima Assegnata": l_name,
-            "Usura Cima (%)": wear_val,
-            "Stato Cima": st_val
-        })
+    with col_map:
+        st.subheader("👆 Clicca sul disegno per aggiungere un elemento")
+        value = streamlit_image_coordinates(
+            annotated_img,
+            width=TARGET_WIDTH,
+            key=f"img_coords_{station_sel}"
+        )
 
-    st.dataframe(pd.DataFrame(summary_data), use_container_width=True)
+        if value is not None:
+            st.session_state[key_click] = {"x": value["x"], "y": value["y"]}
+
+    with col_form:
+        st.subheader("🎯 Configura Componente")
+        curr_x = st.session_state[key_click]["x"]
+        curr_y = st.session_state[key_click]["y"]
+        st.info(f"Punto Cliccato: **X={curr_x} px, Y={curr_y} px**")
+
+        comp_type = st.selectbox("Tipologia Elemento", ["WINCH", "BASKET", "CHOCK", "CAPSTAN"], key=f"comp_type_{station_sel}")
+        comp_id = st.text_input("Identificativo Componente", f"{comp_type[0]}_{len(st_df)+1}", key=f"comp_id_{station_sel}")
+
+        basket_options = ["Nessuno"]
+        if not st_df.empty:
+            c_type_col = "comp_type" if "comp_type" in st_df.columns else "component_type"
+            c_id_col = "comp_id" if "comp_id" in st_df.columns else "component_id"
+            if c_type_col in st_df.columns and c_id_col in st_df.columns:
+                basket_options += st_df[st_df[c_type_col] == "BASKET"][c_id_col].tolist()
+
+        line_drum_a = "Nessuna"
+        line_drum_b = "Nessuna"
+        line_capstan = "Nessuna"
+        assigned_line = "N/D"
+        source_basket = "Nessuno"
+
+        if comp_type == "WINCH":
+            st.markdown("---")
+            st.caption("⚙️ Assegnazione Cime")
+            line_drum_a = st.selectbox("Cima - Tamburo A", line_options, key=f"dr_a_{station_sel}")
+            line_drum_b = st.selectbox("Cima - Tamburo B", line_options, key=f"dr_b_{station_sel}")
+            if st.checkbox("Collega cavo alla Capstan del Winch", key=f"chk_cap_{station_sel}"):
+                line_capstan = st.selectbox("Cima su Capstan", line_options, key=f"cap_{station_sel}")
+                source_basket = st.selectbox("Origine Cima (Basket)", basket_options, key=f"src_bsk_winch_{station_sel}")
+        elif comp_type == "BASKET":
+            assigned_line = st.selectbox("Cima stivata nel Basket", line_options, key=f"bsk_line_{station_sel}")
+        elif comp_type == "CAPSTAN":
+            line_capstan = st.selectbox("Cima d'Ormeggio collegata", line_options, key=f"cap_standalone_{station_sel}")
+            source_basket = st.selectbox("Origine Cima (Basket)", basket_options, key=f"src_bsk_cap_{station_sel}")
+
+        # SALVATAGGIO NUOVO ELEMENTO PERSISTENTE
+        if st.button("➕ Salva ed Inserisci sul Pianetto", use_container_width=True, type="primary", key=f"btn_add_{station_sel}"):
+            new_row = pd.DataFrame([{
+                "comp_type": comp_type,
+                "comp_id": comp_id,
+                "pos_x": float(curr_x),
+                "pos_y": float(curr_y),
+                "line_drum_a": line_drum_a,
+                "line_drum_b": line_drum_b,
+                "line_capstan": line_capstan,
+                "assigned_line_id": assigned_line if comp_type == "BASKET" else line_drum_a,
+                "source_basket": source_basket,
+                "wear_pct": 0,
+                "condition": "OTTIMO",
+                "last_inspection_date": str(date.today()),
+                "last_inspection_note": "Inizializzazione"
+            }])
+
+            # Concatenazione e aggiornamento Session State
+            updated_df = pd.concat([st_df, new_row], ignore_index=True)
+            st.session_state.mooring_stations[station_sel] = updated_df
+
+            # SALVATAGGIO FORZATO SU DB SQLITE
+            save_mooring_station_components(updated_df.to_dict(orient="records"), station_sel)
+
+            # SINCRO BIDIREZIONALE VERSO TAB CERTIFICATI
+            if line_drum_a != "Nessuna":
+                c_id_a = line_drum_a.split(" ")[0]
+                assign_line_to_slot(c_id_a, st_code, "Winch (Drum Winch)", f"{comp_id} (Drum A)")
+            if line_drum_b != "Nessuna":
+                c_id_b = line_drum_b.split(" ")[0]
+                assign_line_to_slot(c_id_b, st_code, "Winch (Drum Winch)", f"{comp_id} (Drum B)")
+            if comp_type == "BASKET" and assigned_line != "Nessuna":
+                c_id_bk = assigned_line.split(" ")[0]
+                assign_line_to_slot(c_id_bk, st_code, "Cesta (Basket / Rope Locker)", f"{comp_id}")
+
+            st.success(f"Elemento {comp_id} salvato e sincronizzato permanentemente!")
+            st.rerun()
+
+    # ISPEZIONE RAPIDA
+    st.markdown("---")
+    st.subheader(f"🛡️ Ispezione Rapida & Controllo Stato: {station_sel}")
+
+    col_banner, col_confirm_all = st.columns([3, 1.2])
+    with col_banner:
+        st.info("ℹ️ Premi **'Conferma Tutti OK'** per registrare l'ispezione standard senza problemi.")
+    with col_confirm_all:
+        if st.button("✅ Conferma Tutti OK", type="primary", use_container_width=True, key=f"btn_ok_all_{station_sel}"):
+            today_str = str(date.today())
+            for idx in st_df.index:
+                st_df.loc[idx, "last_inspection_date"] = today_str
+                target_line = st_df.loc[idx, "line_drum_a"]
+                update_line_inventory_and_history(
+                    target_line, int(st_df.loc[idx, "wear_pct"]), str(st_df.loc[idx, "condition"]), "Ispezione Standard OK"
+                )
+            
+            st.session_state.mooring_stations[station_sel] = st_df
+            save_mooring_station_components(st_df.to_dict(orient="records"), station_sel)
+            st.success("Ispezione salvata su DB!")
+            st.rerun()
+
+    st.caption("Segnala anomalie visive con foto solo sui cavi interessati:")
+    for idx, row in st_df.iterrows():
+        c_id, c_type, c_wear, c_action = st.columns([2, 2, 2.5, 1.5])
+        wear = int(row.get("wear_pct", 0))
+        badge = "🟢" if wear < 40 else "🟡" if wear < 70 else "🔴"
+        
+        c_id.write(f"**{row.get('comp_id', row.get('component_id', ''))}**")
+        c_type.write(f"{row.get('comp_type', row.get('component_type', ''))} (`{row.get('line_drum_a', 'Nessuna')}`)")
+        c_wear.write(f"{badge} Usura: **{wear}%** | {row.get('condition', 'OK')}")
+
+        if c_action.button("📸 Segnala Danno", key=f"btn_ai_{station_sel}_{idx}"):
+            open_ai_inspection_dialog(row, idx, station_sel, st_df)
+
+    # MODIFICA TABELLARE CON SALVATAGGIO
+    st.markdown("---")
+    st.subheader(f"⚙️ Modifica Tabellare: {station_sel}")
+    edited_df = st.data_editor(
+        st_df, num_rows="dynamic", use_container_width=True, key=f"editor_{station_sel}"
+    )
+
+    if st.button("💾 Sincronizza Tabella su DB", key=f"btn_sync_editor_{station_sel}"):
+        if not edited_df.empty:
+            if "pos_x" in edited_df.columns:
+                edited_df["pos_x"] = pd.to_numeric(edited_df["pos_x"], errors="coerce").fillna(0.0)
+            if "pos_y" in edited_df.columns:
+                edited_df["pos_y"] = pd.to_numeric(edited_df["pos_y"], errors="coerce").fillna(0.0)
+            if "wear_pct" in edited_df.columns:
+                edited_df["wear_pct"] = pd.to_numeric(edited_df["wear_pct"], errors="coerce").fillna(0).astype(int)
+
+        st.session_state.mooring_stations[station_sel] = edited_df
+        save_mooring_station_components(edited_df.to_dict(orient="records"), station_sel)
+        st.success("Salvataggio DB eseguito!")
+        st.rerun()
+
+    # ELIMINAZIONE ELEMENTI CON SALVATAGGIO
+    st.markdown("---")
+    st.subheader(f"🗑️ Eliminazione Elementi: {station_sel}")
+
+    if not st_df.empty:
+        for idx, row in st_df.iterrows():
+            c1, c2, c3, c4 = st.columns([1.5, 2, 3, 1])
+            c1.write(f"**{row.get('comp_type', row.get('component_type', ''))}**")
+            c2.write(f"ID: `{row.get('comp_id', row.get('component_id', ''))}`")
+            x_val = row.get('pos_x', row.get('x_pos', 0))
+            y_val = row.get('pos_y', row.get('y_pos', 0))
+            c3.write(f"Posizione: ({int(float(x_val))}px, {int(float(y_val))}px)")
+            
+            if c4.button("🗑️", key=f"del_btn_{station_sel}_{idx}"):
+                updated_df = st_df.drop(idx).reset_index(drop=True)
+                st.session_state.mooring_stations[station_sel] = updated_df
+                save_mooring_station_components(updated_df.to_dict(orient="records"), station_sel)
+                st.success("Cancellazione completata su DB!")
+                st.rerun()
+
+        st.caption("")
+        if st.button(f"🗑️ Rimuovi Tutti gli Elementi di {station_sel}", type="secondary", key=f"del_all_{station_sel}"):
+            empty_df = pd.DataFrame(columns=st_df.columns)
+            st.session_state.mooring_stations[station_sel] = empty_df
+            save_mooring_station_components([], station_sel)
+            st.success("Stazione azzerata!")
+            st.rerun()
