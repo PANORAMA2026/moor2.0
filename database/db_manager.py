@@ -536,20 +536,50 @@ def save_mooring_station_components(components_list: list, station_name: str):
 
 
 def get_mooring_station_components(station_name: str) -> pd.DataFrame:
-    """Carica i componenti aliasando le colonne per farle coincidere con l'interfaccia di tab_plans.py."""
+    """Carica i componenti adattandosi sia alla vecchia che alla nuova struttura della tabella."""
     conn = get_connection()
-    query = """
+    cursor = conn.cursor()
+    
+    # Controlla le colonne presenti nella tabella
+    cursor.execute("PRAGMA table_info(station_components)")
+    cols = [row[1] for row in cursor.fetchall()]
+    conn.close()
+
+    if not cols:
+        return pd.DataFrame()
+
+    # Mappatura dinamica in base alle colonne esistenti
+    slot_col = "component_id" if "component_id" in cols else "slot_id"
+    type_col = "component_type" if "component_type" in cols else "comp_type"
+    
+    if "line_drum_a" in cols:
+        line_col = "line_drum_a"
+    elif "assigned_line" in cols:
+        line_col = "assigned_line"
+    elif "assigned_line_id" in cols:
+        line_col = "assigned_line_id"
+    else:
+        line_col = "line_id"
+
+    wear_col = "wear_pct" if "wear_pct" in cols else "0 AS wear_pct"
+    cond_col = "condition" if "condition" in cols else "'BUONO' AS condition"
+    date_col = "last_inspection_date" if "last_inspection_date" in cols else "'' AS last_inspection_date"
+    note_col = "last_inspection_note" if "last_inspection_note" in cols else "'' AS last_inspection_note"
+
+    query = f"""
         SELECT 
-            component_id AS slot_id,
-            component_type AS comp_type,
-            line_drum_a AS assigned_line,
-            wear_pct,
-            condition,
-            last_inspection_date,
-            last_inspection_note
+            {slot_col} AS slot_id,
+            {type_col} AS comp_type,
+            {line_col} AS assigned_line,
+            {wear_col},
+            {cond_col},
+            {date_col},
+            {note_col}
         FROM station_components 
         WHERE station_name = ?
     """
+    
+    conn = get_connection()
     df = pd.read_sql_query(query, conn, params=(station_name,))
     conn.close()
     return df
