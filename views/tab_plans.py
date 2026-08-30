@@ -1,14 +1,13 @@
 """
 views/tab_plans.py
-Pianetti Mooring Station: Sincronizzazione PERMANENTE su DB e stato persistente senza perdite.
+Pianetti Mooring Station: Visualizzazione d'orientamento, Ispezione AI e Tabella Riassuntiva Persistente.
 """
 
 import os
 import pandas as pd
 import streamlit as st
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image
 from datetime import date
-from streamlit_image_coordinates import streamlit_image_coordinates
 
 from database.db_manager import (
     get_line_history,
@@ -17,7 +16,6 @@ from database.db_manager import (
     save_station_image_file,
     get_station_image_path,
     save_line_history,
-    assign_line_to_slot,
     load_certificates_from_db
 )
 
@@ -61,76 +59,7 @@ def analyze_damage_with_ai(image_file):
     }
 
 # -----------------------------------------------------------------------------
-# DISEGNO COMPONENTI SUL PIANETTO (MARCATORI VISIBILI)
-# -----------------------------------------------------------------------------
-def draw_components_on_image(image: Image.Image, components_df: pd.DataFrame) -> Image.Image:
-    """Disegna marcatori ed etichette con coordinamento x, y su immagine."""
-    img_copy = image.copy().convert("RGB")
-    draw = ImageDraw.Draw(img_copy)
-
-    color_map = {
-        "WINCH": (255, 75, 75),       # Rosso
-        "BASKET": (255, 165, 0),     # Arancione
-        "CHOCK": (0, 200, 83),       # Verde
-        "CAPSTAN": (153, 50, 204)    # Viola
-    }
-    marker_size = 8
-
-    try:
-        font = ImageFont.truetype("arial.ttf", 11)
-    except IOError:
-        font = ImageFont.load_default()
-
-    if components_df is not None and not components_df.empty:
-        for _, row in components_df.iterrows():
-            try:
-                x = float(row.get("pos_x", row.get("x_pos", row.get("x", 0))))
-                y = float(row.get("pos_y", row.get("y_pos", row.get("y", 0))))
-            except (ValueError, TypeError):
-                continue
-
-            c_type = str(row.get("comp_type", row.get("component_type", "WINCH")))
-            c_id = str(row.get("comp_id", row.get("component_id", "")))
-            color = color_map.get(c_type, (0, 123, 255))
-
-            # Disegna Quadrato Marcatore
-            draw.rectangle(
-                [x - marker_size, y - marker_size, x + marker_size, y + marker_size],
-                fill=color, outline=(255, 255, 255), width=2
-            )
-
-            # Informazioni Cima
-            line_info = ""
-            if c_type == "WINCH":
-                l1 = str(row.get("line_drum_a", "Nessuna"))
-                if l1 and l1 != "Nessuna":
-                    line_info = f" ({l1.split(' ')[0]})"
-            elif c_type == "BASKET":
-                assigned = str(row.get("assigned_line_id", "Nessuna"))
-                if assigned and assigned != "Nessuna":
-                    line_info = f" [{assigned.split(' ')[0]}]"
-
-            label_text = f"{c_id}{line_info}"
-
-            # Sfondo Etichetta
-            bbox = draw.textbbox((0, 0), label_text, font=font)
-            text_w = bbox[2] - bbox[0]
-            text_h = bbox[3] - bbox[1]
-
-            pad = 3
-            text_x = x - (text_w / 2)
-            text_y = y - marker_size - text_h - 6
-
-            draw.rectangle(
-                [text_x - pad, text_y - pad, text_x + text_w + pad, text_y + text_h + pad],
-                fill=(255, 255, 255), outline=(0, 0, 0), width=1
-            )
-            draw.text((text_x, text_y), label_text, fill=(0, 0, 0), font=font)
-
-    return img_copy
-
-# -----------------------------------------------------------------------------
-# CARICAMENTO DB RIGIDO (NO OVERWRITE)
+# CARICAMENTO DB
 # -----------------------------------------------------------------------------
 def load_station_data_from_db(station_name: str) -> pd.DataFrame:
     """Carica i componenti salvati nel DB e gestisce le chiavi mancanti."""
@@ -269,7 +198,7 @@ def open_ai_inspection_dialog(row, idx, station_sel, st_df):
 # MAIN TAB PLANS
 # -----------------------------------------------------------------------------
 def render_tab_plans():
-    st.header("🏗️ Mappatura Stazioni d'Ormeggio & Pianetti Interattivi")
+    st.header("🏗️ Mappatura Stazioni d'Ormeggio")
 
     stations_list = [
         "Prua (Forward Station)",
@@ -278,7 +207,6 @@ def render_tab_plans():
         "Centro Poppa (Mid AFT)"
     ]
 
-    # Carica la mappa delle stazioni in session_state, ripescando direttamente dal DB
     if "mooring_stations" not in st.session_state:
         st.session_state.mooring_stations = {}
 
@@ -286,28 +214,14 @@ def render_tab_plans():
     if not station_sel:
         return
 
-    # FORZA SEMPRE IL RIPESCAGGIO DA DB AD OGNI SELEZIONE PER EVITARE DISCORDANZE TRA RESTART
     st_df = load_station_data_from_db(station_sel)
     st.session_state.mooring_stations[station_sel] = st_df
-    
-    st_code = "FWD" if "Prua" in station_sel else "AFT"
 
-    # SELEZIONE CIME INVENTARIO / CERTIFICATI
-    certs_df = load_certificates_from_db()
-    line_options = ["Nessuna"]
-    if not certs_df.empty and "cert_id" in certs_df.columns:
-        for _, c_row in certs_df.iterrows():
-            c_id = str(c_row["cert_id"])
-            c_mat = str(c_row.get("material", ""))
-            c_dia = str(c_row.get("diameter_mm", ""))
-            desc = f"{c_id} ({c_mat} - {c_dia}mm)" if c_mat else c_id
-            line_options.append(desc)
-
-    # GESTIONE E RIDIMENSIONAMENTO IMMAGINE PIANETTO
+    # CARICAMENTO E VISUALIZZAZIONE IMMAGINE VISIVA
     saved_img_path = get_station_image_path(station_sel)
 
     uploaded_image = st.file_uploader(
-        f"📷 Carica/Sostituisci Pianetta per: {station_sel}",
+        f"📷 Carica/Sostituisci Immagine di Orientamento per: {station_sel}",
         type=["png", "jpg", "jpeg"],
         key=f"uploader_{station_sel}"
     )
@@ -316,115 +230,14 @@ def render_tab_plans():
         file_bytes = uploaded_image.getvalue()
         _, ext = os.path.splitext(uploaded_image.name)
         saved_img_path = save_station_image_file(station_sel, file_bytes, ext)
-        st.success("Immagine salvata!")
+        st.success("Immagine di orientamento salvata!")
         st.rerun()
 
     if saved_img_path and os.path.exists(saved_img_path):
         raw_img = Image.open(saved_img_path)
+        st.image(raw_img, caption=f"Orientamento Visivo — {station_sel}", use_container_width=True)
     else:
-        st.warning("⚠️ Nessun disegno caricato per questa stazione. Carica un file immagine sopra.")
-        raw_img = Image.new('RGB', (650, 380), color=(240, 240, 240))
-
-    TARGET_WIDTH = 650
-    w_percent = TARGET_WIDTH / float(raw_img.size[0])
-    target_height = int(float(raw_img.size[1]) * float(w_percent))
-    bg_img = raw_img.resize((TARGET_WIDTH, target_height), Image.Resampling.LANCZOS)
-
-    key_click = f"click_pos_{station_sel}"
-    if key_click not in st.session_state:
-        st.session_state[key_click] = {"x": int(TARGET_WIDTH / 2), "y": int(target_height / 2)}
-
-    # Disegno Marcatori su Immagine
-    annotated_img = draw_components_on_image(bg_img, st_df)
-
-    st.markdown("---")
-    col_map, col_form = st.columns([1.7, 1.1])
-
-    with col_map:
-        st.subheader("👆 Clicca sul disegno per aggiungere un elemento")
-        value = streamlit_image_coordinates(
-            annotated_img,
-            width=TARGET_WIDTH,
-            key=f"img_coords_{station_sel}"
-        )
-
-        if value is not None:
-            st.session_state[key_click] = {"x": value["x"], "y": value["y"]}
-
-    with col_form:
-        st.subheader("🎯 Configura Componente")
-        curr_x = st.session_state[key_click]["x"]
-        curr_y = st.session_state[key_click]["y"]
-        st.info(f"Punto Cliccato: **X={curr_x} px, Y={curr_y} px**")
-
-        comp_type = st.selectbox("Tipologia Elemento", ["WINCH", "BASKET", "CHOCK", "CAPSTAN"], key=f"comp_type_{station_sel}")
-        comp_id = st.text_input("Identificativo Componente", f"{comp_type[0]}_{len(st_df)+1}", key=f"comp_id_{station_sel}")
-
-        basket_options = ["Nessuno"]
-        if not st_df.empty:
-            c_type_col = "comp_type" if "comp_type" in st_df.columns else "component_type"
-            c_id_col = "comp_id" if "comp_id" in st_df.columns else "component_id"
-            if c_type_col in st_df.columns and c_id_col in st_df.columns:
-                basket_options += st_df[st_df[c_type_col] == "BASKET"][c_id_col].tolist()
-
-        line_drum_a = "Nessuna"
-        line_drum_b = "Nessuna"
-        line_capstan = "Nessuna"
-        assigned_line = "N/D"
-        source_basket = "Nessuno"
-
-        if comp_type == "WINCH":
-            st.markdown("---")
-            st.caption("⚙️ Assegnazione Cime")
-            line_drum_a = st.selectbox("Cima - Tamburo A", line_options, key=f"dr_a_{station_sel}")
-            line_drum_b = st.selectbox("Cima - Tamburo B", line_options, key=f"dr_b_{station_sel}")
-            if st.checkbox("Collega cavo alla Capstan del Winch", key=f"chk_cap_{station_sel}"):
-                line_capstan = st.selectbox("Cima su Capstan", line_options, key=f"cap_{station_sel}")
-                source_basket = st.selectbox("Origine Cima (Basket)", basket_options, key=f"src_bsk_winch_{station_sel}")
-        elif comp_type == "BASKET":
-            assigned_line = st.selectbox("Cima stivata nel Basket", line_options, key=f"bsk_line_{station_sel}")
-        elif comp_type == "CAPSTAN":
-            line_capstan = st.selectbox("Cima d'Ormeggio collegata", line_options, key=f"cap_standalone_{station_sel}")
-            source_basket = st.selectbox("Origine Cima (Basket)", basket_options, key=f"src_bsk_cap_{station_sel}")
-
-        # SALVATAGGIO NUOVO ELEMENTO PERSISTENTE
-        if st.button("➕ Salva ed Inserisci sul Pianetto", use_container_width=True, type="primary", key=f"btn_add_{station_sel}"):
-            new_row = pd.DataFrame([{
-                "comp_type": comp_type,
-                "comp_id": comp_id,
-                "pos_x": float(curr_x),
-                "pos_y": float(curr_y),
-                "line_drum_a": line_drum_a,
-                "line_drum_b": line_drum_b,
-                "line_capstan": line_capstan,
-                "assigned_line_id": assigned_line if comp_type == "BASKET" else line_drum_a,
-                "source_basket": source_basket,
-                "wear_pct": 0,
-                "condition": "OTTIMO",
-                "last_inspection_date": str(date.today()),
-                "last_inspection_note": "Inizializzazione"
-            }])
-
-            # Concatenazione e aggiornamento Session State
-            updated_df = pd.concat([st_df, new_row], ignore_index=True)
-            st.session_state.mooring_stations[station_sel] = updated_df
-
-            # SALVATAGGIO FORZATO SU DB SQLITE
-            save_mooring_station_components(updated_df.to_dict(orient="records"), station_sel)
-
-            # SINCRO BIDIREZIONALE VERSO TAB CERTIFICATI
-            if line_drum_a != "Nessuna":
-                c_id_a = line_drum_a.split(" ")[0]
-                assign_line_to_slot(c_id_a, st_code, "Winch (Drum Winch)", f"{comp_id} (Drum A)")
-            if line_drum_b != "Nessuna":
-                c_id_b = line_drum_b.split(" ")[0]
-                assign_line_to_slot(c_id_b, st_code, "Winch (Drum Winch)", f"{comp_id} (Drum B)")
-            if comp_type == "BASKET" and assigned_line != "Nessuna":
-                c_id_bk = assigned_line.split(" ")[0]
-                assign_line_to_slot(c_id_bk, st_code, "Cesta (Basket / Rope Locker)", f"{comp_id}")
-
-            st.success(f"Elemento {comp_id} salvato e sincronizzato permanentemente!")
-            st.rerun()
+        st.info("ℹ️ Nessuna immagine caricata per questa stazione. Carica un file sopra per orientamento visivo.")
 
     # ISPEZIONE RAPIDA
     st.markdown("---")
@@ -481,31 +294,3 @@ def render_tab_plans():
         save_mooring_station_components(edited_df.to_dict(orient="records"), station_sel)
         st.success("Salvataggio DB eseguito!")
         st.rerun()
-
-    # ELIMINAZIONE ELEMENTI CON SALVATAGGIO
-    st.markdown("---")
-    st.subheader(f"🗑️ Eliminazione Elementi: {station_sel}")
-
-    if not st_df.empty:
-        for idx, row in st_df.iterrows():
-            c1, c2, c3, c4 = st.columns([1.5, 2, 3, 1])
-            c1.write(f"**{row.get('comp_type', row.get('component_type', ''))}**")
-            c2.write(f"ID: `{row.get('comp_id', row.get('component_id', ''))}`")
-            x_val = row.get('pos_x', row.get('x_pos', 0))
-            y_val = row.get('pos_y', row.get('y_pos', 0))
-            c3.write(f"Posizione: ({int(float(x_val))}px, {int(float(y_val))}px)")
-            
-            if c4.button("🗑️", key=f"del_btn_{station_sel}_{idx}"):
-                updated_df = st_df.drop(idx).reset_index(drop=True)
-                st.session_state.mooring_stations[station_sel] = updated_df
-                save_mooring_station_components(updated_df.to_dict(orient="records"), station_sel)
-                st.success("Cancellazione completata su DB!")
-                st.rerun()
-
-        st.caption("")
-        if st.button(f"🗑️ Rimuovi Tutti gli Elementi di {station_sel}", type="secondary", key=f"del_all_{station_sel}"):
-            empty_df = pd.DataFrame(columns=st_df.columns)
-            st.session_state.mooring_stations[station_sel] = empty_df
-            save_mooring_station_components([], station_sel)
-            st.success("Stazione azzerata!")
-            st.rerun()
