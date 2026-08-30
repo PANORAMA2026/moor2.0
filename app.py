@@ -55,7 +55,7 @@ st.set_page_config(
     layout="wide",
 )
 
-# Perche salviamo su disco
+# Persistenza calendario
 CALENDAR_STORAGE_PATH = os.path.join(os.path.dirname(__file__), "database", "saved_schedule.parquet")
 
 # =============================================================================
