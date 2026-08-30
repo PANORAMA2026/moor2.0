@@ -2,7 +2,7 @@
 views/tab_berth.py
 Gestione layout banchina separata in due stazioni (Prua e Poppa).
 Calcolo coordinate 3D (con Azimut), calcolo rigidezza con pretensione e passaggio dati allo State.
-Modello 3D da file CAD (.glb) caricato da cartella asset/.
+Modello 3D da file CAD (.glb) caricato da cartella asset/ con rotazione corretta e selezione murata.
 """
 
 import os
@@ -33,6 +33,7 @@ def calculate_bollard_coordinates(
     azimuth_deg: float,
     ship_loa: float,
     ship_beam: float,
+    berth_side: str = "Port Side",
 ):
     """Wrapper di supporto che richiama le funzioni di telemetria per uniformare i dati."""
     platform_offset = (
@@ -49,7 +50,12 @@ def calculate_bollard_coordinates(
         platform_offset=platform_offset,
     )
 
-    # Distanza orizzontale sul piano
+    # Inverti la coordinata Y se la nave e ormeggiata a dritta (Starboard)
+    if berth_side == "Starboard Side":
+        y_calc = -abs(y_calc)
+    else:
+        y_calc = abs(y_calc)
+
     dist_horiz = dist_inc * np.cos(np.radians(slope_deg))
 
     return round(dist_horiz, 2), x_calc, y_calc, z_calc
@@ -57,15 +63,14 @@ def calculate_bollard_coordinates(
 
 def generate_detailed_3d_ship(ship_dict, offset_fugro: float = 0.0):
     """
-    Carica il modello CAD 3D .glb da asset/carnivalpanorama.glb
-    utilizzando un percorso assoluto e mostrando eventuali errori di parsing.
+    Carica il modello CAD 3D .glb da asset/carnivalpanorama.glb,
+    applica le rotazioni per orientarlo correttamente e lo scala su LOA e Beam.
     """
     loa = ship_dict.get("LOA", 323.44)
     beam = ship_dict.get("Beam", 37.20)
     bridge_bow = ship_dict.get("Bridge_To_Bow", 39.50)
     bridge_eye_h = ship_dict.get("Bridge_Eye_Height", 26.40)
 
-    # Percorso assoluto sicuro rispetto alla posizione della cartella views/
     base_dir = Path(__file__).resolve().parent.parent
     mesh_path = base_dir / "asset" / "carnivalpanorama.glb"
 
@@ -73,18 +78,23 @@ def generate_detailed_3d_ship(ship_dict, offset_fugro: float = 0.0):
 
     if mesh_path.exists():
         try:
-            # Carica la scena o mesh con trimesh
             loaded = trimesh.load(str(mesh_path), force="mesh")
             if isinstance(loaded, trimesh.Scene):
                 mesh = loaded.dump(concatenate=True)
             else:
                 mesh = loaded
 
-            # Dimensioni e Bounding Box originali
+            # Rotazione di correzione per riallineare il modello CAD
+            # Rotazione 90 deg attorno Z + 180 deg attorno X/Y secondo orientamento originale
+            Rz = trimesh.transformations.rotation_matrix(np.radians(90), [0, 0, 1])
+            Rx = trimesh.transformations.rotation_matrix(np.radians(180), [1, 0, 0])
+            mesh.apply_transform(Rz)
+            mesh.apply_transform(Rx)
+
+            # Dimensioni ricalcolate dopo la rotazione
             extents = mesh.extents
             bounds = mesh.bounds
 
-            # Scaling matriciale su LOA e Beam reali
             scale_x = loa / extents[0] if extents[0] != 0 else 1.0
             scale_y = beam / extents[1] if extents[1] != 0 else 1.0
             scale_z = scale_x
@@ -138,10 +148,21 @@ def render_tab_berth(selected_port, ship_dict):
     st.header(f"🗺️ Layout Banchina — {selected_port}")
 
     offset_fugro = float(st.session_state.get("offset_fugro_m", 0.0))
-    st.caption(
-        f"🚢 **{ship_dict.get('Name')}** | LOA: **{ship_dict.get('LOA')}m** |"
-        f" Offset FUGRO: **{offset_fugro:+.2f} m**"
-    )
+
+    # Selettore Murata di Ormeggio
+    col_info, col_side = st.columns([2, 1])
+    with col_info:
+        st.caption(
+            f"🚢 **{ship_dict.get('Name')}** | LOA: **{ship_dict.get('LOA')}m** |"
+            f" Offset FUGRO: **{offset_fugro:+.2f} m**"
+        )
+    with col_side:
+        berth_side = st.radio(
+            "Murata di Ormeggio:",
+            ["Port Side", "Starboard Side"],
+            horizontal=True,
+            key="berth_side_selection",
+        )
 
     # Caricamento dal DB se non presente nello state
     if "ports_bollards" not in st.session_state:
@@ -154,7 +175,6 @@ def render_tab_berth(selected_port, ship_dict):
 
     df_bollards = st.session_state.ports_bollards[selected_port].copy()
 
-    # Assicurati che Azimut_deg esista anche in vecchi dataset
     if "Azimut_deg" not in df_bollards.columns:
         df_bollards["Azimut_deg"] = 0.0
 
@@ -273,6 +293,7 @@ def render_tab_berth(selected_port, ship_dict):
                     az_deg,
                     ship_dict["LOA"],
                     ship_dict["Beam"],
+                    berth_side=berth_side,
                 )
                 updated_rows.append({
                     "bollard_id": b_id,
@@ -310,6 +331,7 @@ def render_tab_berth(selected_port, ship_dict):
                     az_deg,
                     ship_dict["LOA"],
                     ship_dict["Beam"],
+                    berth_side=berth_side,
                 )
                 updated_rows.append({
                     "bollard_id": b_id,
@@ -336,13 +358,14 @@ def render_tab_berth(selected_port, ship_dict):
 
             save_port_bollards_to_db(selected_port, final_df)
             st.success(
-                f"Layout salvato nel database fisso per {selected_port}!"
+                f"Layout salvato nel database per {selected_port} ({berth_side})!"
             )
             st.rerun()
 
     with col_map:
         st.subheader("🧊 Modellazione 3D Volumetric")
         fig = go.Figure()
+
         for trace in generate_detailed_3d_ship(
             ship_dict, offset_fugro=offset_fugro
         ):
@@ -350,7 +373,11 @@ def render_tab_berth(selected_port, ship_dict):
 
         loa = ship_dict.get("LOA", 323.44)
         beam = ship_dict.get("Beam", 37.20)
-        berth_y = (beam / 2.0) + 6.4
+
+        # Configurazione posizione Y della Banchina in base al lato d'ormeggio
+        side_multiplier = 1.0 if berth_side == "Port Side" else -1.0
+        berth_y_start = (beam / 2.0 + 6.4) * side_multiplier
+        berth_y_end = berth_y_start + (15.0 * side_multiplier)
 
         fig.add_trace(
             go.Mesh3d(
@@ -365,14 +392,14 @@ def render_tab_berth(selected_port, ship_dict):
                     -loa * 0.65,
                 ],
                 y=[
-                    berth_y,
-                    berth_y,
-                    berth_y + 15,
-                    berth_y + 15,
-                    berth_y,
-                    berth_y,
-                    berth_y + 15,
-                    berth_y + 15,
+                    berth_y_start,
+                    berth_y_start,
+                    berth_y_end,
+                    berth_y_end,
+                    berth_y_start,
+                    berth_y_start,
+                    berth_y_end,
+                    berth_y_end,
                 ],
                 z=[-6, -6, -6, -6, 0, 0, 0, 0],
                 i=[0, 0, 4, 4, 0, 0, 1, 1, 2, 2, 0, 0],
@@ -380,7 +407,7 @@ def render_tab_berth(selected_port, ship_dict):
                 k=[2, 3, 6, 7, 5, 4, 6, 5, 7, 6, 4, 7],
                 color="slategrey",
                 opacity=0.5,
-                name="Banchina",
+                name=f"Banchina ({berth_side})",
             )
         )
 
@@ -398,7 +425,6 @@ def render_tab_berth(selected_port, ship_dict):
                 )
             )
 
-        # CALCOLO GEOMETRIA & PRETENSIONAMENTO PER IL SALVATAGGIO IN STATE
         if (
             calculate_line_geometry is not None
             and "lines_inventory" in st.session_state
@@ -413,7 +439,6 @@ def render_tab_berth(selected_port, ship_dict):
                 )
 
                 if geom_df is not None and not geom_df.empty:
-                    # Risoluzione con pretensionamento iniziale al 10%
                     if solve_line_tensions_3d is not None:
                         sim_df = solve_line_tensions_3d(
                             geom_df,
@@ -426,7 +451,6 @@ def render_tab_berth(selected_port, ship_dict):
                         )
                         st.session_state["latest_mooring_results"] = sim_df
 
-                    # Tracciamento cavi 3D
                     for _, line in geom_df.iterrows():
                         fig.add_trace(
                             go.Scatter3d(
