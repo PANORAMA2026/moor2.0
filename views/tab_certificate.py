@@ -1,232 +1,73 @@
 """
 views/tab_certificate.py
-Vista per la gestione, caricamento e parsing dei certificati cavi multi-componente.
-Identifica l'anello debole (Weak Point) e permette l'associazione diretta a Mooring Station, Winch Drum (Drum A / Drum B) e Basket.
+Interfaccia gestione certificati con debug attivo delle eccezioni di parsing.
 """
 
-import pandas as pd
 import streamlit as st
-from database.db_manager import (
-    load_certificates_from_db,
-    save_certificate_to_db,
-    assign_line_to_slot,
-)
-from utils.pdf_parser import parse_certificate_text, parse_line_certificate
-
+import pandas as pd
+import traceback
+from utils.pdf_parser import parse_line_certificate, parse_certificate_text
+from database.db_manager import save_certificate_to_db, load_certificates_from_db
 
 def render_tab_certificate():
     st.header("📜 Modulo Certificati Cavi & Drag and Drop PDF")
-    st.subheader("📥 Caricamento & Parsing Certificato PDF Multi-Componente")
+    st.caption("Caricamento & Parsing Certificato PDF Multi-Componente")
 
-    # Layout principale a 2 colonne
-    col_up, col_res = st.columns([1, 1.2])
+    col1, col2 = st.columns([1, 1])
 
-    # -------------------------------------------------------------------------
-    # COLONNA DI SINISTRA: INPUT FILE E TESTO
-    # -------------------------------------------------------------------------
-    with col_up:
-        uploaded_pdf = st.file_uploader(
+    with col1:
+        uploaded_file = st.file_uploader(
             "Trascina qui il file PDF del certificato",
             type=["pdf"],
-            key="cert_pdf_uploader",
+            key="pdf_uploader"
         )
-        manual_text = st.text_area(
+        
+        pasted_text = st.text_area(
             "Oppure incolla qui il testo del certificato",
             height=180,
-            key="cert_text_manual",
+            key="pasted_text_area"
         )
 
-        parse_btn = st.button("🔍 Esegui Parsing Certificato", type="primary", use_container_width=True)
+        btn_parse = st.button("🔍 Esegui Parsing Certificato", type="primary", use_container_width=True)
 
-        # GESTIONE PULSANTE PARSING E SALVATAGGIO IN SESSION STATE
-        if parse_btn:
-            cert_data = None
-            if uploaded_pdf is not None:
-                with st.spinner("🤖 Analisi del PDF con AI in corso..."):
-                    cert_data = parse_line_certificate(uploaded_pdf)
-            elif manual_text.strip():
-                with st.spinner("🤖 Analisi del testo con AI in corso..."):
-                    cert_data = parse_certificate_text(manual_text)
-                st.info("ℹ️ Testo manuale elaborato.")
-            else:
-                st.warning("⚠️ Carica un file PDF o incolla del testo prima di eseguire il parsing.")
+    with col2:
+        st.info("👉 Incolla il testo del certificato o carica un PDF a sinistra e premi Esegui Parsing Certificato per iniziare.")
 
-            if cert_data:
-                st.session_state["parsed_cert_temp"] = cert_data
-                st.success("✅ Parsing completato con successo!")
-                st.rerun()
-            else:
-                st.error("❌ Impossibile estrarre i dati dal certificato indicato.")
-
-    # -------------------------------------------------------------------------
-    # COLONNA DI DESTRA: VISUALIZZAZIONE RISULTATI E SALVATAGGIO
-    # -------------------------------------------------------------------------
-    with col_res:
-        if "parsed_cert_temp" in st.session_state and st.session_state["parsed_cert_temp"]:
-            cd = st.session_state["parsed_cert_temp"]
-
-            # Calcolo anello debole (Weak Point)
-            components = {
-                "Main Line": cd.get("main_mbl_tons", 0.0),
-            }
-            if cd.get("has_geolink"):
-                components["GeoLink Lashing"] = cd.get("geolink_mbl_tons", 0.0)
-            if cd.get("has_tail"):
-                components["Tail (Coda)"] = cd.get("tail_mbl_tons", 0.0)
-
-            valid_components = {k: float(v) for k, v in components.items() if float(v or 0.0) > 0}
+    if btn_parse:
+        with st.spinner("Parsing del certificato in corso..."):
+            parsed_data = None
             
-            if valid_components:
-                weak_point_name = min(valid_components, key=valid_components.get)
-                weak_point_mbl = valid_components[weak_point_name]
-            else:
-                weak_point_name = "Main Line"
-                weak_point_mbl = float(cd.get("main_mbl_tons", 0.0))
-
-            limite_55_mbl = round(weak_point_mbl * 0.55, 2)
-
-            st.markdown("### 📋 Dati Estratti dal Certificato")
-            st.caption(
-                f"**ID Certificato:** `{cd.get('cert_id', 'N/A')}` | **Produttore:**"
-                f" {cd.get('manufacturer', 'N/A')}"
-            )
-
-            # Scomposizione 3 parti
-            st.markdown("#### 🔗 Scomposizione Componenti Cavo")
-            c1, c2, c3 = st.columns(3)
-
-            with c1:
-                st.info(
-                    f"**Main Line**\n\n"
-                    f"• MBL: **{cd.get('main_mbl_tons', 0.0):.1f} t**\n\n"
-                    f"• Ø: {cd.get('main_diameter_mm', 0.0):.0f} mm\n\n"
-                    f"• Lunghezza: {cd.get('main_length_m', 0.0):.0f} m\n\n"
-                    f"• Mat: {cd.get('main_material', 'N/A')}"
-                )
-
-            with c2:
-                if cd.get("has_geolink"):
-                    st.info(
-                        f"**GeoLink Lashing**\n\n"
-                        f"• MBL: **{cd.get('geolink_mbl_tons', 0.0):.1f} t**\n\n"
-                        f"• Ø: {cd.get('geolink_diameter_mm', 0.0):.0f} mm\n\n"
-                        f"• Materiale: Dyneema SK78"
-                    )
+            try:
+                if uploaded_file is not None:
+                    # Esegue il parsing sul buffer PDF
+                    parsed_data = parse_line_certificate(uploaded_file)
+                elif pasted_text.strip():
+                    # Esegue il parsing sul testo incollato
+                    parsed_data = parse_certificate_text(pasted_text)
                 else:
-                    st.caption("GeoLink: Non Presente")
+                    st.warning("Seleziona un file PDF o incolla del testo prima di eseguire il parsing.")
+                    return
 
-            with c3:
-                if cd.get("has_tail"):
-                    st.info(
-                        f"**Tail (Coda)**\n\n"
-                        f"• MBL: **{cd.get('tail_mbl_tons', 0.0):.1f} t**\n\n"
-                        f"• Ø: {cd.get('tail_diameter_mm', 0.0):.0f} mm\n\n"
-                        f"• Lunghezza: {cd.get('tail_length_m', 0.0):.0f} m\n\n"
-                        f"• Mat: {cd.get('tail_material', 'N/A')}"
-                    )
+                if parsed_data:
+                    st.success("✅ Parsing completato con successo!")
+                    st.json(parsed_data)
+                    
+                    # Salvataggio nel Database
+                    save_certificate_to_db(parsed_data)
+                    st.session_state.certificates_db = load_certificates_from_db()
                 else:
-                    st.caption("Tail: Non Presente")
+                    st.error("❌ Il parser ha restituito 'None'. Nessun dato estratto dal file.")
 
-            # Box Weak Point
-            st.warning(
-                f"⚠️ **WEAK POINT IDENTIFICATO:** **{weak_point_name}**\n\n"
-                f"• **MBL Minimo Assieme:** **{weak_point_mbl:.2f} t**\n\n"
-                f"• **Limite Operativo MEG4 (55% MBL):** **{limite_55_mbl:.2f} t**\n\n"
-                f"*Valore di calcolo per le tensioni d'ormeggio.*"
-            )
-
-            # ASSOCIAZIONE MOORING STATION / WINCH / BASKET / DRUMS
-            st.markdown("#### ⚓ Assegnazione Postazione d'Ormeggio & Tamburo Winch")
-            col_a, col_b, col_c, col_d = st.columns([1, 1, 0.8, 1])
-
-            with col_a:
-                station = st.selectbox(
-                    "Mooring Station",
-                    [
-                        "FWD (Prora)",
-                        "AFT (Poppa)",
-                        "MID FWD (Centro Prora)",
-                        "MID AFT (Centro Poppa)",
-                    ],
-                    key="sel_station",
-                )
-
-            with col_b:
-                winch_name = st.selectbox(
-                    "Winch",
-                    [
-                        "Winch 1",
-                        "Winch 2",
-                        "Winch 3",
-                        "Winch 4",
-                        "Winch 5",
-                        "Winch 6",
-                    ],
-                    key="sel_winch",
-                )
-
-            with col_c:
-                winch_drum = st.selectbox(
-                    "Tamburo",
-                    ["Drum A", "Drum B"],
-                    key="sel_drum",
-                )
-
-            with col_d:
-                basket_id = st.text_input(
-                    "Basket / Line ID", value="G1-GT1 FWD", key="sel_basket"
-                )
-
-            if st.button("💾 Salva & Associa Certificato", type="primary", use_container_width=True):
-                record = {
-                    "cert_id": cd.get("cert_id"),
-                    "line_id": basket_id,
-                    "station": station,
-                    "assigned_slot": winch_name,
-                    "storage_type": "Winch",
-                    "winch_drum": winch_drum,
-                    "manufacturer": cd.get("manufacturer"),
-                    "material": cd.get("main_material"),
-                    "diameter_mm": cd.get("main_diameter_mm"),
-                    "length_m": cd.get("main_length_m", 220.0),
-                    "mbl_tons": weak_point_mbl,
-                    "mbl_55_limit": limite_55_mbl,
-                    "weak_point": weak_point_name,
-                    "has_geolink": "YES" if cd.get("has_geolink") else "NO",
-                    "geolink_mbl": cd.get("geolink_mbl_tons", 0.0),
-                    "has_tail": "YES" if cd.get("has_tail") else "NO",
-                    "tail_material": cd.get("tail_material", "N/A"),
-                    "tail_diameter": cd.get("tail_diameter_mm", 0.0),
-                    "tail_mbl": cd.get("tail_mbl_tons", 0.0),
-                    "tail_length": cd.get("tail_length_m", 0.0),
-                    "standard": cd.get("standard", "MEG4"),
-                    "issue_date": "2025-12-12",
-                }
-                save_certificate_to_db(record)
-                assign_line_to_slot(cd.get("cert_id"), station, "Winch", winch_name, winch_drum)
-                st.session_state.certificates_db = load_certificates_from_db()
-                
-                # Svuota i dati temporanei dopo il salvataggio
-                del st.session_state["parsed_cert_temp"]
-                
-                st.success(
-                    f"Cavo {basket_id} associato a {station} - {winch_name} [{winch_drum}]! MBL"
-                    f" operativo: {weak_point_mbl:.2f} t (Limite 55%:"
-                    f" {limite_55_mbl:.2f} t)."
-                )
-                st.rerun()
-
-        else:
-            st.info("👈 Incolla il testo del certificato o carica un PDF a sinistra e premi **Esegui Parsing Certificato** per iniziare.")
+            except Exception as err:
+                # STAMPA IL CODICE DI ERRORE REALE A SCHERMO
+                st.error(f"💥 ERRORE CRITICO DI ESECUZIONE: {type(err).__name__}")
+                st.code(f"Dettaglio Errore: {str(err)}")
+                st.code(traceback.format_exc())
 
     st.divider()
-
-    # -------------------------------------------------------------------------
-    # TABELLA REGISTRO CERTIFICATI E ASSEGNAZIONI
-    # -------------------------------------------------------------------------
-    st.subheader("📚 Registro Cavi & Assegnazioni Salvate")
-    df_certs = load_certificates_from_db()
-    if not df_certs.empty:
-        st.dataframe(df_certs, use_container_width=True)
+    st.subheader("📋 Registro Certificati Salvati nel Database")
+    
+    if "certificates_db" in st.session_state and not st.session_state.certificates_db.empty:
+        st.dataframe(st.session_state.certificates_db, use_container_width=True)
     else:
-        st.info("Nessun cavo o certificato presente nel database.")
+        st.caption("Nessun certificato presente nel database.")
