@@ -10,9 +10,8 @@ Pillow>=10.0.0
 folium
 astral
 requests
-streamlit-image-coordinates>=0.1.6
 openpyxl
 trimesh
 scipy
-google-generativeai
-PyMuPDF
+google-generativeai>=0.8.0
+PyMuPDF>=1.23.0
