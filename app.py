@@ -39,7 +39,7 @@ from database.db_manager import (
     save_lines_inventory_to_db,
     load_lines_inventory_from_db,
 )
-from utils.pdf_parser import extract_text_from_pdf, parse_certificate_text
+from utils.pdf_parser import extract_text_from_pdf, parse_line_certificate, parse_certificate_text
 
 # Import delle viste (Tabs)
 from views.tab_berth import render_tab_berth
