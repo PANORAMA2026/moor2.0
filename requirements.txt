@@ -15,3 +15,4 @@ openpyxl
 trimesh
 scipy
 google-generativeai
+PyMuPDF
