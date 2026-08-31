@@ -1,6 +1,6 @@
 """
 utils/pdf_parser.py
-Parser ultra-robusto con rilevamento dinamico dei modelli Gemini attivi e parsing JSON sicuro.
+Parser ultra-robusto per certificati MEG4 con selezione automatica del modello.
 """
 
 import json
@@ -39,7 +39,7 @@ def extract_bytes_from_file(uploaded_file) -> bytes:
 
 
 def extract_text_from_pdf(uploaded_file) -> str:
-    """Estrae il testo vettoriale dal PDF via PyMuPDF in pochi millisecondi."""
+    """Estrae il testo vettoriale dal PDF via PyMuPDF."""
     file_bytes = extract_bytes_from_file(uploaded_file)
     if not file_bytes or not HAS_PYMUPDF:
         return ""
@@ -59,12 +59,11 @@ def extract_text_from_pdf(uploaded_file) -> str:
 
 
 def resolve_working_model():
-    """Interroga direttamente l'API per trovare il modello funzionante associato alla chiave."""
+    """Trova il primo modello attivo compatibile per la tua API Key."""
     try:
         available_models = genai.list_models()
         for m in available_models:
             if "generateContent" in m.supported_generation_methods:
-                # Restituisce il nome completo del modello (es. 'models/gemini-1.5-flash-latest')
                 return m.name
     except Exception:
         pass
@@ -72,24 +71,22 @@ def resolve_working_model():
 
 
 def safe_extract_json(text_response: str) -> dict:
-    """Estrae ed esegue il parsing del JSON anche se l'LLM include markdown o formattazioni extra."""
+    """Estrae ed esegue il parsing del JSON prevenendo errori di sintassi."""
     if not text_response:
         return None
-    
-    # Pulizia blocchi di codice markdown
+
     cleaned = text_response.strip()
     if "```" in cleaned:
         cleaned = re.sub(r"```(?:json)?\s*", "", cleaned)
         cleaned = cleaned.replace("```", "").strip()
 
-    # Cerca il primo blocco racchiuso tra graffe
     json_match = re.search(r"\{.*\}", cleaned, re.DOTALL)
     if json_match:
         try:
             return json.loads(json_match.group(0))
         except Exception:
             pass
-            
+
     try:
         return json.loads(cleaned)
     except Exception:
@@ -101,7 +98,7 @@ def parse_line_certificate(uploaded_file) -> dict:
     if uploaded_file is None:
         return None
 
-    # 1. Tentativo estrazione rapida da testo vettoriale
+    # 1. Parsing da testo vettoriale se disponibile
     text = extract_text_from_pdf(uploaded_file)
     if text and len(text) > 40:
         parsed_data = parse_certificate_text(text)
@@ -120,15 +117,60 @@ def parse_line_certificate(uploaded_file) -> dict:
             doc.close()
 
             genai.configure(api_key=str(api_key).strip())
-            
-            # Trova dinamicamente il modello disponibile ed evita l'errore 404
             model_name = resolve_working_model()
             model = genai.GenerativeModel(model_name)
 
-            prompt = """
-            Sei un ingegnere navale. Estrai i dati tecnici di questo certificato cavi d'ormeggio MEG4.
-            Restituisci ESCLUSIVAMENTE un JSON con questo formato esatto, senza altro testo:
-            {
-                "cert_id": "string",
-                "manufacturer": "string",
-                "standard": "MEG4
+            prompt = (
+                "Sei un ingegnere navale. Estrai i dati tecnici di questo certificato cavi d'ormeggio MEG4.\n"
+                "Restituisci ESCLUSIVAMENTE un JSON con questo formato esatto, senza altro testo:\n"
+                "{\n"
+                '    "cert_id": "string",\n'
+                '    "manufacturer": "string",\n'
+                '    "standard": "MEG4",\n'
+                '    "main_material": "string",\n'
+                '    "main_diameter_mm": 0.0,\n'
+                '    "main_mbl_tons": 0.0,\n'
+                '    "main_length_m": 0.0,\n'
+                '    "has_tail": false,\n'
+                '    "tail_material": "",\n'
+                '    "tail_diameter_mm": 0.0,\n'
+                '    "tail_mbl_tons": 0.0,\n'
+                '    "tail_length_m": 0.0\n'
+                "}"
+            )
+
+            response = model.generate_content([
+                prompt,
+                {"mime_type": "image/jpeg", "data": img_bytes}
+            ])
+
+            result_dict = safe_extract_json(response.text)
+            if result_dict:
+                return result_dict
+
+        except Exception as e:
+            st.warning(f"⚠️ Errore Parsing Immagine: {e}")
+
+    return dynamic_regex_parse(text)
+
+
+def parse_certificate_text(text: str) -> dict:
+    """Parsing del testo estrapolato dal PDF."""
+    if not text or not text.strip():
+        return None
+
+    api_key = st.secrets.get("GEMINI_API_KEY") or os.environ.get("GEMINI_API_KEY")
+
+    if HAS_GEMINI and api_key:
+        try:
+            genai.configure(api_key=str(api_key).strip())
+            model_name = resolve_working_model()
+            model = genai.GenerativeModel(model_name)
+
+            prompt = (
+                "Estrai i dati di questo certificato cavi d'ormeggio MEG4 in JSON:\n"
+                "{\n"
+                '    "cert_id": "string",\n'
+                '    "manufacturer": "string",\n'
+                '    "standard": "MEG4",\n'
+                '    "main_material": "string",\
