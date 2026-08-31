@@ -1,6 +1,6 @@
 """
 utils/pdf_parser.py
-Parser ad alta velocità ottimizzato per Gemini 3.6 Flash.
+Parser ultra-veloce per Gemini 3.6 Flash con gestione sicura dell'output JSON.
 """
 
 import json
@@ -20,7 +20,6 @@ try:
 except ImportError:
     HAS_GEMINI = False
 
-# Nome del modello richiesto dall'endpoint API
 MODEL_NAME = "gemini-3.6-flash"
 
 
@@ -42,7 +41,7 @@ def extract_bytes_from_file(uploaded_file) -> bytes:
 
 
 def extract_text_from_pdf(uploaded_file) -> str:
-    """Estrae il testo vettoriale dal PDF via PyMuPDF."""
+    """Estrae il testo vettoriale dal PDF via PyMuPDF in millisecondi."""
     file_bytes = extract_bytes_from_file(uploaded_file)
     if not file_bytes or not HAS_PYMUPDF:
         return ""
@@ -62,24 +61,24 @@ def extract_text_from_pdf(uploaded_file) -> str:
 
 
 def parse_line_certificate(uploaded_file) -> dict:
-    """Parsing diretto con gestione ottimizzata di file vettoriali e scansionati."""
+    """Parsing ad alta velocità per file vettoriali e scansionati."""
     if uploaded_file is None:
         return None
 
-    # 1. Tentativo di estrazione testo rapida
+    # 1. Parsing da testo locale se presente
     text = extract_text_from_pdf(uploaded_file)
     if text and len(text) > 40:
         return parse_certificate_text(text)
 
-    # 2. Parsing visivo ultraleggero per PDF scansionati (es. E14 FWD.pdf)
+    # 2. Vision per PDF scansionati
     api_key = st.secrets.get("GEMINI_API_KEY") or os.environ.get("GEMINI_API_KEY")
     if HAS_GEMINI and api_key and HAS_PYMUPDF:
         try:
             file_bytes = extract_bytes_from_file(uploaded_file)
             doc = fitz.open(stream=file_bytes, filetype="pdf")
             page = doc[0]
-            # Compressione a 70 DPI per un payload ridotto e risposta istantanea
-            pix = page.get_pixmap(dpi=70)
+            # DPI ottimizzati a 90 per bilanciare leggibilità e velocità di trasmissione
+            pix = page.get_pixmap(dpi=90)
             img_bytes = pix.tobytes("jpeg")
             doc.close()
 
@@ -88,16 +87,16 @@ def parse_line_certificate(uploaded_file) -> dict:
 
             prompt = """
             Sei un ingegnere navale esperto di cavi d'ormeggio MEG4.
-            Analizza questo certificato ed estrai i dati.
-            Restituisci ESCLUSIVAMENTE un JSON valido senza blocchi markdown con questa struttura:
+            Analizza questo certificato ed estrai i dati reali.
+            Restituisci un oggetto JSON valido con questa struttura esatta:
             {
                 "cert_id": "string",
                 "manufacturer": "string",
                 "standard": "MEG4",
                 "main_material": "string",
-                "main_diameter_mm": float,
-                "main_mbl_tons": float,
-                "main_length_m": float,
+                "main_diameter_mm": 0.0,
+                "main_mbl_tons": 0.0,
+                "main_length_m": 0.0,
                 "has_tail": false,
                 "tail_material": "",
                 "tail_diameter_mm": 0.0,
@@ -111,15 +110,11 @@ def parse_line_certificate(uploaded_file) -> dict:
                 generation_config={
                     "response_mime_type": "application/json",
                     "temperature": 0.0,
-                    "max_output_tokens": 300
+                    "max_output_tokens": 1000
                 }
             )
 
-            res_text = response.text.strip()
-            if res_text.startswith("```json"):
-                res_text = res_text.replace("```json", "").replace("```", "").strip()
-
-            return json.loads(res_text)
+            return json.loads(response.text)
 
         except Exception as e:
             st.warning(f"⚠️ Errore Parsing Immagine: {e}")
@@ -128,7 +123,7 @@ def parse_line_certificate(uploaded_file) -> dict:
 
 
 def parse_certificate_text(text: str) -> dict:
-    """Parsing da testo vettoriale."""
+    """Parsing da testo vettoriale tramite Gemini 3.6 Flash."""
     if not text or not text.strip():
         return None
 
@@ -145,9 +140,9 @@ def parse_certificate_text(text: str) -> dict:
     "manufacturer": "string",
     "standard": "MEG4",
     "main_material": "string",
-    "main_diameter_mm": float,
-    "main_mbl_tons": float,
-    "main_length_m": float,
+    "main_diameter_mm": 0.0,
+    "main_mbl_tons": 0.0,
+    "main_length_m": 0.0,
     "has_tail": false,
     "tail_material": "",
     "tail_diameter_mm": 0.0,
@@ -155,23 +150,19 @@ def parse_certificate_text(text: str) -> dict:
     "tail_length_m": 0.0
 }}
 
-Testo:
-{text[:2000]}"""
+Testo certificato:
+{text[:2500]}"""
 
             response = model.generate_content(
                 prompt,
                 generation_config={
                     "response_mime_type": "application/json",
                     "temperature": 0.0,
-                    "max_output_tokens": 300
+                    "max_output_tokens": 1000
                 }
             )
 
-            res_text = response.text.strip()
-            if res_text.startswith("```json"):
-                res_text = res_text.replace("```json", "").replace("```", "").strip()
-
-            return json.loads(res_text)
+            return json.loads(response.text)
         except Exception as e:
             st.warning(f"⚠️ Errore Parsing Testo: {e}")
 
@@ -179,7 +170,7 @@ Testo:
 
 
 def dynamic_regex_parse(text: str) -> dict:
-    """Fallback offline."""
+    """Fallback locale offline."""
     data = {
         "cert_id": "UNKNOWN", "manufacturer": "N/A", "main_material": "N/A",
         "main_diameter_mm": 0.0, "main_mbl_tons": 0.0, "main_length_m": 0.0,
