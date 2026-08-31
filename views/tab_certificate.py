@@ -18,8 +18,12 @@ def render_tab_certificate():
     st.header("📜 Modulo Certificati Cavi & Drag and Drop PDF")
     st.subheader("📥 Caricamento & Parsing Certificato PDF Multi-Componente")
 
+    # Layout principale a 2 colonne
     col_up, col_res = st.columns([1, 1.2])
 
+    # -------------------------------------------------------------------------
+    # COLONNA DI SINISTRA: INPUT FILE E TESTO
+    # -------------------------------------------------------------------------
     with col_up:
         uploaded_pdf = st.file_uploader(
             "Trascina qui il file PDF del certificato",
@@ -28,56 +32,59 @@ def render_tab_certificate():
         )
         manual_text = st.text_area(
             "Oppure incolla qui il testo del certificato",
-            height=150,
+            height=180,
             key="cert_text_manual",
         )
 
-        parse_btn = st.button("🔍 Esegui Parsing Certificato", type="primary")
+        parse_btn = st.button("🔍 Esegui Parsing Certificato", type="primary", use_container_width=True)
 
-    # GESTIONE PARSING E RESET DELLO STATO
-    if parse_btn:
-        cert_data = None
-        if uploaded_pdf is not None:
-            with st.spinner("🤖 Analisi del PDF con AI in corso..."):
-                cert_data = parse_line_certificate(uploaded_pdf)
-        elif manual_text.strip():
-            with st.spinner("🤖 Analisi del testo con AI in corso..."):
-                cert_data = parse_certificate_text(manual_text)
-        else:
-            st.warning("⚠️ Carica un file PDF o incolla del testo prima di eseguire il parsing.")
+        # GESTIONE PULSANTE PARSING E SALVATAGGIO IN SESSION STATE
+        if parse_btn:
+            cert_data = None
+            if uploaded_pdf is not None:
+                with st.spinner("🤖 Analisi del PDF con AI in corso..."):
+                    cert_data = parse_line_certificate(uploaded_pdf)
+            elif manual_text.strip():
+                with st.spinner("🤖 Analisi del testo con AI in corso..."):
+                    cert_data = parse_certificate_text(manual_text)
+                st.info("ℹ️ Testo manuale elaborato.")
+            else:
+                st.warning("⚠️ Carica un file PDF o incolla del testo prima di eseguire il parsing.")
 
-        if cert_data:
-            # Resetta il vecchio certificato temporaneo e inserisce il nuovo
-            st.session_state["parsed_cert_temp"] = cert_data
-            st.success("✅ Parsing completato con successo!")
-        else:
-            st.error("❌ Impossibile estrarre i dati dal certificato indicato.")
+            if cert_data:
+                st.session_state["parsed_cert_temp"] = cert_data
+                st.success("✅ Parsing completato con successo!")
+                st.rerun()
+            else:
+                st.error("❌ Impossibile estrarre i dati dal certificato indicato.")
 
-    # VISUALIZZAZIONE COMPONENTI, WEAK POINT E ASSOCIAZIONE POSTAZIONE
-    if "parsed_cert_temp" in st.session_state and st.session_state["parsed_cert_temp"]:
-        cd = st.session_state["parsed_cert_temp"]
+    # -------------------------------------------------------------------------
+    # COLONNA DI DESTRA: VISUALIZZAZIONE RISULTATI E SALVATAGGIO
+    # -------------------------------------------------------------------------
+    with col_res:
+        if "parsed_cert_temp" in st.session_state and st.session_state["parsed_cert_temp"]:
+            cd = st.session_state["parsed_cert_temp"]
 
-        # Calcolo anello debole (Weak Point)
-        components = {
-            "Main Line": cd.get("main_mbl_tons", 0.0),
-        }
-        if cd.get("has_geolink"):
-            components["GeoLink Lashing"] = cd.get("geolink_mbl_tons", 0.0)
-        if cd.get("has_tail"):
-            components["Tail (Coda)"] = cd.get("tail_mbl_tons", 0.0)
+            # Calcolo anello debole (Weak Point)
+            components = {
+                "Main Line": cd.get("main_mbl_tons", 0.0),
+            }
+            if cd.get("has_geolink"):
+                components["GeoLink Lashing"] = cd.get("geolink_mbl_tons", 0.0)
+            if cd.get("has_tail"):
+                components["Tail (Coda)"] = cd.get("tail_mbl_tons", 0.0)
 
-        valid_components = {k: v for k, v in components.items() if v > 0}
-        
-        if valid_components:
-            weak_point_name = min(valid_components, key=valid_components.get)
-            weak_point_mbl = valid_components[weak_point_name]
-        else:
-            weak_point_name = "Main Line"
-            weak_point_mbl = cd.get("main_mbl_tons", 0.0)
+            valid_components = {k: float(v) for k, v in components.items() if float(v or 0.0) > 0}
+            
+            if valid_components:
+                weak_point_name = min(valid_components, key=valid_components.get)
+                weak_point_mbl = valid_components[weak_point_name]
+            else:
+                weak_point_name = "Main Line"
+                weak_point_mbl = float(cd.get("main_mbl_tons", 0.0))
 
-        limite_55_mbl = round(weak_point_mbl * 0.55, 2)
+            limite_55_mbl = round(weak_point_mbl * 0.55, 2)
 
-        with col_res:
             st.markdown("### 📋 Dati Estratti dal Certificato")
             st.caption(
                 f"**ID Certificato:** `{cd.get('cert_id', 'N/A')}` | **Produttore:**"
@@ -170,7 +177,7 @@ def render_tab_certificate():
                     "Basket / Line ID", value="G1-GT1 FWD", key="sel_basket"
                 )
 
-            if st.button("💾 Salva & Associa Certificato", type="primary"):
+            if st.button("💾 Salva & Associa Certificato", type="primary", use_container_width=True):
                 record = {
                     "cert_id": cd.get("cert_id"),
                     "line_id": basket_id,
@@ -209,9 +216,14 @@ def render_tab_certificate():
                 )
                 st.rerun()
 
+        else:
+            st.info("👈 Incolla il testo del certificato o carica un PDF a sinistra e premi **Esegui Parsing Certificato** per iniziare.")
+
     st.divider()
 
-    # REGISTRO CERTIFICATI E ASSEGNAZIONI
+    # -------------------------------------------------------------------------
+    # TABELLA REGISTRO CERTIFICATI E ASSEGNAZIONI
+    # -------------------------------------------------------------------------
     st.subheader("📚 Registro Cavi & Assegnazioni Salvate")
     df_certs = load_certificates_from_db()
     if not df_certs.empty:
