@@ -1,6 +1,6 @@
 """
 utils/pdf_parser.py
-Parser ultra-resistente con estrazione multilivello (PyMuPDF, pypdf, Gemini AI / OCR Fallback).
+Parser ultra-veloce con invio diretto dei byte PDF a Gemini 3.6 Flash.
 """
 
 import io
@@ -29,7 +29,7 @@ except ImportError:
 
 
 def extract_text_from_pdf(uploaded_file) -> str:
-    """Estrae testo leggibile dal PDF provando più motori."""
+    """Estrae il testo nativo dal PDF se presente."""
     if uploaded_file is None:
         return ""
 
@@ -41,13 +41,11 @@ def extract_text_from_pdf(uploaded_file) -> str:
             file_bytes = uploaded_file.read()
         else:
             file_bytes = uploaded_file
-    except Exception as e:
-        st.write(f"⚠️ Errore lettura stream byte: {e}")
+    except Exception:
         return ""
 
     text = ""
 
-    # Motore 1: PyMuPDF (fitz)
     if HAS_PYMUPDF:
         try:
             doc = fitz.open(stream=file_bytes, filetype="pdf")
@@ -58,10 +56,9 @@ def extract_text_from_pdf(uploaded_file) -> str:
             doc.close()
             if text.strip():
                 return text.strip()
-        except Exception as e:
-            st.write(f"⚠️ PyMuPDF extraction warning: {e}")
+        except Exception:
+            pass
 
-    # Motore 2: pypdf
     if HAS_PYPDF:
         try:
             reader = pypdf.PdfReader(io.BytesIO(file_bytes))
@@ -71,42 +68,38 @@ def extract_text_from_pdf(uploaded_file) -> str:
                     text += t + "\n"
             if text.strip():
                 return text.strip()
-        except Exception as e:
-            st.write(f"⚠️ pypdf extraction warning: {e}")
+        except Exception:
+            pass
 
     return text.strip()
 
 
 def parse_line_certificate(uploaded_file) -> dict:
-    """Punto di ingresso per i file PDF salvati o trascinati."""
+    """Invio rapido diretto dei byte PDF a Gemini 3.6 Flash."""
     if uploaded_file is None:
         return None
 
-    # 1. Estrazione testo nativo
-    text = extract_text_from_pdf(uploaded_file)
-    
-    # 2. Se abbiamo testo estratto, passiamo al parsing
-    if text and text.strip():
-        return parse_certificate_text(text)
+    if hasattr(uploaded_file, "getvalue"):
+        file_bytes = uploaded_file.getvalue()
+    elif hasattr(uploaded_file, "read"):
+        uploaded_file.seek(0)
+        file_bytes = uploaded_file.read()
+    else:
+        file_bytes = uploaded_file
 
-    # 3. Se non c'è testo nativo (PDF scansionato/immagine), tenta Gemini Vision
     api_key = st.secrets.get("GEMINI_API_KEY") or os.environ.get("GEMINI_API_KEY")
-    
-    if HAS_GEMINI and api_key and HAS_PYMUPDF:
-        try:
-            file_bytes = uploaded_file.getvalue() if hasattr(uploaded_file, "getvalue") else uploaded_file.read()
-            doc = fitz.open(stream=file_bytes, filetype="pdf")
-            page = doc[0]
-            pix = page.get_pixmap(dpi=150)
-            img_bytes = pix.tobytes("png")
-            doc.close()
 
+    if HAS_GEMINI and api_key:
+        try:
             genai.configure(api_key=str(api_key).strip())
+            
+            # Utilizza esattamente il modello 3.6-flash operato dalla tua API key
             model = genai.GenerativeModel("gemini-3.6-flash")
 
             prompt = """
-            Sei un ingegnere navale. Analizza questo certificato di collaudo cavi d'ormeggio (MEG4).
-            Estrai i dati reali e restituisci ESCLUSIVAMENTE un oggetto JSON con queste chiavi esatte:
+            Sei un ingegnere navale esperto di linee d'ormeggio MEG4.
+            Analizza questo certificato PDF ed estrai i dati reali.
+            Restituisci ESCLUSIVAMENTE un JSON valido con questa struttura:
             {
                 "cert_id": "string",
                 "manufacturer": "string",
@@ -129,22 +122,24 @@ def parse_line_certificate(uploaded_file) -> dict:
 
             response = model.generate_content([
                 prompt,
-                {"mime_type": "image/png", "data": img_bytes}
-            ])
+                {"mime_type": "application/pdf", "data": file_bytes}
+            ], generation_config={"response_mime_type": "application/json"})
 
-            clean_json = response.text.replace("```json", "").replace("```", "").strip()
-            return json.loads(clean_json)
+            return json.loads(response.text)
 
-        except Exception as err_vision:
-            st.warning(f"⚠️ Chiamata Vision fallita: {err_vision}")
+        except Exception as err_fast:
+            st.warning(f"⚠️ Chiamata Gemini 3.6 fallita: {err_fast}")
 
-    # 4. Fallback estremo se né testo né AI Vision hanno prodotto risultati
-    st.error("❌ Il PDF caricato non contiene layer di testo vettoriale e la chiave GEMINI_API_KEY non è configurata o attiva.")
-    return None
+    # Fallback su estrazione testo locale se non c'è rete/chiave
+    text = extract_text_from_pdf(uploaded_file)
+    if text:
+        return parse_certificate_text(text)
+
+    return dynamic_regex_parse(text)
 
 
 def parse_certificate_text(text: str) -> dict:
-    """Parse del testo estratto tramite Gemini o Regex."""
+    """Parse del testo grezzo incollato."""
     if not text or not text.strip():
         return None
 
@@ -153,15 +148,17 @@ def parse_certificate_text(text: str) -> dict:
     if HAS_GEMINI and api_key:
         try:
             genai.configure(api_key=str(api_key).strip())
+            model = genai.GenerativeModel("gemini-3.6-flash")
+            
             prompt = f"""
-            Sei un ingegnere navale. Estrai i dati dal seguente certificato in formato JSON:
+            Estrai i dati dal seguente certificato in formato JSON:
             {{
-                "cert_id": "Numero certificato",
-                "manufacturer": "Produttore",
-                "standard": "Standard",
-                "main_material": "Materiale",
+                "cert_id": "string",
+                "manufacturer": "string",
+                "standard": "string",
+                "main_material": "string",
                 "main_diameter_mm": float,
-                "main_mbl_tons": float (converti kN in tonnellate dividendo per 9.80665 se necessario),
+                "main_mbl_tons": float,
                 "main_length_m": float,
                 "has_geolink": false,
                 "geolink_mbl_tons": 0.0,
@@ -177,7 +174,6 @@ def parse_certificate_text(text: str) -> dict:
             Testo:
             {text}
             """
-            model = genai.GenerativeModel("gemini-2.5-flash")
             response = model.generate_content(
                 prompt,
                 generation_config={"response_mime_type": "application/json"}
@@ -190,7 +186,7 @@ def parse_certificate_text(text: str) -> dict:
 
 
 def dynamic_regex_parse(text: str) -> dict:
-    """Parser Regex di riserva."""
+    """Fallback locale con regex."""
     data = {
         "cert_id": "UNKNOWN",
         "manufacturer": "N/A",
