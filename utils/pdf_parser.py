@@ -1,6 +1,6 @@
 """
 utils/pdf_parser.py
-Parser ultra-veloce con estrazione testo locale istantanea + Gemini 3.6 Flash.
+Parser ultra-veloce ottimizzato per latenza minima con Gemini 3.6 Flash.
 """
 
 import json
@@ -9,7 +9,7 @@ import re
 import streamlit as st
 
 try:
-    import fitz  # PyMuPDF (Esecuzione ultra-veloce)
+    import fitz  # PyMuPDF
     HAS_PYMUPDF = True
 except ImportError:
     HAS_PYMUPDF = False
@@ -22,7 +22,7 @@ except ImportError:
 
 
 def extract_text_from_pdf(uploaded_file) -> str:
-    """Estrae il testo vettoriale dal PDF in pochissimi millisecondi via PyMuPDF."""
+    """Estrae il testo vettoriale dal PDF in millisecondi."""
     if uploaded_file is None:
         return ""
 
@@ -53,42 +53,36 @@ def parse_line_certificate(uploaded_file) -> dict:
     if uploaded_file is None:
         return None
 
-    # 1. Estrazione testo locale (istantanea)
+    # Estrazione testo rapida
     text = extract_text_from_pdf(uploaded_file)
 
-    # 2. Se abbiamo il testo, inviamo SOLO il testo a Gemini (risposta in ~1 sec)
     if text:
         return parse_certificate_text(text)
 
-    # 3. Fallback per PDF Scansionati (Convertito in JPEG compresso)
+    # Fallback per PDF Scansionati
     api_key = st.secrets.get("GEMINI_API_KEY") or os.environ.get("GEMINI_API_KEY")
     if HAS_GEMINI and api_key and HAS_PYMUPDF:
         try:
             file_bytes = uploaded_file.getvalue() if hasattr(uploaded_file, "getvalue") else uploaded_file.read()
             doc = fitz.open(stream=file_bytes, filetype="pdf")
             page = doc[0]
-            pix = page.get_pixmap(dpi=100)
+            pix = page.get_pixmap(dpi=90)
             img_bytes = pix.tobytes("jpeg")
             doc.close()
 
             genai.configure(api_key=str(api_key).strip())
             model = genai.GenerativeModel("gemini-3.6-flash")
 
-            prompt = """
-            Estrai i dati dal certificato in JSON:
-            {
-                "cert_id": "string", "manufacturer": "string", "standard": "string",
-                "main_material": "string", "main_diameter_mm": float, "main_mbl_tons": float,
-                "main_length_m": float, "has_geolink": false, "geolink_mbl_tons": 0.0,
-                "geolink_diameter_mm": 0.0, "geolink_length_m": 0.0, "has_tail": false,
-                "tail_material": "", "tail_diameter_mm": 0.0, "tail_mbl_tons": 0.0, "tail_length_m": 0.0
-            }
-            """
+            prompt = 'Estrai dati certificato MEG4 in JSON: {"cert_id":"","manufacturer":"","main_material":"","main_diameter_mm":0.0,"main_mbl_tons":0.0,"main_length_m":0.0,"standard":"MEG4"}'
 
-            response = model.generate_content([
-                prompt,
-                {"mime_type": "image/jpeg", "data": img_bytes}
-            ], generation_config={"response_mime_type": "application/json"})
+            response = model.generate_content(
+                [prompt, {"mime_type": "image/jpeg", "data": img_bytes}],
+                generation_config={
+                    "response_mime_type": "application/json",
+                    "temperature": 0.0,
+                    "max_output_tokens": 250
+                }
+            )
 
             return json.loads(response.text)
         except Exception as e:
@@ -98,7 +92,7 @@ def parse_line_certificate(uploaded_file) -> dict:
 
 
 def parse_certificate_text(text: str) -> dict:
-    """Invia solo il testo a Gemini 3.6 Flash per una risposta immediata."""
+    """Invia un payload minimo a Gemini per azzerare la latenza."""
     if not text or not text.strip():
         return None
 
@@ -109,35 +103,33 @@ def parse_certificate_text(text: str) -> dict:
             genai.configure(api_key=str(api_key).strip())
             model = genai.GenerativeModel("gemini-3.6-flash")
 
-            prompt = f"""
-            Sei un ingegnere navale. Estrai i dati dal seguente testo di certificato cavi MEG4.
-            Restituisci ESCLUSIVAMENTE un oggetto JSON valido con queste chiavi:
-            {{
-                "cert_id": "string",
-                "manufacturer": "string",
-                "standard": "string",
-                "main_material": "string",
-                "main_diameter_mm": float,
-                "main_mbl_tons": float,
-                "main_length_m": float,
-                "has_geolink": false,
-                "geolink_mbl_tons": 0.0,
-                "geolink_diameter_mm": 0.0,
-                "geolink_length_m": 0.0,
-                "has_tail": false,
-                "tail_material": "",
-                "tail_diameter_mm": 0.0,
-                "tail_mbl_tons": 0.0,
-                "tail_length_m": 0.0
-            }}
+            # Prompt compatto e rigido
+            prompt = f"""Estrai in JSON i dati di questo certificato cavi d'ormeggio MEG4:
+{{
+    "cert_id": "string",
+    "manufacturer": "string",
+    "standard": "MEG4",
+    "main_material": "string",
+    "main_diameter_mm": float,
+    "main_mbl_tons": float,
+    "main_length_m": float,
+    "has_tail": false,
+    "tail_material": "",
+    "tail_diameter_mm": 0.0,
+    "tail_mbl_tons": 0.0,
+    "tail_length_m": 0.0
+}}
 
-            Testo certificato:
-            {text[:4000]}
-            """
+Testo:
+{text[:1500]}"""
 
             response = model.generate_content(
                 prompt,
-                generation_config={"response_mime_type": "application/json"}
+                generation_config={
+                    "response_mime_type": "application/json",
+                    "temperature": 0.0,
+                    "max_output_tokens": 250
+                }
             )
             return json.loads(response.text)
         except Exception as e:
