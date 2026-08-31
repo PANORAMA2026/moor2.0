@@ -1,10 +1,9 @@
 """
 utils/pdf_parser.py
-Parser intelligente basato su AI per certificati di collaudo cavi d'ormeggio multi-componente.
-Analizza Main Line, GeoLink e Tail per qualsiasi produttore (Gleistein, Samson, Lankhorst, ecc.)
-restituendo una struttura dati compatibile con MEG4.
+Parser intelligente basato su Gemini API per certificati cavi d'ormeggio MEG4.
 """
 
+import io
 import json
 import os
 import re
@@ -14,14 +13,18 @@ import streamlit as st
 
 
 def extract_text_from_pdf(uploaded_file) -> str:
-    """Estrae l'intero contenuto testuale da tutte le pagine del file PDF."""
+    """Estrae il testo dal PDF leggendo il buffer di memoria in modo sicuro."""
     text = ""
     try:
-        # Reset del puntatore per garantire la lettura da inizio file
-        if hasattr(uploaded_file, "seek"):
+        if hasattr(uploaded_file, "getvalue"):
+            file_bytes = io.BytesIO(uploaded_file.getvalue())
+        elif hasattr(uploaded_file, "read"):
             uploaded_file.seek(0)
-            
-        reader = pypdf.PdfReader(uploaded_file)
+            file_bytes = io.BytesIO(uploaded_file.read())
+        else:
+            file_bytes = uploaded_file
+
+        reader = pypdf.PdfReader(file_bytes)
         for page in reader.pages:
             t = page.extract_text()
             if t:
@@ -32,121 +35,132 @@ def extract_text_from_pdf(uploaded_file) -> str:
 
 
 def parse_line_certificate(uploaded_file) -> dict:
-    """
-    Funzione d'ingresso per file PDF: estrae il testo dal PDF e invia
-    la richiesta al parser AI.
-    """
+    """Funzione principale richiamata dal pulsante di parsing."""
     if uploaded_file is None:
         return None
 
     text = extract_text_from_pdf(uploaded_file)
-    if not text.strip():
-        # Ritorna None se il PDF non contiene testo estraibile
+    if not text or not text.strip():
         return None
 
-    return parse_certificate_with_ai(text)
+    return parse_certificate_text(text)
 
 
 def parse_certificate_text(text: str) -> dict:
-    """
-    FUNZIONE DI COMPATIBILITÀ: Riceve testo grezzo ed esegue l'analisi AI o il fallback.
-    Risolve gli errori di importazione in app.py e views/tab_certificate.py.
-    """
+    """Funzione di supporto/compatibilità richiamata dalle viste dell'app."""
     if not text or not text.strip():
         return fallback_static_parse("")
-    return parse_certificate_with_ai(text)
 
-
-def parse_certificate_with_ai(text: str) -> dict:
-    """
-    Utilizza l'API di Gemini per analizzare la struttura semantica del certificato
-    ed estrarre i dati in formato JSON standardizzato.
-    """
+    # Recupera la chiave dai Secrets di Streamlit o dalle variabili d'ambiente
     api_key = st.secrets.get("GEMINI_API_KEY") or os.environ.get("GEMINI_API_KEY")
 
-    if not api_key:
-        print("⚠️ GEMINI_API_KEY non trovata. Utilizzo del fallback statico.")
-        return fallback_static_parse(text)
+    if api_key:
+        try:
+            # .strip() rimuove eventuali spazi o ritorni a capo accidentali
+            genai.configure(api_key=str(api_key).strip())
 
-    try:
-        genai.configure(api_key=api_key)
+            prompt = f"""
+            Sei un ingegnere navale esperto nella gestione di linee d'ormeggio navali secondo le linee guida OCIMF MEG4.
+            Analizza il seguente testo estratto da un certificato di collaudo cavi d'ormeggio (mooring line certificate).
+            
+            Estrai ed elabora le seguenti informazioni restituendo ESCLUSIVAMENTE un oggetto JSON valido:
 
-        prompt = f"""
-        Sei un ingegnere navale esperto nella gestione di linee d'ormeggio navali secondo le linee guida OCIMF MEG4.
-        Analizza il seguente testo estratto da un certificato di collaudo cavi d'ormeggio (mooring line certificate).
-        
-        Estrai ed elabora le seguenti informazioni restituendo ESCLUSIVAMENTE un oggetto JSON valido con la seguente struttura esatta:
+            {{
+                "cert_id": "Numero identificativo del certificato/collaudo (string)",
+                "manufacturer": "Nome del produttore (es. Lankhorst, Gleistein, Samson) (string)",
+                "standard": "Standard di prova o certificazione (es. DIN EN ISO 2307 / DNV) (string)",
+                "main_material": "Materiale o nome commerciale del cavo principale (string)",
+                "main_diameter_mm": Diametro nominale della main line in mm (float),
+                "main_mbl_tons": Break Force / MBL del cavo principale in TONNELLATE METRICHE (float). Se espressa in kN, converti dividendo per 9.80665,
+                "main_length_m": Lunghezza totale della main line in metri (float),
+                "has_geolink": False,
+                "geolink_mbl_tons": 0.0,
+                "geolink_diameter_mm": 0.0,
+                "geolink_length_m": 0.0,
+                "has_tail": False,
+                "tail_material": "",
+                "tail_diameter_mm": 0.0,
+                "tail_mbl_tons": 0.0,
+                "tail_length_m": 0.0
+            }}
 
-        {{
-            "cert_id": "Numero identificativo del certificato/collaudo (string)",
-            "manufacturer": "Nome del produttore (es. Gleistein, Samson, Lankhorst, Katradis) (string)",
-            "standard": "Standard di prova o certificazione (es. DIN EN ISO 2307 / DNV / Lloyd's) (string)",
-            "main_material": "Materiale o nome commerciale del cavo principale (es. Dyneema SK78, HMPE, Polyester) (string)",
-            "main_diameter_mm": Diametro nominale della main line in mm (float),
-            "main_mbl_tons": Break Force / MBL del cavo principale in TONNELLATE METRICHE (float). Se espressa in kN, converti dividendo per 9.80665,
-            "main_length_m": Lunghezza totale della main line in metri (float),
-            "has_geolink": True se nel certificato o nella linea è presente un componente GeoLink / Lashing, altrimenti False (boolean),
-            "geolink_mbl_tons": MBL del GeoLink in Tonnellate metriche (float, 0.0 se non presente),
-            "geolink_diameter_mm": Diametro o dimensione del GeoLink in mm (float, 0.0 se non presente),
-            "geolink_length_m": Lunghezza del GeoLink in metri (float, 0.0 se non presente),
-            "has_tail": True se nel certificato è presente una coda d'ormeggio (Mooring Tail / Grommet), altrimenti False (boolean),
-            "tail_material": Materiale o tipo della coda d'ormeggio (es. PP/PE Bipo, Poliestere) (string, "" se assente),
-            "tail_diameter_mm": Diametro della coda d'ormeggio in mm (float, 0.0 se assente),
-            "tail_mbl_tons": MBL della coda d'ormeggio in TONNELLATE METRICHE (float, 0.0 se assente),
-            "tail_length_m": Lunghezza della coda d'ormeggio in metri (float, 0.0 se assente)
-        }}
+            Testo del Certificato:
+            {text}
+            """
 
-        Testo del Certificato:
-        {text}
-        """
+            model = genai.GenerativeModel("gemini-2.5-flash")
+            response = model.generate_content(
+                prompt,
+                generation_config={"response_mime_type": "application/json"}
+            )
 
-        model = genai.GenerativeModel("gemini-2.5-flash")
-        response = model.generate_content(
-            prompt,
-            generation_config={"response_mime_type": "application/json"}
-        )
+            return json.loads(response.text)
 
-        data = json.loads(response.text)
-        return data
+        except Exception as e:
+            print(f"⚠️ Chiamata API Gemini non riuscita: {e}")
 
-    except Exception as e:
-        print(f"⚠️ Errore durante l'elaborazione AI: {e}. Esecuzione del fallback.")
-        return fallback_static_parse(text)
+    return fallback_static_parse(text)
 
 
 def fallback_static_parse(text: str) -> dict:
-    """
-    Fallback basato su regole locali ed estrazione regex
-    in caso di assenza di API Key o problemi di rete.
-    """
+    """Fallback deterministico tramite Regex se l'API Gemini fallisce o non è presente."""
     data = {
         "cert_id": "N/A",
         "manufacturer": "Sconosciuto",
-        "main_material": "HMPE",
-        "main_diameter_mm": 64.0,
-        "main_mbl_tons": 105.0,
-        "main_length_m": 220.0,
-        "has_geolink": "GeoLink" in text or "Lashing" in text,
+        "main_material": "Sintetico",
+        "main_diameter_mm": 0.0,
+        "main_mbl_tons": 0.0,
+        "main_length_m": 0.0,
+        "has_geolink": False,
         "geolink_mbl_tons": 0.0,
         "geolink_diameter_mm": 0.0,
         "geolink_length_m": 0.0,
-        "has_tail": "Tail" in text or "Grommet" in text,
+        "has_tail": False,
         "tail_material": "",
         "tail_diameter_mm": 0.0,
         "tail_mbl_tons": 0.0,
         "tail_length_m": 0.0,
-        "standard": "ISO 2307 / MEG4",
+        "standard": "EN 10204 3.1 / MEG4",
     }
 
-    cert_match = re.search(r"(?:Certificate|Cert)\s+(?:no\.|number|ID)?:?\s*([A-Z0-9\/\-]+)", text, re.IGNORECASE)
-    if cert_match:
-        data["cert_id"] = cert_match.group(1).strip()
+    if not text:
+        return data
 
-    if "Gleistein" in text:
+    # Produttore
+    if "Lankhorst" in text:
+        data["manufacturer"] = "Lankhorst Ropes"
+    elif "Gleistein" in text:
         data["manufacturer"] = "Gleistein"
     elif "Samson" in text:
-        data["manufacturer"] = "Samson Rope"
-    elif "Katradis" in text:
-        data["manufacturer"] = "Katradis"
+        data["manufacturer"] = "Samson"
+
+    # ID Certificato
+    cert_m = re.search(r"Certificate\s+number:?\s*\|\s*([A-Z0-9]+)", text, re.IGNORECASE) or re.search(r"Certificate\s+number:?\s*([A-Z0-9]+)", text, re.IGNORECASE)
+    if cert_m:
+        data["cert_id"] = cert_m.group(1).strip()
+
+    # Diametro mm
+    dia_m = re.search(r"(\d+)\s*MM", text, re.IGNORECASE)
+    if dia_m:
+        data["main_diameter_mm"] = float(dia_m.group(1))
+
+    # Lunghezza m
+    len_m = re.search(r"(\d+)\s*MTR", text, re.IGNORECASE)
+    if len_m:
+        data["main_length_m"] = float(len_m.group(1))
+
+    # MBL (con conversione da kN a tonnellate se necessario)
+    mbl_mt = re.search(r"([\d\,]+)\s*Mt", text, re.IGNORECASE)
+    mbl_kn = re.search(r"(\d+)\s*kN", text, re.IGNORECASE)
+
+    if mbl_mt:
+        data["main_mbl_tons"] = float(mbl_mt.group(1).replace(",", "."))
+    elif mbl_kn:
+        data["main_mbl_tons"] = round(float(mbl_kn.group(1)) / 9.80665, 2)
+
+    # Materiale
+    mat_m = re.search(r"Material\s*\|\s*([^\n]+)", text, re.IGNORECASE)
+    if mat_m:
+        data["main_material"] = mat_m.group(1).strip()
 
     return data
