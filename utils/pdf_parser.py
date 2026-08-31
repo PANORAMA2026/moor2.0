@@ -21,7 +21,7 @@ except ImportError:
     HAS_GEMINI = False
 
 
-def extract_fast_text(uploaded_file) -> str:
+def extract_text_from_pdf(uploaded_file) -> str:
     """Estrae il testo vettoriale dal PDF in pochissimi millisecondi via PyMuPDF."""
     if uploaded_file is None:
         return ""
@@ -53,10 +53,10 @@ def parse_line_certificate(uploaded_file) -> dict:
     if uploaded_file is None:
         return None
 
-    # 1. Estrazione testo locale (quasi istantanea)
-    text = extract_fast_text(uploaded_file)
+    # 1. Estrazione testo locale (istantanea)
+    text = extract_text_from_pdf(uploaded_file)
 
-    # 2. Se abbiamo il testo, inviamo SOLO il testo a Gemini (risposta in 1 secondo)
+    # 2. Se abbiamo il testo, inviamo SOLO il testo a Gemini (risposta in ~1 sec)
     if text:
         return parse_certificate_text(text)
 
@@ -67,7 +67,6 @@ def parse_line_certificate(uploaded_file) -> dict:
             file_bytes = uploaded_file.getvalue() if hasattr(uploaded_file, "getvalue") else uploaded_file.read()
             doc = fitz.open(stream=file_bytes, filetype="pdf")
             page = doc[0]
-            # Pixmap leggera per non appesantire il payload
             pix = page.get_pixmap(dpi=100)
             img_bytes = pix.tobytes("jpeg")
             doc.close()
