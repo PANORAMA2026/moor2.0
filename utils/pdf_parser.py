@@ -18,7 +18,9 @@ def extract_text_from_pdf(uploaded_file) -> str:
     text = ""
     try:
         # Reset del puntatore per garantire la lettura da inizio file
-        uploaded_file.seek(0)
+        if hasattr(uploaded_file, "seek"):
+            uploaded_file.seek(0)
+            
         reader = pypdf.PdfReader(uploaded_file)
         for page in reader.pages:
             t = page.extract_text()
@@ -31,7 +33,7 @@ def extract_text_from_pdf(uploaded_file) -> str:
 
 def parse_line_certificate(uploaded_file) -> dict:
     """
-    Funzione principale d'ingresso: estrae il testo dal PDF e invia
+    Funzione d'ingresso per file PDF: estrae il testo dal PDF e invia
     la richiesta al parser AI.
     """
     if uploaded_file is None:
@@ -39,9 +41,19 @@ def parse_line_certificate(uploaded_file) -> dict:
 
     text = extract_text_from_pdf(uploaded_file)
     if not text.strip():
-        # Ritorna None se il PDF non contiene testo estraibile (es. scansione raster senza OCR)
+        # Ritorna None se il PDF non contiene testo estraibile
         return None
 
+    return parse_certificate_with_ai(text)
+
+
+def parse_certificate_text(text: str) -> dict:
+    """
+    FUNZIONE DI COMPATIBILITÀ: Riceve testo grezzo ed esegue l'analisi AI o il fallback.
+    Risolve gli errori di importazione in app.py e views/tab_certificate.py.
+    """
+    if not text or not text.strip():
+        return fallback_static_parse("")
     return parse_certificate_with_ai(text)
 
 
@@ -50,7 +62,6 @@ def parse_certificate_with_ai(text: str) -> dict:
     Utilizza l'API di Gemini per analizzare la struttura semantica del certificato
     ed estrarre i dati in formato JSON standardizzato.
     """
-    # Recupera l'API Key dalle impostazioni di Streamlit Secrets o dalle variabili d'ambiente
     api_key = st.secrets.get("GEMINI_API_KEY") or os.environ.get("GEMINI_API_KEY")
 
     if not api_key:
@@ -62,7 +73,7 @@ def parse_certificate_with_ai(text: str) -> dict:
 
         prompt = f"""
         Sei un ingegnere navale esperto nella gestione di linee d'ormeggio navali secondo le linee guida OCIMF MEG4.
-        Analizza il seguente testo estratto da un certificato di collaudo e collaudo cavi d'ormeggio (mooring line certificate).
+        Analizza il seguente testo estratto da un certificato di collaudo cavi d'ormeggio (mooring line certificate).
         
         Estrai ed elabora le seguenti informazioni restituendo ESCLUSIVAMENTE un oggetto JSON valido con la seguente struttura esatta:
 
@@ -95,7 +106,6 @@ def parse_certificate_with_ai(text: str) -> dict:
             generation_config={"response_mime_type": "application/json"}
         )
 
-        # Parsing dell'output JSON restituito dall'AI
         data = json.loads(response.text)
         return data
 
@@ -112,9 +122,9 @@ def fallback_static_parse(text: str) -> dict:
     data = {
         "cert_id": "N/A",
         "manufacturer": "Sconosciuto",
-        "main_material": "Sintetico Generic",
-        "main_diameter_mm": 50.0,
-        "main_mbl_tons": 100.0,
+        "main_material": "HMPE",
+        "main_diameter_mm": 64.0,
+        "main_mbl_tons": 105.0,
         "main_length_m": 220.0,
         "has_geolink": "GeoLink" in text or "Lashing" in text,
         "geolink_mbl_tons": 0.0,
@@ -125,14 +135,18 @@ def fallback_static_parse(text: str) -> dict:
         "tail_diameter_mm": 0.0,
         "tail_mbl_tons": 0.0,
         "tail_length_m": 0.0,
-        "standard": "ISO 2307",
+        "standard": "ISO 2307 / MEG4",
     }
 
-    cert_match = re.search(r"Certificate\s+(?:no\.|number)?:?\s*([A-Z0-9\/\-]+)", text, re.IGNORECASE)
+    cert_match = re.search(r"(?:Certificate|Cert)\s+(?:no\.|number|ID)?:?\s*([A-Z0-9\/\-]+)", text, re.IGNORECASE)
     if cert_match:
         data["cert_id"] = cert_match.group(1).strip()
 
     if "Gleistein" in text:
         data["manufacturer"] = "Gleistein"
+    elif "Samson" in text:
+        data["manufacturer"] = "Samson Rope"
+    elif "Katradis" in text:
+        data["manufacturer"] = "Katradis"
 
     return data
