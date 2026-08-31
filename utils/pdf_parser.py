@@ -102,7 +102,7 @@ def parse_line_certificate(uploaded_file) -> dict:
             doc.close()
 
             genai.configure(api_key=str(api_key).strip())
-            model = genai.GenerativeModel("gemini-2.5-flash")
+            model = genai.GenerativeModel("gemini-3.6-flash")
 
             prompt = """
             Sei un ingegnere navale. Analizza questo certificato di collaudo cavi d'ormeggio (MEG4).
