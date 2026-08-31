@@ -1,12 +1,13 @@
 """
 utils/pdf_parser.py
-Parser ultra-veloce per Gemini 3.6 Flash con gestione sicura dell'output JSON.
+Parser ultra-veloce e robusto con schema Pydantic per prevenire stringhe non terminate.
 """
 
 import json
 import os
 import re
 import streamlit as st
+from pydantic import BaseModel, Field
 
 try:
     import fitz  # PyMuPDF
@@ -23,8 +24,24 @@ except ImportError:
 MODEL_NAME = "gemini-3.6-flash"
 
 
+# Schema di output garantito via Pydantic
+class MooringCertificateData(BaseModel):
+    cert_id: str = Field(default="UNKNOWN")
+    manufacturer: str = Field(default="N/A")
+    standard: str = Field(default="MEG4")
+    main_material: str = Field(default="N/A")
+    main_diameter_mm: float = Field(default=0.0)
+    main_mbl_tons: float = Field(default=0.0)
+    main_length_m: float = Field(default=0.0)
+    has_tail: bool = Field(default=False)
+    tail_material: str = Field(default="")
+    tail_diameter_mm: float = Field(default=0.0)
+    tail_mbl_tons: float = Field(default=0.0)
+    tail_length_m: float = Field(default=0.0)
+
+
 def extract_bytes_from_file(uploaded_file) -> bytes:
-    """Estrae i byte in modo sicuro riposizionando il puntatore dello stream."""
+    """Estrae i byte dallo stream di Streamlit azzerando il puntatore."""
     if uploaded_file is None:
         return b""
     try:
@@ -41,7 +58,7 @@ def extract_bytes_from_file(uploaded_file) -> bytes:
 
 
 def extract_text_from_pdf(uploaded_file) -> str:
-    """Estrae il testo vettoriale dal PDF via PyMuPDF in millisecondi."""
+    """Estrae il testo vettoriale in pochi millisecondi via PyMuPDF."""
     file_bytes = extract_bytes_from_file(uploaded_file)
     if not file_bytes or not HAS_PYMUPDF:
         return ""
@@ -61,11 +78,11 @@ def extract_text_from_pdf(uploaded_file) -> str:
 
 
 def parse_line_certificate(uploaded_file) -> dict:
-    """Parsing ad alta velocità per file vettoriali e scansionati."""
+    """Funzione principale per il parsing del certificato."""
     if uploaded_file is None:
         return None
 
-    # 1. Parsing da testo locale se presente
+    # 1. Tentativo di estrazione da testo vettoriale
     text = extract_text_from_pdf(uploaded_file)
     if text and len(text) > 40:
         return parse_certificate_text(text)
@@ -77,40 +94,22 @@ def parse_line_certificate(uploaded_file) -> dict:
             file_bytes = extract_bytes_from_file(uploaded_file)
             doc = fitz.open(stream=file_bytes, filetype="pdf")
             page = doc[0]
-            # DPI ottimizzati a 90 per bilanciare leggibilità e velocità di trasmissione
-            pix = page.get_pixmap(dpi=90)
+            # Risoluzione a 80 DPI per velocità massima ed elaborazione immediata
+            pix = page.get_pixmap(dpi=80)
             img_bytes = pix.tobytes("jpeg")
             doc.close()
 
             genai.configure(api_key=str(api_key).strip())
             model = genai.GenerativeModel(MODEL_NAME)
 
-            prompt = """
-            Sei un ingegnere navale esperto di cavi d'ormeggio MEG4.
-            Analizza questo certificato ed estrai i dati reali.
-            Restituisci un oggetto JSON valido con questa struttura esatta:
-            {
-                "cert_id": "string",
-                "manufacturer": "string",
-                "standard": "MEG4",
-                "main_material": "string",
-                "main_diameter_mm": 0.0,
-                "main_mbl_tons": 0.0,
-                "main_length_m": 0.0,
-                "has_tail": false,
-                "tail_material": "",
-                "tail_diameter_mm": 0.0,
-                "tail_mbl_tons": 0.0,
-                "tail_length_m": 0.0
-            }
-            """
+            prompt = "Sei un ingegnere navale. Estrai i dati tecnici di questo certificato cavi d'ormeggio MEG4."
 
             response = model.generate_content(
                 [prompt, {"mime_type": "image/jpeg", "data": img_bytes}],
                 generation_config={
                     "response_mime_type": "application/json",
+                    "response_schema": MooringCertificateData,
                     "temperature": 0.0,
-                    "max_output_tokens": 1000
                 }
             )
 
@@ -123,7 +122,7 @@ def parse_line_certificate(uploaded_file) -> dict:
 
 
 def parse_certificate_text(text: str) -> dict:
-    """Parsing da testo vettoriale tramite Gemini 3.6 Flash."""
+    """Parsing del testo vettoriale con schema rigoroso."""
     if not text or not text.strip():
         return None
 
@@ -134,31 +133,14 @@ def parse_certificate_text(text: str) -> dict:
             genai.configure(api_key=str(api_key).strip())
             model = genai.GenerativeModel(MODEL_NAME)
 
-            prompt = f"""Estrai in JSON i dati di questo certificato cavi d'ormeggio MEG4:
-{{
-    "cert_id": "string",
-    "manufacturer": "string",
-    "standard": "MEG4",
-    "main_material": "string",
-    "main_diameter_mm": 0.0,
-    "main_mbl_tons": 0.0,
-    "main_length_m": 0.0,
-    "has_tail": false,
-    "tail_material": "",
-    "tail_diameter_mm": 0.0,
-    "tail_mbl_tons": 0.0,
-    "tail_length_m": 0.0
-}}
-
-Testo certificato:
-{text[:2500]}"""
+            prompt = f"Estrai i dati tecnici di questo certificato cavi d'ormeggio MEG4:\n\n{text[:2500]}"
 
             response = model.generate_content(
                 prompt,
                 generation_config={
                     "response_mime_type": "application/json",
+                    "response_schema": MooringCertificateData,
                     "temperature": 0.0,
-                    "max_output_tokens": 1000
                 }
             )
 
@@ -170,13 +152,12 @@ Testo certificato:
 
 
 def dynamic_regex_parse(text: str) -> dict:
-    """Fallback locale offline."""
+    """Fallback offline basato su Regex."""
     data = {
         "cert_id": "UNKNOWN", "manufacturer": "N/A", "main_material": "N/A",
         "main_diameter_mm": 0.0, "main_mbl_tons": 0.0, "main_length_m": 0.0,
-        "has_geolink": False, "geolink_mbl_tons": 0.0, "geolink_diameter_mm": 0.0,
-        "geolink_length_m": 0.0, "has_tail": False, "tail_material": "",
-        "tail_diameter_mm": 0.0, "tail_mbl_tons": 0.0, "tail_length_m": 0.0, "standard": "MEG4"
+        "has_tail": False, "tail_material": "", "tail_diameter_mm": 0.0,
+        "tail_mbl_tons": 0.0, "tail_length_m": 0.0, "standard": "MEG4"
     }
 
     if not text:
