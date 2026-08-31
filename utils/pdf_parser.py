@@ -1,7 +1,7 @@
 """
 utils/pdf_parser.py
-Parser ultra-robusto multi-motore per certificati cavi d'ormeggio MEG4.
-Supporta pdfplumber e pypdf con gestione automatica del fallback Gemini / Regex.
+Parser dinamico per certificati d'ormeggio MEG4.
+Estrae esclusivamente i dati reali dal PDF o testo inserito. Nessun dato hardcodato.
 """
 
 import io
@@ -11,7 +11,6 @@ import re
 import streamlit as st
 import google.generativeai as genai
 
-# Importazione condizionale delle librerie di lettura PDF
 try:
     import pdfplumber
     HAS_PDFPLUMBER = True
@@ -26,15 +25,11 @@ except ImportError:
 
 
 def extract_text_from_pdf(uploaded_file) -> str:
-    """
-    Estrae il testo da un buffer PDF utilizzando un approccio multi-motore.
-    """
+    """Estrae il testo reale dal buffer del PDF caricato."""
     if uploaded_file is None:
         return ""
 
     text = ""
-
-    # Preparazione dei byte in memoria
     try:
         if hasattr(uploaded_file, "getvalue"):
             file_bytes = io.BytesIO(uploaded_file.getvalue())
@@ -44,10 +39,10 @@ def extract_text_from_pdf(uploaded_file) -> str:
         else:
             file_bytes = uploaded_file
     except Exception as e:
-        print(f"Errore nella preparazione del buffer PDF: {e}")
+        print(f"Errore lettura buffer PDF: {e}")
         return ""
 
-    # Motore 1: pdfplumber (Ideale per layout complessi, tabelle e font vettoriali)
+    # Motore 1: pdfplumber
     if HAS_PDFPLUMBER:
         try:
             file_bytes.seek(0)
@@ -59,9 +54,9 @@ def extract_text_from_pdf(uploaded_file) -> str:
             if text.strip():
                 return text
         except Exception as e:
-            print(f"pdfplumber non è riuscito a leggere il file: {e}")
+            print(f"pdfplumber error: {e}")
 
-    # Motore 2: pypdf (Fallback leggero)
+    # Motore 2: pypdf (Fallback)
     if HAS_PYPDF:
         try:
             file_bytes.seek(0)
@@ -73,28 +68,27 @@ def extract_text_from_pdf(uploaded_file) -> str:
             if text.strip():
                 return text
         except Exception as e:
-            print(f"pypdf non è riuscito a leggere il file: {e}")
+            print(f"pypdf error: {e}")
 
-    return text
+    return text.strip()
 
 
 def parse_line_certificate(uploaded_file) -> dict:
-    """Punto di ingresso principale per il parsing da file caricato."""
+    """Punto d'ingresso per file caricati via Drag & Drop."""
     if uploaded_file is None:
         return None
 
     text = extract_text_from_pdf(uploaded_file)
-    if not text or not text.strip():
-        # Se il PDF non contiene testo estrattibile, esegue un fallback diretto
-        return fallback_static_parse("")
+    if not text:
+        return None
 
     return parse_certificate_text(text)
 
 
 def parse_certificate_text(text: str) -> dict:
-    """Effettua il parsing da testo grezzo (da PDF o da paste manuale)."""
+    """Parsing dinamico via Gemini AI o estrazione Regex se l'API non è disponibile."""
     if not text or not text.strip():
-        return fallback_static_parse("")
+        return None
 
     api_key = st.secrets.get("GEMINI_API_KEY") or os.environ.get("GEMINI_API_KEY")
 
@@ -103,28 +97,29 @@ def parse_certificate_text(text: str) -> dict:
             genai.configure(api_key=str(api_key).strip())
 
             prompt = f"""
-            Sei un ingegnere navale esperto nella gestione di linee d'ormeggio navali secondo le linee guida OCIMF MEG4.
-            Analizza il seguente testo estratto da un certificato di collaudo cavi d'ormeggio (mooring line certificate).
+            Sei un ingegnere navale esperto di linee d'ormeggio OCIMF MEG4.
+            Analizza il seguente testo estratto DA UN CERTIFICATO REALE.
             
-            Estrai ed elabora le seguenti informazioni restituendo ESCLUSIVAMENTE un oggetto JSON valido con la seguente struttura esatta:
+            Estrai i dati REALI presenti nel testo ed esegui la conversione di unità ove necessario.
+            Restituisci ESCLUSIVAMENTE un JSON valido senza formattazione Markdown extra:
 
             {{
-                "cert_id": "Numero identificativo del certificato/collaudo (string)",
-                "manufacturer": "Nome del produttore (es. Lankhorst, Gleistein, Samson) (string)",
-                "standard": "Standard di prova o certificazione (es. DIN EN ISO 2307 / DNV) (string)",
-                "main_material": "Materiale o nome commerciale del cavo principale (string)",
-                "main_diameter_mm": Diametro nominale della main line in mm (float),
-                "main_mbl_tons": Break Force / MBL del cavo principale in TONNELLATE METRICHE (float). Se espressa in kN, converti dividendo per 9.80665,
-                "main_length_m": Lunghezza totale della main line in metri (float),
-                "has_geolink": False,
-                "geolink_mbl_tons": 0.0,
-                "geolink_diameter_mm": 0.0,
-                "geolink_length_m": 0.0,
-                "has_tail": False,
-                "tail_material": "",
-                "tail_diameter_mm": 0.0,
-                "tail_mbl_tons": 0.0,
-                "tail_length_m": 0.0
+                "cert_id": "Numero identificativo certificato/collaudo",
+                "manufacturer": "Nome produttore (es. Lankhorst, Gleistein, Samson, Katradis)",
+                "standard": "Standard di prova o certificazione (es. ISO 2307, EN 10204 3.1, DNV)",
+                "main_material": "Materiale o nome commerciale della main line",
+                "main_diameter_mm": float (diametro nominale main line in mm),
+                "main_mbl_tons": float (MBL o LDBF del cavo principale in TONNELLATE METRICHE. Se in kN dividi per 9.80665),
+                "main_length_m": float (lunghezza main line in metri),
+                "has_geolink": boolean (True solo se espressamente presente un lashing/geolink),
+                "geolink_mbl_tons": float (MBL geolink in t, 0.0 se assente),
+                "geolink_diameter_mm": float (diametro geolink in mm, 0.0 se assente),
+                "geolink_length_m": float (0.0 se assente),
+                "has_tail": boolean (True solo se espressamente presente una coda/tail nel certificato),
+                "tail_material": string (materiale coda o vuoto),
+                "tail_diameter_mm": float (diametro coda in mm, 0.0 se assente),
+                "tail_mbl_tons": float (MBL coda in t, 0.0 se assente),
+                "tail_length_m": float (lunghezza coda in m, 0.0 se assente)
             }}
 
             Testo del Certificato:
@@ -136,26 +131,25 @@ def parse_certificate_text(text: str) -> dict:
                 prompt,
                 generation_config={"response_mime_type": "application/json"}
             )
-
-            return json.loads(response.text)
+            parsed_json = json.loads(response.text)
+            return parsed_json
 
         except Exception as e:
-            print(f"⚠️ Chiamata API Gemini fallita ({e}). Passaggio al fallback Regex.")
+            print(f"⚠️ Errore API Gemini: {e}. Esecuzione Regex dinamico di backup.")
 
-    return fallback_static_parse(text)
+    # Se non c'è API key o l'API fallisce, usa l'estrazione Regex dinamica sul testo reale
+    return dynamic_regex_parse(text)
 
 
-def fallback_static_parse(text: str) -> dict:
-    """
-    Parser Regex strutturato per certificati standard (Lankhorst, Gleistein, Samson).
-    """
+def dynamic_regex_parse(text: str) -> dict:
+    """Estrae dinamicamente i valori dal testo fornito tramite Regular Expressions."""
     data = {
-        "cert_id": "21R123135",
-        "manufacturer": "Lankhorst Ropes",
-        "main_material": "EUROFLOAT PREMIUM",
-        "main_diameter_mm": 72.0,
-        "main_mbl_tons": 101.97,
-        "main_length_m": 220.0,
+        "cert_id": "N/A",
+        "manufacturer": "N/A",
+        "main_material": "N/A",
+        "main_diameter_mm": 0.0,
+        "main_mbl_tons": 0.0,
+        "main_length_m": 0.0,
         "has_geolink": False,
         "geolink_mbl_tons": 0.0,
         "geolink_diameter_mm": 0.0,
@@ -165,51 +159,47 @@ def fallback_static_parse(text: str) -> dict:
         "tail_diameter_mm": 0.0,
         "tail_mbl_tons": 0.0,
         "tail_length_m": 0.0,
-        "standard": "EN 10204 3.1 / ISO 2307",
+        "standard": "MEG4 / ISO 2307",
     }
 
-    if not text:
-        return data
+    # ID Certificato
+    cert_m = re.search(r"(?:Certificate\s*(?:number|no\.?|nr\.?)|Cert\.\s*n°)\s*:?\s*\|?\s*([A-Z0-9\/\-]+)", text, re.IGNORECASE)
+    if cert_m:
+        data["cert_id"] = cert_m.group(1).strip()
 
-    try:
-        # Produttore
-        if "Lankhorst" in text:
-            data["manufacturer"] = "Lankhorst Ropes"
-        elif "Gleistein" in text:
-            data["manufacturer"] = "Gleistein"
-        elif "Samson" in text:
-            data["manufacturer"] = "Samson"
+    # Produttore
+    for mfr in ["Lankhorst", "Gleistein", "Samson", "Katradis", "Bridon", "Bexco", "Timm"]:
+        if re.search(r"\b" + mfr + r"\b", text, re.IGNORECASE):
+            data["manufacturer"] = mfr
+            break
 
-        # Numero Certificato
-        cert_m = re.search(r"Certificate\s+number:?\s*\|?\s*([A-Z0-9\/]+)", text, re.IGNORECASE)
-        if cert_m:
-            data["cert_id"] = cert_m.group(1).strip()
+    # Diametro mm
+    dia_m = re.search(r"(\d+(?:\.\d+)?)\s*(?:mm|MM)\b", text)
+    if dia_m:
+        data["main_diameter_mm"] = float(dia_m.group(1))
 
-        # Diametro (mm)
-        dia_m = re.search(r"(\d+)\s*MM", text, re.IGNORECASE)
-        if dia_m:
-            data["main_diameter_mm"] = float(dia_m.group(1))
+    # Lunghezza m
+    len_m = re.search(r"(\d+(?:\.\d+)?)\s*(?:mtr|m|metres|metri)\b", text, re.IGNORECASE)
+    if len_m:
+        data["main_length_m"] = float(len_m.group(1))
 
-        # Lunghezza (m)
-        len_m = re.search(r"(\d+)\s*MTR", text, re.IGNORECASE)
-        if len_m:
-            data["main_length_m"] = float(len_m.group(1))
+    # MBL / Break Force (kN o Mt / t)
+    mbl_kn = re.search(r"(\d+(?:\.\d+)?)\s*kN\b", text, re.IGNORECASE)
+    mbl_mt = re.search(r"(\d+(?:[\.\,]\d+)?)\s*(?:Mt|t|tons|tonnes)\b", text, re.IGNORECASE)
 
-        # MBL (convertito in tonnellate metriche)
-        mbl_kn = re.search(r"(\d+)\s*kN", text, re.IGNORECASE)
-        mbl_mt = re.search(r"([\d\.\,]+)\s*Mt", text, re.IGNORECASE)
+    if mbl_kn:
+        data["main_mbl_tons"] = round(float(mbl_kn.group(1)) / 9.80665, 2)
+    elif mbl_mt:
+        val_str = mbl_mt.group(1).replace(",", ".")
+        data["main_mbl_tons"] = float(val_str)
 
-        if mbl_kn:
-            data["main_mbl_tons"] = round(float(mbl_kn.group(1)) / 9.80665, 2)
-        elif mbl_mt:
-            val_str = mbl_mt.group(1).replace(",", ".")
-            data["main_mbl_tons"] = float(val_str)
+    # Materiale
+    mat_m = re.search(r"(?:Material|Composition|Description)\s*:?\s*([^\n\r]+)", text, re.IGNORECASE)
+    if mat_m:
+        data["main_material"] = mat_m.group(1).strip()
 
-        # Materiale / Descrizione
-        if "EUROFLOAT" in text:
-            data["main_material"] = "EUROFLOAT PREMIUM"
-
-    except Exception as e:
-        print(f"Errore durante l'estrazione Regex: {e}")
+    # Restituisce None se non è riuscito a trovare neanche l'MBL o il diametro dal testo
+    if data["main_mbl_tons"] == 0.0 and data["main_diameter_mm"] == 0.0 and data["cert_id"] == "N/A":
+        return None
 
     return data
