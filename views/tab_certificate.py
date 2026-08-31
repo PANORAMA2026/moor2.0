@@ -9,7 +9,7 @@ import streamlit as st
 from database.db_manager import (
     load_certificates_from_db,
     save_certificate_to_db,
-    assign_line_to_slot
+    assign_line_to_slot,
 )
 from utils.pdf_parser import parse_certificate_text, parse_line_certificate
 
@@ -34,19 +34,27 @@ def render_tab_certificate():
 
         parse_btn = st.button("🔍 Esegui Parsing Certificato", type="primary")
 
+    # GESTIONE PARSING E RESET DELLO STATO
     if parse_btn:
         cert_data = None
         if uploaded_pdf is not None:
-            cert_data = parse_line_certificate(uploaded_pdf)
+            with st.spinner("🤖 Analisi del PDF con AI in corso..."):
+                cert_data = parse_line_certificate(uploaded_pdf)
         elif manual_text.strip():
-            cert_data = parse_certificate_text(manual_text)
+            with st.spinner("🤖 Analisi del testo con AI in corso..."):
+                cert_data = parse_certificate_text(manual_text)
+        else:
+            st.warning("⚠️ Carica un file PDF o incolla del testo prima di eseguire il parsing.")
 
         if cert_data:
+            # Resetta il vecchio certificato temporaneo e inserisce il nuovo
             st.session_state["parsed_cert_temp"] = cert_data
             st.success("✅ Parsing completato con successo!")
+        else:
+            st.error("❌ Impossibile estrarre i dati dal certificato indicato.")
 
     # VISUALIZZAZIONE COMPONENTI, WEAK POINT E ASSOCIAZIONE POSTAZIONE
-    if "parsed_cert_temp" in st.session_state:
+    if "parsed_cert_temp" in st.session_state and st.session_state["parsed_cert_temp"]:
         cd = st.session_state["parsed_cert_temp"]
 
         # Calcolo anello debole (Weak Point)
@@ -59,15 +67,21 @@ def render_tab_certificate():
             components["Tail (Coda)"] = cd.get("tail_mbl_tons", 0.0)
 
         valid_components = {k: v for k, v in components.items() if v > 0}
-        weak_point_name = min(valid_components, key=valid_components.get)
-        weak_point_mbl = valid_components[weak_point_name]
+        
+        if valid_components:
+            weak_point_name = min(valid_components, key=valid_components.get)
+            weak_point_mbl = valid_components[weak_point_name]
+        else:
+            weak_point_name = "Main Line"
+            weak_point_mbl = cd.get("main_mbl_tons", 0.0)
+
         limite_55_mbl = round(weak_point_mbl * 0.55, 2)
 
         with col_res:
             st.markdown("### 📋 Dati Estratti dal Certificato")
             st.caption(
-                f"**ID Certificato:** `{cd.get('cert_id')}` | **Produttore:**"
-                f" {cd.get('manufacturer')}"
+                f"**ID Certificato:** `{cd.get('cert_id', 'N/A')}` | **Produttore:**"
+                f" {cd.get('manufacturer', 'N/A')}"
             )
 
             # Scomposizione 3 parti
@@ -168,7 +182,7 @@ def render_tab_certificate():
                     "material": cd.get("main_material"),
                     "diameter_mm": cd.get("main_diameter_mm"),
                     "length_m": cd.get("main_length_m", 220.0),
-                    "mbl_tons": weak_point_mbl,  # MBL dell'anello debole
+                    "mbl_tons": weak_point_mbl,
                     "mbl_55_limit": limite_55_mbl,
                     "weak_point": weak_point_name,
                     "has_geolink": "YES" if cd.get("has_geolink") else "NO",
@@ -184,11 +198,16 @@ def render_tab_certificate():
                 save_certificate_to_db(record)
                 assign_line_to_slot(cd.get("cert_id"), station, "Winch", winch_name, winch_drum)
                 st.session_state.certificates_db = load_certificates_from_db()
+                
+                # Svuota i dati temporanei dopo il salvataggio
+                del st.session_state["parsed_cert_temp"]
+                
                 st.success(
                     f"Cavo {basket_id} associato a {station} - {winch_name} [{winch_drum}]! MBL"
                     f" operativo: {weak_point_mbl:.2f} t (Limite 55%:"
                     f" {limite_55_mbl:.2f} t)."
                 )
+                st.rerun()
 
     st.divider()
 
