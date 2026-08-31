@@ -14,3 +14,4 @@ streamlit-image-coordinates>=0.1.6
 openpyxl
 trimesh
 scipy
+google-generativeai
