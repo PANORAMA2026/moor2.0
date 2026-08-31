@@ -1,13 +1,12 @@
 """
 utils/pdf_parser.py
-Parser ultra-veloce e robusto con schema Pydantic per prevenire stringhe non terminate.
+Parser ultra-veloce e compatibile con JSON Schema nativo per Gemini Flash.
 """
 
 import json
 import os
 import re
 import streamlit as st
-from pydantic import BaseModel, Field
 
 try:
     import fitz  # PyMuPDF
@@ -21,23 +20,36 @@ try:
 except ImportError:
     HAS_GEMINI = False
 
-MODEL_NAME = "gemini-3.6-flash"
+MODEL_NAME = "gemini-1.5-flash"
 
-
-# Schema di output garantito via Pydantic
-class MooringCertificateData(BaseModel):
-    cert_id: str = Field(default="UNKNOWN")
-    manufacturer: str = Field(default="N/A")
-    standard: str = Field(default="MEG4")
-    main_material: str = Field(default="N/A")
-    main_diameter_mm: float = Field(default=0.0)
-    main_mbl_tons: float = Field(default=0.0)
-    main_length_m: float = Field(default=0.0)
-    has_tail: bool = Field(default=False)
-    tail_material: str = Field(default="")
-    tail_diameter_mm: float = Field(default=0.0)
-    tail_mbl_tons: float = Field(default=0.0)
-    tail_length_m: float = Field(default=0.0)
+# Schema JSON Nativo supportato direttamente dall'API
+RESPONSE_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {
+        "cert_id": {"type": "STRING"},
+        "manufacturer": {"type": "STRING"},
+        "standard": {"type": "STRING"},
+        "main_material": {"type": "STRING"},
+        "main_diameter_mm": {"type": "NUMBER"},
+        "main_mbl_tons": {"type": "NUMBER"},
+        "main_length_m": {"type": "NUMBER"},
+        "has_tail": {"type": "BOOLEAN"},
+        "tail_material": {"type": "STRING"},
+        "tail_diameter_mm": {"type": "NUMBER"},
+        "tail_mbl_tons": {"type": "NUMBER"},
+        "tail_length_m": {"type": "NUMBER"},
+    },
+    "required": [
+        "cert_id",
+        "manufacturer",
+        "standard",
+        "main_material",
+        "main_diameter_mm",
+        "main_mbl_tons",
+        "main_length_m",
+        "has_tail"
+    ],
+}
 
 
 def extract_bytes_from_file(uploaded_file) -> bytes:
@@ -58,7 +70,7 @@ def extract_bytes_from_file(uploaded_file) -> bytes:
 
 
 def extract_text_from_pdf(uploaded_file) -> str:
-    """Estrae il testo vettoriale in pochi millisecondi via PyMuPDF."""
+    """Estrae il testo vettoriale in millisecondi via PyMuPDF."""
     file_bytes = extract_bytes_from_file(uploaded_file)
     if not file_bytes or not HAS_PYMUPDF:
         return ""
@@ -94,8 +106,7 @@ def parse_line_certificate(uploaded_file) -> dict:
             file_bytes = extract_bytes_from_file(uploaded_file)
             doc = fitz.open(stream=file_bytes, filetype="pdf")
             page = doc[0]
-            # Risoluzione a 80 DPI per velocità massima ed elaborazione immediata
-            pix = page.get_pixmap(dpi=80)
+            pix = page.get_pixmap(dpi=90)
             img_bytes = pix.tobytes("jpeg")
             doc.close()
 
@@ -108,7 +119,7 @@ def parse_line_certificate(uploaded_file) -> dict:
                 [prompt, {"mime_type": "image/jpeg", "data": img_bytes}],
                 generation_config={
                     "response_mime_type": "application/json",
-                    "response_schema": MooringCertificateData,
+                    "response_schema": RESPONSE_SCHEMA,
                     "temperature": 0.0,
                 }
             )
@@ -139,7 +150,7 @@ def parse_certificate_text(text: str) -> dict:
                 prompt,
                 generation_config={
                     "response_mime_type": "application/json",
-                    "response_schema": MooringCertificateData,
+                    "response_schema": RESPONSE_SCHEMA,
                     "temperature": 0.0,
                 }
             )
