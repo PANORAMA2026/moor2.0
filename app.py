@@ -39,7 +39,15 @@ from database.db_manager import (
     save_lines_inventory_to_db,
     load_lines_inventory_from_db,
 )
-from utils.pdf_parser import extract_text_from_pdf, parse_certificate_text
+# Import gestione PDF con fallback di sicurezza
+try:
+    from utils.pdf_parser import extract_text_from_pdf, parse_certificate_text
+except ImportError as e:
+    def extract_text_from_pdf(*args, **kwargs):
+        return ""
+    def parse_certificate_text(*args, **kwargs):
+        return {}
+    st.error(f"⚠️ Errore caricamento modulo PDF (`utils.pdf_parser`): {e}")
 
 # Import delle viste (Tabs)
 from views.tab_berth import render_tab_berth
