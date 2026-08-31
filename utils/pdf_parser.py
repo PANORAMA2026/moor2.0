@@ -1,6 +1,6 @@
 """
 utils/pdf_parser.py
-Parser per certificati cavi MEG4 aggiornato a gemini-3.6-flash.
+Parser minimale a prova di errore di sintassi.
 """
 
 import json
@@ -9,7 +9,7 @@ import re
 import streamlit as st
 
 try:
-    import fitz  # PyMuPDF
+    import fitz
     HAS_PYMUPDF = True
 except ImportError:
     HAS_PYMUPDF = False
@@ -19,9 +19,6 @@ try:
     HAS_GEMINI = True
 except ImportError:
     HAS_GEMINI = False
-
-# Modello aggiornato richiesto dall'API
-MODEL_NAME = "gemini-3.6-flash"
 
 
 def extract_bytes_from_file(uploaded_file) -> bytes:
@@ -59,6 +56,17 @@ def extract_text_from_pdf(uploaded_file) -> str:
     return text.strip()
 
 
+def resolve_working_model():
+    try:
+        available_models = genai.list_models()
+        for m in available_models:
+            if "generateContent" in m.supported_generation_methods:
+                return m.name
+    except Exception:
+        pass
+    return "models/gemini-3.6-flash"
+
+
 def safe_extract_json(text_response: str) -> dict:
     if not text_response:
         return None
@@ -85,14 +93,12 @@ def parse_line_certificate(uploaded_file) -> dict:
     if uploaded_file is None:
         return None
 
-    # 1. Tentativo di estrazione da testo vettoriale
     text = extract_text_from_pdf(uploaded_file)
     if text and len(text) > 40:
         parsed_data = parse_certificate_text(text)
         if parsed_data:
             return parsed_data
 
-    # 2. Vision per PDF scansionati
     api_key = st.secrets.get("GEMINI_API_KEY") or os.environ.get("GEMINI_API_KEY")
     if HAS_GEMINI and api_key and HAS_PYMUPDF:
         try:
@@ -104,13 +110,13 @@ def parse_line_certificate(uploaded_file) -> dict:
             doc.close()
 
             genai.configure(api_key=str(api_key).strip())
-            model = genai.GenerativeModel(MODEL_NAME)
+            model_name = resolve_working_model()
+            model = genai.GenerativeModel(model_name)
 
             prompt = (
-                "Sei un ingegnere navale. Estrai i dati del certificato cavi MEG4 in JSON usando esattamente queste chiavi: "
-                "cert_id (string), manufacturer (string), standard (string), main_material (string), "
-                "main_diameter_mm (float), main_mbl_tons (float), main_length_m (float), "
-                "has_tail (bool), tail_material (string), tail_diameter_mm (float), tail_mbl_tons (float), tail_length_m (float)."
+                "Sei un ingegnere navale. Estrai i dati del certificato cavi MEG4 in JSON con i campi: "
+                "cert_id, manufacturer, standard, main_material, main_diameter_mm, main_mbl_tons, main_length_m, "
+                "has_tail, tail_material, tail_diameter_mm, tail_mbl_tons, tail_length_m."
             )
 
             response = model.generate_content([
@@ -137,11 +143,12 @@ def parse_certificate_text(text: str) -> dict:
     if HAS_GEMINI and api_key:
         try:
             genai.configure(api_key=str(api_key).strip())
-            model = genai.GenerativeModel(MODEL_NAME)
+            model_name = resolve_working_model()
+            model = genai.GenerativeModel(model_name)
 
             prompt = (
-                "Estrai i dati di questo certificato cavi MEG4 in formato JSON "
-                "(cert_id, manufacturer, main_material, main_diameter_mm, main_mbl_tons, main_length_m):\n\n" + text[:2000]
+                "Estrai i dati di questo certificato cavi MEG4 in formato JSON (cert_id, manufacturer, main_material, "
+                "main_diameter_mm, main_mbl_tons, main_length_m):\n\n" + text[:2000]
             )
 
             response = model.generate_content(prompt)
@@ -174,4 +181,16 @@ def dynamic_regex_parse(text: str) -> dict:
     if not text:
         return data
 
-    cert_m = re.search(r"(?:Cert|Certificate|Nr
+    cert_m = re.search(r"(?:Cert|Certificate|Nr|No)\.?\s*:?\s*([A-Z0-9\/\-]+)", text, re.IGNORECASE)
+    if cert_m:
+        data["cert_id"] = cert_m.group(1)
+
+    dia_m = re.search(r"(\d+(?:\.\d+)?)\s*mm", text, re.IGNORECASE)
+    if dia_m:
+        data["main_diameter_mm"] = float(dia_m.group(1))
+
+    mbl_m = re.search(r"(\d+(?:\.\d+)?)\s*(?:kN|t|tons)", text, re.IGNORECASE)
+    if mbl_m:
+        data["main_mbl_tons"] = float(mbl_m.group(1))
+
+    return data
