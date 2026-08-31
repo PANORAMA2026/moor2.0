@@ -39,7 +39,7 @@ from database.db_manager import (
     save_lines_inventory_to_db,
     load_lines_inventory_from_db,
 )
-from utils.pdf_parser import extract_text_from_pdf, parse_line_certificate, parse_certificate_text
+from utils.pdf_parser import extract_text_from_pdf, parse_certificate_text
 
 # Import delle viste (Tabs)
 from views.tab_berth import render_tab_berth
@@ -55,8 +55,8 @@ st.set_page_config(
     layout="wide",
 )
 
-# Perche salviamo su disco
-CALENDAR_STORAGE_PATH = os.path.join(os.path.dirname(__file__), "database", "saved_schedule.parquet")
+# Percorso per il salvataggio persistente del calendario su disco
+CALENDAR_STORAGE_PATH = os.path.join(os.path.dirname(DB_FILE_PATH), "saved_schedule.parquet")
 
 # =============================================================================
 # 1. INIZIALIZZAZIONE DATABASE & CARICAMENTO PERSISTENTE
