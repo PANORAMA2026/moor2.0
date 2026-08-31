@@ -1,6 +1,6 @@
 """
 utils/pdf_parser.py
-Parser ultra-veloce e compatibile con JSON Schema nativo per Gemini Flash.
+Parser ultra-robusto con rilevamento dinamico dei modelli Gemini attivi e parsing JSON sicuro.
 """
 
 import json
@@ -19,37 +19,6 @@ try:
     HAS_GEMINI = True
 except ImportError:
     HAS_GEMINI = False
-
-MODEL_NAME = "gemini-1.5-flash"
-
-# Schema JSON Nativo supportato direttamente dall'API
-RESPONSE_SCHEMA = {
-    "type": "OBJECT",
-    "properties": {
-        "cert_id": {"type": "STRING"},
-        "manufacturer": {"type": "STRING"},
-        "standard": {"type": "STRING"},
-        "main_material": {"type": "STRING"},
-        "main_diameter_mm": {"type": "NUMBER"},
-        "main_mbl_tons": {"type": "NUMBER"},
-        "main_length_m": {"type": "NUMBER"},
-        "has_tail": {"type": "BOOLEAN"},
-        "tail_material": {"type": "STRING"},
-        "tail_diameter_mm": {"type": "NUMBER"},
-        "tail_mbl_tons": {"type": "NUMBER"},
-        "tail_length_m": {"type": "NUMBER"},
-    },
-    "required": [
-        "cert_id",
-        "manufacturer",
-        "standard",
-        "main_material",
-        "main_diameter_mm",
-        "main_mbl_tons",
-        "main_length_m",
-        "has_tail"
-    ],
-}
 
 
 def extract_bytes_from_file(uploaded_file) -> bytes:
@@ -70,7 +39,7 @@ def extract_bytes_from_file(uploaded_file) -> bytes:
 
 
 def extract_text_from_pdf(uploaded_file) -> str:
-    """Estrae il testo vettoriale in millisecondi via PyMuPDF."""
+    """Estrae il testo vettoriale dal PDF via PyMuPDF in pochi millisecondi."""
     file_bytes = extract_bytes_from_file(uploaded_file)
     if not file_bytes or not HAS_PYMUPDF:
         return ""
@@ -89,17 +58,57 @@ def extract_text_from_pdf(uploaded_file) -> str:
     return text.strip()
 
 
+def resolve_working_model():
+    """Interroga direttamente l'API per trovare il modello funzionante associato alla chiave."""
+    try:
+        available_models = genai.list_models()
+        for m in available_models:
+            if "generateContent" in m.supported_generation_methods:
+                # Restituisce il nome completo del modello (es. 'models/gemini-1.5-flash-latest')
+                return m.name
+    except Exception:
+        pass
+    return "models/gemini-1.5-flash"
+
+
+def safe_extract_json(text_response: str) -> dict:
+    """Estrae ed esegue il parsing del JSON anche se l'LLM include markdown o formattazioni extra."""
+    if not text_response:
+        return None
+    
+    # Pulizia blocchi di codice markdown
+    cleaned = text_response.strip()
+    if "```" in cleaned:
+        cleaned = re.sub(r"```(?:json)?\s*", "", cleaned)
+        cleaned = cleaned.replace("```", "").strip()
+
+    # Cerca il primo blocco racchiuso tra graffe
+    json_match = re.search(r"\{.*\}", cleaned, re.DOTALL)
+    if json_match:
+        try:
+            return json.loads(json_match.group(0))
+        except Exception:
+            pass
+            
+    try:
+        return json.loads(cleaned)
+    except Exception:
+        return None
+
+
 def parse_line_certificate(uploaded_file) -> dict:
-    """Funzione principale per il parsing del certificato."""
+    """Parsing principale del certificato cavi MEG4."""
     if uploaded_file is None:
         return None
 
-    # 1. Tentativo di estrazione da testo vettoriale
+    # 1. Tentativo estrazione rapida da testo vettoriale
     text = extract_text_from_pdf(uploaded_file)
     if text and len(text) > 40:
-        return parse_certificate_text(text)
+        parsed_data = parse_certificate_text(text)
+        if parsed_data:
+            return parsed_data
 
-    # 2. Vision per PDF scansionati
+    # 2. Vision fallback per PDF scansionati
     api_key = st.secrets.get("GEMINI_API_KEY") or os.environ.get("GEMINI_API_KEY")
     if HAS_GEMINI and api_key and HAS_PYMUPDF:
         try:
@@ -111,79 +120,15 @@ def parse_line_certificate(uploaded_file) -> dict:
             doc.close()
 
             genai.configure(api_key=str(api_key).strip())
-            model = genai.GenerativeModel(MODEL_NAME)
+            
+            # Trova dinamicamente il modello disponibile ed evita l'errore 404
+            model_name = resolve_working_model()
+            model = genai.GenerativeModel(model_name)
 
-            prompt = "Sei un ingegnere navale. Estrai i dati tecnici di questo certificato cavi d'ormeggio MEG4."
-
-            response = model.generate_content(
-                [prompt, {"mime_type": "image/jpeg", "data": img_bytes}],
-                generation_config={
-                    "response_mime_type": "application/json",
-                    "response_schema": RESPONSE_SCHEMA,
-                    "temperature": 0.0,
-                }
-            )
-
-            return json.loads(response.text)
-
-        except Exception as e:
-            st.warning(f"⚠️ Errore Parsing Immagine: {e}")
-
-    return dynamic_regex_parse(text)
-
-
-def parse_certificate_text(text: str) -> dict:
-    """Parsing del testo vettoriale con schema rigoroso."""
-    if not text or not text.strip():
-        return None
-
-    api_key = st.secrets.get("GEMINI_API_KEY") or os.environ.get("GEMINI_API_KEY")
-
-    if HAS_GEMINI and api_key:
-        try:
-            genai.configure(api_key=str(api_key).strip())
-            model = genai.GenerativeModel(MODEL_NAME)
-
-            prompt = f"Estrai i dati tecnici di questo certificato cavi d'ormeggio MEG4:\n\n{text[:2500]}"
-
-            response = model.generate_content(
-                prompt,
-                generation_config={
-                    "response_mime_type": "application/json",
-                    "response_schema": RESPONSE_SCHEMA,
-                    "temperature": 0.0,
-                }
-            )
-
-            return json.loads(response.text)
-        except Exception as e:
-            st.warning(f"⚠️ Errore Parsing Testo: {e}")
-
-    return dynamic_regex_parse(text)
-
-
-def dynamic_regex_parse(text: str) -> dict:
-    """Fallback offline basato su Regex."""
-    data = {
-        "cert_id": "UNKNOWN", "manufacturer": "N/A", "main_material": "N/A",
-        "main_diameter_mm": 0.0, "main_mbl_tons": 0.0, "main_length_m": 0.0,
-        "has_tail": False, "tail_material": "", "tail_diameter_mm": 0.0,
-        "tail_mbl_tons": 0.0, "tail_length_m": 0.0, "standard": "MEG4"
-    }
-
-    if not text:
-        return data
-
-    cert_m = re.search(r"(?:Cert|Certificate|Nr|No)\.?\s*:?\s*([A-Z0-9\/\-]+)", text, re.IGNORECASE)
-    if cert_m:
-        data["cert_id"] = cert_m.group(1)
-
-    dia_m = re.search(r"(\d+(?:\.\d+)?)\s*mm", text, re.IGNORECASE)
-    if dia_m:
-        data["main_diameter_mm"] = float(dia_m.group(1))
-
-    mbl_m = re.search(r"(\d+(?:\.\d+)?)\s*(?:kN|t|tons)", text, re.IGNORECASE)
-    if mbl_m:
-        data["main_mbl_tons"] = float(mbl_m.group(1))
-
-    return data
+            prompt = """
+            Sei un ingegnere navale. Estrai i dati tecnici di questo certificato cavi d'ormeggio MEG4.
+            Restituisci ESCLUSIVAMENTE un JSON con questo formato esatto, senza altro testo:
+            {
+                "cert_id": "string",
+                "manufacturer": "string",
+                "standard": "MEG4
