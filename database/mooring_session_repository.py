@@ -34,8 +34,17 @@ def init_session_schema() -> None:
         timestamp_utc TEXT NOT NULL, wind_speed_mps REAL, wind_direction_deg REAL,
         gust_mps REAL, current_speed_mps REAL, current_direction_deg REAL,
         wave_height_m REAL, wave_period_s REAL, provider TEXT NOT NULL,
-        source_kind TEXT NOT NULL, forecast_reference_time TEXT
+        source_kind TEXT NOT NULL, forecast_reference_time TEXT,
+        tidal_current_u_mps REAL, tidal_current_v_mps REAL,
+        water_level_m REAL, water_level_datum TEXT
     )""")
+    env_cols = {r[1] for r in cur.execute("PRAGMA table_info(session_environment)").fetchall()}
+    for name, sql_type in {
+        "tidal_current_u_mps": "REAL", "tidal_current_v_mps": "REAL",
+        "water_level_m": "REAL", "water_level_datum": "TEXT",
+    }.items():
+        if name not in env_cols:
+            cur.execute(f"ALTER TABLE session_environment ADD COLUMN {name} {sql_type}")
     cur.execute("""CREATE TABLE IF NOT EXISTS session_line_exposure (
         id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL,
         line_id TEXT NOT NULL, timestamp_utc TEXT NOT NULL, tension_n REAL,
@@ -90,8 +99,16 @@ def load_active_or_scheduled() -> list[MooringSession]:
 
 def add_environment(session_id: str, obs: EnvironmentalObservation) -> None:
     init_session_schema(); conn = _conn()
-    conn.execute("INSERT INTO session_environment(session_id,timestamp_utc,wind_speed_mps,wind_direction_deg,gust_mps,current_speed_mps,current_direction_deg,wave_height_m,wave_period_s,provider,source_kind,forecast_reference_time) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-        (session_id,obs.timestamp_utc,obs.wind_speed_mps,obs.wind_direction_deg,obs.gust_mps,obs.current_speed_mps,obs.current_direction_deg,obs.wave_height_m,obs.wave_period_s,obs.provider,obs.source_kind,obs.forecast_reference_time)); conn.commit(); conn.close()
+    conn.execute("""INSERT INTO session_environment(
+        session_id,timestamp_utc,wind_speed_mps,wind_direction_deg,gust_mps,
+        current_speed_mps,current_direction_deg,wave_height_m,wave_period_s,
+        provider,source_kind,forecast_reference_time,tidal_current_u_mps,
+        tidal_current_v_mps,water_level_m,water_level_datum)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (session_id,obs.timestamp_utc,obs.wind_speed_mps,obs.wind_direction_deg,obs.gust_mps,
+         obs.current_speed_mps,obs.current_direction_deg,obs.wave_height_m,obs.wave_period_s,
+         obs.provider,obs.source_kind,obs.forecast_reference_time,obs.tidal_current_u_mps,
+         obs.tidal_current_v_mps,obs.water_level_m,obs.water_level_datum)); conn.commit(); conn.close()
 
 
 def add_line_exposure(session_id: str, exposure: LineExposure) -> None:
