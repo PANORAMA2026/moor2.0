@@ -28,7 +28,6 @@ def get_material_stiffness(material_type: str, tension_tons: float, mbl_tons: fl
     if tension_tons < 0:
         raise ValueError("Line tension cannot be negative.")
 
-    # Conservative fallback only; explicitly not a certification model.
     fallback_strain_at_break = {
         "HMPE": 0.025,
         "POLYESTER": 0.070,
@@ -36,7 +35,6 @@ def get_material_stiffness(material_type: str, tension_tons: float, mbl_tons: fl
         "STEEL_WIRE": 0.012,
     }.get(_material_key(material_type), 0.050)
 
-    # Secant linear fallback for legacy data lacking certified curves.
     strain = max(fallback_strain_at_break, 1e-6)
     return max(mbl_tons / (length_m * strain), 1e-9)
 
@@ -63,7 +61,6 @@ def calculate_composite_stiffness(
     return 1.0 / ((1.0 / k_main) + (1.0 / k_tail))
 
 
-# Backward-compatible name retained during migration.
 calculate_meg4_composite_stiffness = calculate_composite_stiffness
 
 
@@ -124,13 +121,18 @@ def calculate_line_geometry(lines_df: pd.DataFrame, bollards_df: pd.DataFrame, l
 def solve_line_tensions_3d(
     geom_df: pd.DataFrame,
     forces_dict: dict,
-    pretension_pct: float = 10.0,
+    pretension_pct: float | None = 10.0,
     max_iter: int = 50,
     tol: float = 1e-3,
     residual_tol: float = 1e-2,
 ) -> pd.DataFrame:
-    """Solve a linearised 3-DOF equilibrium problem with explicit diagnostics."""
-    if not 0 <= pretension_pct <= 100:
+    """Solve linearised 3-DOF equilibrium with optional per-line pretension.
+
+    If ``geom_df`` contains a numeric ``pretension_pct`` column and the
+    function argument is ``None``, each line uses its configured value.
+    Otherwise the scalar argument is applied to every line.
+    """
+    if pretension_pct is not None and not 0 <= pretension_pct <= 100:
         raise ValueError("Pretension percentage must be between 0 and 100.")
     if geom_df is None or geom_df.empty:
         result = pd.DataFrame() if geom_df is None else geom_df.copy()
@@ -150,13 +152,23 @@ def solve_line_tensions_3d(
     if (df["mbl_tons"] <= 0).any() or (df["length_m"] <= 0).any():
         raise ValueError("MBL and line length must be greater than zero.")
 
+    if pretension_pct is None:
+        if "pretension_pct" not in df.columns:
+            raise ValueError("Per-line pretension requested but geometry contains no pretension_pct column.")
+        pretension_values = pd.to_numeric(df["pretension_pct"], errors="coerce")
+        if pretension_values.isna().any() or ((pretension_values < 0) | (pretension_values > 100)).any():
+            raise ValueError("Invalid per-line pretension percentage.")
+        pretension_array = pretension_values.to_numpy(dtype=float)
+    else:
+        pretension_array = np.full(len(df), float(pretension_pct), dtype=float)
+
     f_ext = np.array([
         float(forces_dict.get("Fx_total_t", 0.0)),
         float(forces_dict.get("Fy_total_t", 0.0)),
         float(forces_dict.get("Mz_total_tm", 0.0)),
     ])
 
-    base_pretension = df["mbl_tons"].to_numpy() * (pretension_pct / 100.0)
+    base_pretension = df["mbl_tons"].to_numpy(dtype=float) * (pretension_array / 100.0)
     tensions = base_pretension.copy()
     b_vectors = []
     for _, row in df.iterrows():
@@ -170,6 +182,7 @@ def solve_line_tensions_3d(
     if np.allclose(f_ext, 0.0):
         df["Tension_tons"] = tensions
         df["Util_Percent"] = tensions / df["mbl_tons"].to_numpy() * 100.0
+        df["Pretension_Percent"] = pretension_array
         df.attrs["solver_diagnostics"] = SolverDiagnostics(SolverStatus.CONVERGED, 0, 0.0, "Zero external load.")
         return df
 
@@ -228,6 +241,7 @@ def solve_line_tensions_3d(
 
     df["Tension_tons"] = tensions
     df["Util_Percent"] = tensions / df["mbl_tons"].to_numpy() * 100.0
+    df["Pretension_Percent"] = pretension_array
     df.attrs["solver_diagnostics"] = SolverDiagnostics(
         status=status,
         iterations=iterations,
