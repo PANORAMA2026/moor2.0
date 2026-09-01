@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 import re
 import pandas as pd
+from config.constants import PORT_COORDINATES
 from core.schedule_controller import decide_for_active_call, reconcile
 from database.db_manager import get_port_mooring_setups
 from database.mooring_session_repository import save_session, load_by_session_id, load_active_or_scheduled
@@ -16,13 +17,12 @@ PORT_TIMEZONES = {
     "PVR": "America/Bahia_Banderas",
 }
 
-# Calendar exports use short commercial port names, while the engineering
-# database/layout uses configured berth names.  The code is the primary key
-# for this normalization; names are only fallbacks.
+# Names used by the itinerary are not always the same as the names used by
+# the engineering/layout database.  Port Code is the preferred bridge.
 PORT_ALIASES = {
     "LGB": ["Long Beach Cruise Terminal"],
     "ENS": ["Ensenada Pier #2"],
-    "CSL": [],
+    "CSL": ["Cabo San Lucas"],
     "MZT": ["Mazatlan Pier 4/5", "Mazatlan Pier 2/3"],
     "PVR": ["Puerto Vallarta Pier #1", "Puerto Vallarta Pier #3"],
 }
@@ -62,42 +62,42 @@ def _norm_name(value: str) -> str:
     return re.sub(r"[^a-z0-9]", "", str(value).lower())
 
 
+def _configured_port_names() -> list[str]:
+    """Return engineering port keys, without triggering DB fallback defaults."""
+    return [str(name).strip() for name in PORT_COORDINATES.keys()]
+
+
 def _resolve_configured_port(calendar_port: str, port_code: str) -> str:
-    """Map the calendar's commercial port name to an engineering port key.
+    """Resolve an itinerary port to the engineering/layout port key.
 
-    Preference order:
-      1. exact configured port name;
-      2. explicit Port Code alias;
-      3. normalized name match;
-      4. first alias for the code that has a configured/default setup.
-
-    The returned name is the key used by bollards, coordinates and mooring
-    setup data.  The original calendar name remains available separately.
+    Important: get_port_mooring_setups() creates a temporary Default Standard
+    fallback when no DB setup exists, so it cannot be used to decide whether a
+    port name is configured.  PORT_COORDINATES is therefore used as the
+    canonical configured-port registry here.
     """
     calendar_port = str(calendar_port).strip()
     code = str(port_code or "").strip().upper()
+    configured = _configured_port_names()
 
-    # First, preserve an exact engineering configuration if one exists.
-    exact_setups = get_port_mooring_setups(calendar_port)
-    if exact_setups:
+    if calendar_port in configured:
         return calendar_port
 
     aliases = PORT_ALIASES.get(code, [])
-    if aliases:
-        # Prefer an alias that actually has a configured setup.
-        for alias in aliases:
-            if get_port_mooring_setups(alias):
-                return alias
-        return aliases[0]
+    for alias in aliases:
+        if alias in configured:
+            return alias
 
-    # Generic fallback for future ports: compare normalized names against
-    # configured setup names when possible.
-    for candidate in (calendar_port,):
-        candidate_norm = _norm_name(candidate)
-        if candidate_norm:
-            for configured in get_port_mooring_setups(candidate).keys():
-                if _norm_name(configured) == candidate_norm:
-                    return configured
+    # Name normalization handles minor spelling/punctuation differences.
+    target = _norm_name(calendar_port)
+    for candidate in configured:
+        if _norm_name(candidate) == target:
+            return candidate
+
+    # If the code has a known engineering alias that is not yet present in the
+    # configured-port registry, return the alias so the runtime can explicitly
+    # report missing setup/layout instead of incorrectly reporting AT SEA.
+    if aliases:
+        return aliases[0]
     return calendar_port
 
 
@@ -151,7 +151,7 @@ def resolve_setup(port: str) -> tuple[str | None, str]:
 
 
 def reconcile_schedule(schedule: pd.DataFrame, now: datetime | None = None) -> dict:
-    """Reconcile calendar -> port -> default setup -> automatic calculation session."""
+    """Calendar -> current port -> default setup -> automatic calculation session."""
     now = now or _utc_now()
     if now.tzinfo is None:
         now = now.replace(tzinfo=timezone.utc)
@@ -182,7 +182,6 @@ def reconcile_schedule(schedule: pd.DataFrame, now: datetime | None = None) -> d
     calendar_port = str(row["Port"]).strip()
     port_code = str(row.get("Port_Code", "")).strip().upper()
     port = _resolve_configured_port(calendar_port, port_code)
-
     setup_name, setup_source = resolve_setup(port)
 
     if not setup_name:
@@ -200,8 +199,6 @@ def reconcile_schedule(schedule: pd.DataFrame, now: datetime | None = None) -> d
             "scheduled_end_utc": _as_utc(row["ETD"], row).isoformat(),
         }
 
-    # Pass the engineering/configured port name into the session controller so
-    # the downstream geometry, coordinates and setup lookup use the same key.
     normalized = row.copy()
     normalized["Port"] = port
     proposed_decision = decide_for_active_call(normalized, setup_name)
@@ -225,9 +222,8 @@ def reconcile_schedule(schedule: pd.DataFrame, now: datetime | None = None) -> d
         target = proposed
         eta = _as_utc(target.scheduled_start_utc)
         if eta and now >= eta:
-            # ETA reached: automatically activate the calculation session with
-            # the resolved default setup. This does not claim the lines are
-            # physically made fast; it starts the forecast monitoring session.
+            # ETA reached: automatically start the forecast/calculation session
+            # with the default setup. This is not proof that lines are made fast.
             target.start(eta.isoformat())
         save_session(target)
     elif decision.action == "KEEP_SCHEDULED" and current:
