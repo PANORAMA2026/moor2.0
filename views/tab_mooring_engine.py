@@ -197,9 +197,16 @@ def _persist_line_exposure(session, results: pd.DataFrame, environment: Environm
     if not session or session.status.value != "ACTIVE" or results.empty:
         return 0
 
-    sample_key = f"{session.session_id}:{environment.timestamp_utc.isoformat()}"
-    if st.session_state.get("last_persisted_exposure_key") == sample_key:
-        return 0
+    now = datetime.now(timezone.utc)
+    last_sample = st.session_state.get("last_line_exposure_at")
+    if isinstance(last_sample, datetime) and last_sample.tzinfo is None:
+        last_sample = last_sample.replace(tzinfo=timezone.utc)
+
+    duration_s = CALCULATION_SAMPLE_SECONDS
+    if isinstance(last_sample, datetime):
+        elapsed = (now - last_sample).total_seconds()
+        if 0.0 < elapsed <= 300.0:
+            duration_s = elapsed
 
     count = 0
     for _, row in results.iterrows():
@@ -210,19 +217,23 @@ def _persist_line_exposure(session, results: pd.DataFrame, environment: Environm
             continue
         exposure = LineExposure(
             line_id=str(row.get("line_id")),
-            timestamp_utc=environment.timestamp_utc.isoformat(),
+            timestamp_utc=now.isoformat(),
             tension_n=float(tension) * 1000.0 * 9.80665,
             mbl_n=float(mbl) * 1000.0 * 9.80665,
             utilization_pct=float(util),
-            duration_s=CALCULATION_SAMPLE_SECONDS,
+            duration_s=duration_s,
             source="SOLVER_FORECAST",
             valid=True,
-            diagnostic="Forecast-based static equilibrium; not a measured line load.",
+            diagnostic=(
+                "Forecast-based static equilibrium; not a measured line load. "
+                f"Environmental forecast timestamp={environment.timestamp_utc.isoformat()}"
+            ),
         )
         add_line_exposure(session.session_id, exposure)
         count += 1
 
-    st.session_state["last_persisted_exposure_key"] = sample_key
+    if count:
+        st.session_state["last_line_exposure_at"] = now
     return count
 
 
