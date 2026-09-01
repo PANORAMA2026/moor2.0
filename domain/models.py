@@ -1,11 +1,6 @@
-"""Canonical domain models for OpenMooring.
-
-These models define stable interfaces between UI, persistence and engineering
-calculations. Values use explicit units in field names where practical.
-"""
+"""Canonical domain models for OpenMooring."""
 
 from __future__ import annotations
-
 from dataclasses import dataclass, field
 from typing import Optional, Tuple
 
@@ -22,6 +17,16 @@ class Ship:
 
 
 @dataclass(frozen=True)
+class StrengthLimits:
+    """Explicit strength terminology. Values are in kN."""
+
+    ship_design_mbl_kn: Optional[float] = None
+    line_ldbf_kn: Optional[float] = None
+    working_load_limit_kn: Optional[float] = None
+    brake_rendering_kn: Optional[float] = None
+
+
+@dataclass(frozen=True)
 class MooringLine:
     line_id: str
     line_name: str
@@ -34,6 +39,7 @@ class MooringLine:
     tail_length_m: float = 0.0
     certificate_id: Optional[str] = None
     wear_pct: float = 0.0
+    strength_limits: Optional[StrengthLimits] = None
 
 
 @dataclass(frozen=True)
