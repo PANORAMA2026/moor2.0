@@ -6,15 +6,20 @@ from datetime import datetime, timedelta, timezone
 import pandas as pd
 import streamlit as st
 
-from config.constants import PORT_COORDINATES
-from core.mooring_session import EnvironmentalObservation
+from config.constants import DEFAULT_SHIP, PORT_COORDINATES
+from core.environmental_engine import LegacyCurrentProvider, LegacyWindProvider, VesselHydroGeometry
+from core.environmental_state import EnvironmentalState
+from core.line_mechanics import calculate_line_geometry
+from core.mooring_calculation import run_mooring_calculation
+from core.mooring_session import EnvironmentalObservation, LineExposure
 from core.schedule_runtime import reconcile_schedule
 from core.windy_point_forecast import WindyPointForecastError, fetch_forecast
-from database.db_manager import get_line_history
-from database.mooring_session_repository import add_environment
+from database.db_manager import get_line_history, get_port_mooring_setups
+from database.mooring_session_repository import add_environment, add_line_exposure
 
 
 WINDY_REFRESH_MINUTES = 30
+CALCULATION_SAMPLE_SECONDS = 60.0
 
 
 def _windy_api_key() -> str | None:
@@ -59,9 +64,15 @@ def _maybe_refresh_environment(port_name: str):
 
 
 def _persist_environment(session, result) -> bool:
+    """Persist a forecast observation only once per forecast timestamp."""
     if not session or session.status.value != "ACTIVE" or result.observation is None:
         return False
+
     obs = result.observation
+    key = f"{session.session_id}:{obs.timestamp_utc.isoformat()}"
+    if st.session_state.get("last_persisted_environment_key") == key:
+        return False
+
     observation = EnvironmentalObservation(
         timestamp_utc=obs.timestamp_utc.isoformat(),
         wind_speed_mps=obs.wind_speed_mps,
@@ -79,10 +90,143 @@ def _persist_environment(session, result) -> bool:
         water_level_m=None,
         water_level_datum=None,
     )
-    return add_environment(session.session_id, observation)
+    add_environment(session.session_id, observation)
+    st.session_state["last_persisted_environment_key"] = key
+    return True
 
 
-def _render_environment(session, port_name: str) -> None:
+def _build_calculation_geometry(session, port_name: str) -> pd.DataFrame:
+    inventory = st.session_state.get("lines_inventory", pd.DataFrame())
+    if inventory is None or inventory.empty:
+        raise ValueError("Line inventory is empty.")
+
+    setups = get_port_mooring_setups(port_name)
+    setup_df = setups.get(session.setup_name or "")
+    if setup_df is None or setup_df.empty:
+        raise ValueError(f"Mooring setup '{session.setup_name}' is not available for {port_name}.")
+
+    line_ids = setup_df["line_id"].astype(str).tolist()
+    lines = inventory.copy()
+    lines["line_id"] = lines["line_id"].astype(str)
+    lines = lines[lines["line_id"].isin(line_ids)].copy()
+    if lines.empty:
+        raise ValueError("The active mooring setup contains no matching inventory lines.")
+
+    setup_values = setup_df[["line_id", "mbl_percentage"]].copy()
+    setup_values["line_id"] = setup_values["line_id"].astype(str)
+    setup_values["pretension_pct"] = pd.to_numeric(setup_values["mbl_percentage"], errors="coerce")
+    lines = lines.merge(
+        setup_values[["line_id", "pretension_pct"]],
+        on="line_id",
+        how="left",
+        validate="one_to_one",
+    )
+    if lines["pretension_pct"].isna().any():
+        raise ValueError("One or more active mooring lines have no valid pretension setting.")
+
+    bollards = st.session_state.get("ports_bollards", {}).get(port_name, pd.DataFrame())
+    if bollards is None or bollards.empty:
+        raise ValueError(f"No bollard layout is available for {port_name}.")
+
+    required_bollard_columns = {"bollard_id", "bollard_x_m", "bollard_y_m", "bollard_z_m"}
+    if not required_bollard_columns.issubset(set(bollards.columns)):
+        raise ValueError(
+            "Bollard coordinates are incomplete. Engineering tension calculation "
+            "requires X/Y/Z coordinates for every used bollard."
+        )
+
+    return calculate_line_geometry(
+        lines,
+        bollards,
+        loa=float(DEFAULT_SHIP["LOA"]),
+        offset_fugro=float(st.session_state.get("offset_fugro_m", 0.0)),
+    )
+
+
+def _environmental_state_from_result(result) -> EnvironmentalState:
+    obs = result.observation
+    if obs is None:
+        raise ValueError("Windy returned no usable environmental observation.")
+    return EnvironmentalState(
+        timestamp_utc=obs.timestamp_utc,
+        wind_speed_mps=obs.wind_speed_mps,
+        wind_direction_from_deg_true=obs.wind_direction_from_deg_true,
+        gust_speed_mps=obs.gust_speed_mps,
+        current_speed_mps=obs.current_speed_mps,
+        current_direction_to_deg_true=obs.current_direction_to_deg_true,
+        tidal_current_u_mps=obs.tidal_current_u_mps,
+        tidal_current_v_mps=obs.tidal_current_v_mps,
+        wave_height_m=obs.wave_height_m,
+        wave_period_s=obs.wave_period_s,
+        water_level_m=None,
+        water_level_datum=None,
+        provider=obs.provider,
+        source_kind=obs.source_kind,
+    )
+
+
+def _calculate_current_mooring_state(session, port_name: str, result):
+    geometry = _build_calculation_geometry(session, port_name)
+    environment = _environmental_state_from_result(result)
+
+    loa = float(DEFAULT_SHIP["LOA"])
+    beam = float(DEFAULT_SHIP["Beam"])
+    draft = float(DEFAULT_SHIP["Draft"])
+    vessel = VesselHydroGeometry(
+        frontal_wind_area_m2=float(st.session_state.get("afw", DEFAULT_SHIP["AFW"])),
+        lateral_wind_area_m2=float(st.session_state.get("alw", DEFAULT_SHIP["ALW"])),
+        frontal_submerged_area_m2=beam * draft,
+        lateral_submerged_area_m2=float(DEFAULT_SHIP.get("ALC") or loa * draft),
+        loa_m=loa,
+    )
+
+    berth_heading = float(st.session_state.get("port_headings", {}).get(port_name, 0.0))
+    results, loads = run_mooring_calculation(
+        geometry,
+        environment,
+        vessel,
+        berth_heading,
+        LegacyWindProvider(),
+        LegacyCurrentProvider(wd_d_ratio=3.0),
+        pretension_pct=None,
+    )
+    return results, loads, environment
+
+
+def _persist_line_exposure(session, results: pd.DataFrame, environment: EnvironmentalState) -> int:
+    if not session or session.status.value != "ACTIVE" or results.empty:
+        return 0
+
+    sample_key = f"{session.session_id}:{environment.timestamp_utc.isoformat()}"
+    if st.session_state.get("last_persisted_exposure_key") == sample_key:
+        return 0
+
+    count = 0
+    for _, row in results.iterrows():
+        tension = row.get("Tension_tons")
+        util = row.get("Util_Percent")
+        mbl = row.get("mbl_tons")
+        if pd.isna(tension) or pd.isna(util) or pd.isna(mbl):
+            continue
+        exposure = LineExposure(
+            line_id=str(row.get("line_id")),
+            timestamp_utc=environment.timestamp_utc.isoformat(),
+            tension_n=float(tension) * 1000.0 * 9.80665,
+            mbl_n=float(mbl) * 1000.0 * 9.80665,
+            utilization_pct=float(util),
+            duration_s=CALCULATION_SAMPLE_SECONDS,
+            source="SOLVER_FORECAST",
+            valid=True,
+            diagnostic="Forecast-based static equilibrium; not a measured line load.",
+        )
+        add_line_exposure(session.session_id, exposure)
+        count += 1
+
+    st.session_state["last_persisted_exposure_key"] = sample_key
+    return count
+
+
+def _render_environment_and_calculation(session, port_name: str) -> None:
     st.subheader("🌐 Environmental Input — Windy Point Forecast")
     try:
         result = _maybe_refresh_environment(port_name)
@@ -98,11 +242,8 @@ def _render_environment(session, port_name: str) -> None:
         st.warning("Windy returned no usable environmental observation.")
         return
 
-    persisted = _persist_environment(session, result)
-    if persisted:
+    if _persist_environment(session, result):
         st.caption(f"Environmental observation saved: {obs.timestamp_utc.isoformat()}")
-    elif session.status.value != "ACTIVE":
-        st.caption("Preview for the scheduled call — database persistence starts when the mooring session becomes ACTIVE.")
 
     c = st.columns(7)
     c[0].metric("Wind", f"{obs.wind_speed_mps:.1f} m/s" if obs.wind_speed_mps is not None else "N/A")
@@ -125,14 +266,14 @@ def _render_environment(session, port_name: str) -> None:
         )
     else:
         st.info(
-            "Tidal current was not returned by the configured Windy model/key. "
+            "Tidal current is not available from the current Windy API key/model. "
             "No tidal-current value is being fabricated."
         )
 
     st.info(
-        "Water level / tide height is intentionally not populated from Windy: "
-        "Point Forecast provides tidal-current vectors, not tide height. "
-        "A separate tide source will be connected before tide-driven geometry is used."
+        "Water level / tide height is not populated from Windy. "
+        "Tide-driven vertical geometry will remain inactive until a separate "
+        "water-level source is connected."
     )
 
     if result.warnings:
@@ -140,6 +281,53 @@ def _render_environment(session, port_name: str) -> None:
             for warning in result.warnings:
                 st.write(f"• {warning}")
             st.write("Model status:", result.model_status)
+
+    st.divider()
+    st.subheader("🧮 Engineering Mooring Calculation")
+    try:
+        results, loads, environment = _calculate_current_mooring_state(session, port_name, result)
+    except Exception as exc:
+        st.warning(f"⚠️ Tension calculation not available: {exc}")
+        st.caption(
+            "The calculation is intentionally blocked when required engineering "
+            "geometry or line/setup data are missing; no synthetic geometry or load is substituted."
+        )
+        return
+
+    st.session_state["latest_mooring_results"] = results
+    st.session_state["latest_mooring_loads"] = loads
+    st.session_state["latest_mooring_environment"] = environment
+
+    diagnostics = results.attrs.get("solver_diagnostics")
+    if diagnostics is not None:
+        st.caption(
+            f"Solver: {diagnostics.status.value} | iterations={diagnostics.iterations} | "
+            f"residual={diagnostics.residual_norm:.6g}"
+        )
+
+    load_cols = st.columns(3)
+    load_cols[0].metric("Fx", f"{loads.total.fx_n / 9806.65:.2f} t")
+    load_cols[1].metric("Fy", f"{loads.total.fy_n / 9806.65:.2f} t")
+    load_cols[2].metric("Mz", f"{loads.total.mz_nm / 9806.65:.2f} t·m")
+
+    display_cols = [
+        c for c in [
+            "line_id", "line_name", "bollard_id", "length_m", "azimuth_deg",
+            "incline_deg", "Pretension_Percent", "Tension_tons", "Util_Percent",
+            "Solver_Status", "Residual_Norm",
+        ] if c in results.columns
+    ]
+    st.dataframe(results[display_cols], use_container_width=True)
+
+    exposure_count = _persist_line_exposure(session, results, environment)
+    if exposure_count:
+        st.caption(f"Saved {exposure_count} forecast-based line exposure samples to session history.")
+
+    st.warning(
+        "Engineering status: this is a deterministic environmental-load/equilibrium calculation. "
+        "Line stiffness still uses the project's compatibility fallback when certified load-extension "
+        "curves are not yet attached to the line certificate. It must not be represented as class-approved analysis."
+    )
 
 
 def render_tab_mooring_engine():
@@ -152,9 +340,13 @@ def render_tab_mooring_engine():
         if result.get("status") == "IN_TRANSIT":
             st.info("⚓ No active port call in the calendar. Monitoring is standing by automatically.")
             return
+
         session = result.get("session")
         if result.get("operator"):
-            st.warning("⚠️ Calendar or mooring setup changed. The existing active record is preserved; operator review is required.")
+            st.warning(
+                "⚠️ Calendar or mooring setup changed. The existing active record is preserved; "
+                "operator review is required."
+            )
         if session:
             c = st.columns(5)
             c[0].metric("Port", session.port_name)
@@ -164,8 +356,8 @@ def render_tab_mooring_engine():
             c[4].metric("Source", session.setup_source)
             st.caption(f"Scheduled: {session.scheduled_start_utc} → {session.scheduled_end_utc}")
 
-            if not result.get("operator"):
-                _render_environment(session, session.port_name)
+            if not result.get("operator") and session.status.value == "ACTIVE":
+                _render_environment_and_calculation(session, session.port_name)
 
     scheduler_fragment()
     st.divider()
