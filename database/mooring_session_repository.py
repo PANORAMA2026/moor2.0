@@ -97,7 +97,21 @@ def load_active_or_scheduled() -> list[MooringSession]:
     return [s for s in (load_by_session_id(r["session_id"]) for r in rows) if s is not None]
 
 
-def add_environment(session_id: str, obs: EnvironmentalObservation) -> None:
+def environment_observation_exists(session_id: str, timestamp_utc: str, provider: str) -> bool:
+    """Return True when the same source/timestamp is already persisted."""
+    init_session_schema(); conn = _conn()
+    row = conn.execute(
+        "SELECT 1 FROM session_environment WHERE session_id=? AND timestamp_utc=? AND provider=? LIMIT 1",
+        (session_id, timestamp_utc, provider),
+    ).fetchone()
+    conn.close()
+    return row is not None
+
+
+def add_environment(session_id: str, obs: EnvironmentalObservation) -> bool:
+    """Persist an observation once; return False when it is already present."""
+    if environment_observation_exists(session_id, obs.timestamp_utc, obs.provider):
+        return False
     init_session_schema(); conn = _conn()
     conn.execute("""INSERT INTO session_environment(
         session_id,timestamp_utc,wind_speed_mps,wind_direction_deg,gust_mps,
@@ -109,6 +123,7 @@ def add_environment(session_id: str, obs: EnvironmentalObservation) -> None:
          obs.current_speed_mps,obs.current_direction_deg,obs.wave_height_m,obs.wave_period_s,
          obs.provider,obs.source_kind,obs.forecast_reference_time,obs.tidal_current_u_mps,
          obs.tidal_current_v_mps,obs.water_level_m,obs.water_level_datum)); conn.commit(); conn.close()
+    return True
 
 
 def add_line_exposure(session_id: str, exposure: LineExposure) -> None:
