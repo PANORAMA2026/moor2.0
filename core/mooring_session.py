@@ -1,10 +1,4 @@
-"""Auditable lifecycle model for recording a mooring operation.
-
-The lifecycle is schedule-driven by default: a port-call schedule can create a
-pending session, while actual start/stop timestamps may be supplied by an
-operational signal. Manual intervention is reserved for schedule/setup
-exceptions rather than normal operation.
-"""
+"""Auditable lifecycle model for recording a mooring operation."""
 from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -44,6 +38,10 @@ class EnvironmentalObservation:
     provider: str
     source_kind: str
     forecast_reference_time: str | None = None
+    tidal_current_u_mps: float | None = None
+    tidal_current_v_mps: float | None = None
+    water_level_m: float | None = None
+    water_level_datum: str | None = None
 
 
 @dataclass
