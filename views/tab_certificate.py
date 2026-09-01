@@ -15,6 +15,7 @@ from database.db_manager import (
     save_lines_inventory_to_db,
     load_lines_inventory_from_db,
 )
+from database.certificate_repository import save_reviewed_certificate, load_certificate_records
 
 
 def _positive(value: float) -> bool:
@@ -29,11 +30,7 @@ def render_tab_certificate():
 
     with col_left:
         st.subheader("📤 Carica Documento")
-        uploaded_file = st.file_uploader(
-            "Trascina qui il file PDF del certificato",
-            type=["pdf"],
-            key="pdf_uploader",
-        )
+        uploaded_file = st.file_uploader("Trascina qui il file PDF del certificato", type=["pdf"], key="pdf_uploader")
         pasted_text = st.text_area("Oppure incolla il testo del certificato", height=160, key="pasted_text_area")
 
         if st.button("🔍 Esegui Parsing Certificato", type="primary", use_container_width=True):
@@ -46,15 +43,9 @@ def render_tab_certificate():
 
         cdata = st.session_state.get("parsed_cert_data", {})
         if cdata:
-            warnings = cdata.get("_warnings", [])
-            errors = cdata.get("_validation_errors", [])
-            if warnings:
-                for warning in warnings:
-                    st.warning(warning)
-            if errors:
-                for error in errors:
-                    st.error(error)
-            st.info("🔎 Stato: REVIEW REQUIRED — l'estrazione automatica non costituisce validazione del certificato.")
+            for warning in cdata.get("_warnings", []): st.warning(warning)
+            for error in cdata.get("_validation_errors", []): st.error(error)
+            st.info("🔎 REVIEW REQUIRED — l'estrazione automatica non costituisce validazione del certificato.")
 
     with col_right:
         st.subheader("📝 Dettagli Certificato")
@@ -78,9 +69,7 @@ def render_tab_certificate():
             st.markdown("**📈 Average Immediate Strain**")
             strain = cdata.get("average_immediate_strain_pct", {})
             s_cols = st.columns(5)
-            strain_values = {}
-            for col, pct in zip(s_cols, (10, 20, 30, 40, 50)):
-                strain_values[pct] = col.number_input(f"{pct}% LDBF", min_value=0.0, value=float(strain.get(str(pct), 0.0)), step=0.01, format="%.4f")
+            strain_values = {pct: col.number_input(f"{pct}% LDBF", min_value=0.0, value=float(strain.get(str(pct), 0.0)), step=0.01, format="%.4f") for col, pct in zip(s_cols, (10,20,30,40,50))}
 
             st.divider()
             st.markdown("**🪢 Mooring Tail — dati separati**")
@@ -97,72 +86,58 @@ def render_tab_certificate():
                 line_options += lines_df["line_name"].astype(str).tolist()
             selected_line_name = st.selectbox("Associa alla linea", line_options)
             winch_location = st.radio("Configurazione", ["Working Drum", "Storage Basket"], horizontal=True)
-
             accepted = st.checkbox("Confermo di aver verificato i valori contro il certificato originale.")
             btn_save = st.form_submit_button("💾 Salva Certificato", type="primary", use_container_width=True)
 
             if btn_save:
-                validation_errors = []
-                if not cert_id.strip(): validation_errors.append("Certificate ID is required.")
-                if not manufacturer.strip(): validation_errors.append("Manufacturer is required.")
-                if not material.strip(): validation_errors.append("Material/grade is required.")
-                if not _positive(diameter_mm): validation_errors.append("Diameter must be greater than zero.")
-                if not _positive(ldbf_tons): validation_errors.append("LDBF must be greater than zero.")
-                if not _positive(length_m): validation_errors.append("Line length must be greater than zero.")
-                if has_tail and (not _positive(tail_len) or not _positive(tail_mbl) or not tail_mat.strip()):
-                    validation_errors.append("Tail material, length and TDBF are required when a tail is present.")
-                if not accepted:
-                    validation_errors.append("Manual certificate review must be confirmed before saving.")
-
-                if validation_errors:
-                    for error in validation_errors:
-                        st.error(error)
+                errors = []
+                if not cert_id.strip(): errors.append("Certificate ID is required.")
+                if not manufacturer.strip(): errors.append("Manufacturer is required.")
+                if not material.strip(): errors.append("Material/grade is required.")
+                if not _positive(diameter_mm): errors.append("Diameter must be greater than zero.")
+                if not _positive(ldbf_tons): errors.append("LDBF must be greater than zero.")
+                if not _positive(length_m): errors.append("Line length must be greater than zero.")
+                if has_tail and (not _positive(tail_len) or not _positive(tail_mbl) or not tail_mat.strip()): errors.append("Tail material, length and TDBF are required when a tail is present.")
+                if not accepted: errors.append("Manual certificate review must be confirmed before saving.")
+                if errors:
+                    for error in errors: st.error(error)
                 else:
-                    cert_record = {
-                        "cert_id": cert_id.strip(),
-                        "manufacturer": manufacturer.strip(),
-                        "material": material.strip(),
-                        "diameter_mm": float(diameter_mm),
-                        "mbl_tons": float(ldbf_tons),
-                        "ship_design_mbl_tons": float(ship_mbl_tons),
-                        "length_m": float(length_m),
-                        "standard": standard.strip(),
-                        "issue_date": pd.Timestamp.now().strftime("%Y-%m-%d"),
-                        "has_tail": "YES" if has_tail else "NO",
-                        "tail_material": tail_mat.strip() if has_tail else "N/A",
-                        "tail_length": float(tail_len) if has_tail else 0.0,
-                        "tail_mbl": float(tail_mbl) if has_tail else 0.0,
+                    record = {
+                        "cert_id": cert_id.strip(), "certificate_type": "MOORING_LINE",
+                        "manufacturer": manufacturer.strip(), "material_grade": material.strip(),
+                        "diameter_mm": float(diameter_mm), "length_m": float(length_m),
+                        "ship_design_mbl_t": float(ship_mbl_tons) if ship_mbl_tons > 0 else None,
+                        "ldbf_t": float(ldbf_tons), "tail_tdbf_t": float(tail_mbl) if has_tail else None,
+                        "tail_length_m": float(tail_len) if has_tail else None,
+                        "standard_basis": standard.strip(), "issue_date": "",
+                        "strain": strain_values, "source_text": str(cdata.get("_source_text", "")),
+                        "extraction_method": str(cdata.get("_extraction_method", "manual/review")),
                         "review_status": "OPERATOR_VERIFIED",
-                        "strain_10": strain_values[10],
-                        "strain_20": strain_values[20],
-                        "strain_30": strain_values[30],
-                        "strain_40": strain_values[40],
-                        "strain_50": strain_values[50],
                     }
-                    save_certificate_to_db(cert_record)
+                    save_reviewed_certificate(record)
+                    # Keep legacy tables synchronized during migration.
+                    save_certificate_to_db({
+                        "cert_id": cert_id.strip(), "manufacturer": manufacturer.strip(), "material": material.strip(),
+                        "diameter_mm": diameter_mm, "mbl_tons": ldbf_tons, "length_m": length_m,
+                        "standard": standard.strip(), "issue_date": "", "has_tail": "YES" if has_tail else "NO",
+                        "tail_material": tail_mat.strip() if has_tail else "N/A", "tail_length": tail_len if has_tail else 0.0,
+                        "tail_mbl": tail_mbl if has_tail else 0.0,
+                    })
                     st.session_state.certificates_db = load_certificates_from_db()
 
                     if selected_line_name != "Nessuna (Salva solo Certificato)" and not lines_df.empty:
                         idx = lines_df[lines_df["line_name"].astype(str) == selected_line_name].index
                         if not idx.empty:
                             i = idx[0]
-                            lines_df.at[i, "cert_id"] = cert_id.strip()
-                            lines_df.at[i, "material"] = material.strip()
-                            lines_df.at[i, "diameter_mm"] = diameter_mm
-                            lines_df.at[i, "mbl_tons"] = ldbf_tons
-                            lines_df.at[i, "length_m"] = length_m
-                            lines_df.at[i, "winch_location"] = winch_location
-                            lines_df.at[i, "has_tail"] = has_tail
+                            lines_df.at[i, "cert_id"] = cert_id.strip(); lines_df.at[i, "material"] = material.strip()
+                            lines_df.at[i, "diameter_mm"] = diameter_mm; lines_df.at[i, "mbl_tons"] = ldbf_tons
+                            lines_df.at[i, "length_m"] = length_m; lines_df.at[i, "winch_location"] = winch_location
                             lines_df.at[i, "tail_length_m"] = tail_len if has_tail else 0.0
                             lines_df.at[i, "tail_mbl_tons"] = tail_mbl if has_tail else 0.0
-                            save_lines_inventory_to_db(lines_df)
-                            st.session_state.lines_inventory = load_lines_inventory_from_db()
+                            save_lines_inventory_to_db(lines_df); st.session_state.lines_inventory = load_lines_inventory_from_db()
                     st.success(f"Certificato {cert_id} salvato e marcato OPERATOR_VERIFIED.")
 
-    st.divider()
-    st.subheader("📋 Registro Certificati")
-    certs = st.session_state.get("certificates_db", pd.DataFrame())
-    if not certs.empty:
-        st.dataframe(certs, use_container_width=True)
-    else:
-        st.caption("Nessun certificato presente nel database.")
+    st.divider(); st.subheader("📋 Registro Certificati")
+    records = load_certificate_records()
+    if records: st.dataframe(pd.DataFrame(records), use_container_width=True)
+    else: st.caption("Nessun certificato revisionato presente nel database.")
