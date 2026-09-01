@@ -2,6 +2,7 @@
 from __future__ import annotations
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
+import re
 import pandas as pd
 from core.schedule_controller import decide_for_active_call, reconcile
 from database.db_manager import get_port_mooring_setups
@@ -13,6 +14,17 @@ PORT_TIMEZONES = {
     "CSL": "America/Mazatlan",
     "MZT": "America/Mazatlan",
     "PVR": "America/Bahia_Banderas",
+}
+
+# Calendar exports use short commercial port names, while the engineering
+# database/layout uses configured berth names.  The code is the primary key
+# for this normalization; names are only fallbacks.
+PORT_ALIASES = {
+    "LGB": ["Long Beach Cruise Terminal"],
+    "ENS": ["Ensenada Pier #2"],
+    "CSL": [],
+    "MZT": ["Mazatlan Pier 4/5", "Mazatlan Pier 2/3"],
+    "PVR": ["Puerto Vallarta Pier #1", "Puerto Vallarta Pier #3"],
 }
 
 
@@ -46,6 +58,49 @@ def _local_naive(value) -> datetime | None:
     return dt.replace(tzinfo=None) if dt.tzinfo is not None else dt
 
 
+def _norm_name(value: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(value).lower())
+
+
+def _resolve_configured_port(calendar_port: str, port_code: str) -> str:
+    """Map the calendar's commercial port name to an engineering port key.
+
+    Preference order:
+      1. exact configured port name;
+      2. explicit Port Code alias;
+      3. normalized name match;
+      4. first alias for the code that has a configured/default setup.
+
+    The returned name is the key used by bollards, coordinates and mooring
+    setup data.  The original calendar name remains available separately.
+    """
+    calendar_port = str(calendar_port).strip()
+    code = str(port_code or "").strip().upper()
+
+    # First, preserve an exact engineering configuration if one exists.
+    exact_setups = get_port_mooring_setups(calendar_port)
+    if exact_setups:
+        return calendar_port
+
+    aliases = PORT_ALIASES.get(code, [])
+    if aliases:
+        # Prefer an alias that actually has a configured setup.
+        for alias in aliases:
+            if get_port_mooring_setups(alias):
+                return alias
+        return aliases[0]
+
+    # Generic fallback for future ports: compare normalized names against
+    # configured setup names when possible.
+    for candidate in (calendar_port,):
+        candidate_norm = _norm_name(candidate)
+        if candidate_norm:
+            for configured in get_port_mooring_setups(candidate).keys():
+                if _norm_name(configured) == candidate_norm:
+                    return configured
+    return calendar_port
+
+
 def _active_row(schedule: pd.DataFrame, now: datetime):
     if schedule is None or schedule.empty:
         return None
@@ -62,6 +117,9 @@ def _active_row(schedule: pd.DataFrame, now: datetime):
         etd_local = _local_naive(row["ETD"])
         if eta_local is None or etd_local is None:
             continue
+        if etd_local < eta_local:
+            etd_local += pd.Timedelta(days=1).to_pytimedelta()
+
         if tz is not None:
             local_now = now_utc.astimezone(tz).replace(tzinfo=None)
             if eta_local <= local_now <= etd_local:
@@ -93,7 +151,7 @@ def resolve_setup(port: str) -> tuple[str | None, str]:
 
 
 def reconcile_schedule(schedule: pd.DataFrame, now: datetime | None = None) -> dict:
-    """Reconcile the calendar without confusing 'no setup' with 'at sea'."""
+    """Reconcile calendar -> port -> default setup -> automatic calculation session."""
     now = now or _utc_now()
     if now.tzinfo is None:
         now = now.replace(tzinfo=timezone.utc)
@@ -109,8 +167,6 @@ def reconcile_schedule(schedule: pd.DataFrame, now: datetime | None = None) -> d
             session.stop(end.isoformat())
             save_session(session)
 
-    # No calendar call covers the current instant: this is genuinely at sea
-    # (or outside the loaded itinerary window).
     if row is None:
         return {
             "status": "IN_TRANSIT",
@@ -118,15 +174,17 @@ def reconcile_schedule(schedule: pd.DataFrame, now: datetime | None = None) -> d
             "session": None,
             "operator": False,
             "port": None,
+            "calendar_port": None,
             "setup": None,
             "setup_source": "NO_PORT_CALL",
         }
 
-    port = str(row["Port"]).strip()
+    calendar_port = str(row["Port"]).strip()
+    port_code = str(row.get("Port_Code", "")).strip().upper()
+    port = _resolve_configured_port(calendar_port, port_code)
+
     setup_name, setup_source = resolve_setup(port)
 
-    # A valid port call is already established by the calendar. Missing setup
-    # is a configuration/input problem, never evidence that the vessel is at sea.
     if not setup_name:
         return {
             "status": "PORT_CALL_ACTIVE_SETUP_MISSING",
@@ -134,13 +192,19 @@ def reconcile_schedule(schedule: pd.DataFrame, now: datetime | None = None) -> d
             "session": None,
             "operator": True,
             "port": port,
+            "calendar_port": calendar_port,
+            "port_code": port_code,
             "setup": None,
             "setup_source": "NO_SETUP",
             "scheduled_start_utc": _as_utc(row["ETA"], row).isoformat(),
             "scheduled_end_utc": _as_utc(row["ETD"], row).isoformat(),
         }
 
-    proposed_decision = decide_for_active_call(row, setup_name)
+    # Pass the engineering/configured port name into the session controller so
+    # the downstream geometry, coordinates and setup lookup use the same key.
+    normalized = row.copy()
+    normalized["Port"] = port
+    proposed_decision = decide_for_active_call(normalized, setup_name)
     proposed = proposed_decision.session
     if proposed is None:
         return {
@@ -149,6 +213,8 @@ def reconcile_schedule(schedule: pd.DataFrame, now: datetime | None = None) -> d
             "session": None,
             "operator": proposed_decision.requires_operator,
             "port": port,
+            "calendar_port": calendar_port,
+            "port_code": port_code,
             "setup": setup_name,
             "setup_source": setup_source,
         }
@@ -159,6 +225,9 @@ def reconcile_schedule(schedule: pd.DataFrame, now: datetime | None = None) -> d
         target = proposed
         eta = _as_utc(target.scheduled_start_utc)
         if eta and now >= eta:
+            # ETA reached: automatically activate the calculation session with
+            # the resolved default setup. This does not claim the lines are
+            # physically made fast; it starts the forecast monitoring session.
             target.start(eta.isoformat())
         save_session(target)
     elif decision.action == "KEEP_SCHEDULED" and current:
@@ -175,7 +244,9 @@ def reconcile_schedule(schedule: pd.DataFrame, now: datetime | None = None) -> d
         "action": decision.action,
         "session": session,
         "operator": decision.requires_operator,
+        "port": port,
+        "calendar_port": calendar_port,
+        "port_code": port_code,
         "setup": setup_name,
         "setup_source": setup_source,
-        "port": port,
     }
