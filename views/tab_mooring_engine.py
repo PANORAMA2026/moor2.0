@@ -101,6 +101,8 @@ def _render_environment(session, port_name: str) -> None:
     persisted = _persist_environment(session, result)
     if persisted:
         st.caption(f"Environmental observation saved: {obs.timestamp_utc.isoformat()}")
+    elif session.status.value != "ACTIVE":
+        st.caption("Preview for the scheduled call — database persistence starts when the mooring session becomes ACTIVE.")
 
     c = st.columns(7)
     c[0].metric("Wind", f"{obs.wind_speed_mps:.1f} m/s" if obs.wind_speed_mps is not None else "N/A")
