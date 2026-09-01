@@ -1,5 +1,23 @@
-"""Canonical engineering domain models for OpenMooring.
+"""Canonical engineering domain models for OpenMooring."""
 
-This package is intentionally independent from Streamlit and persistence code.
-Migration from legacy DataFrame-based structures will be incremental.
-"""
+from .models import (
+    Ship,
+    MooringLine,
+    ConnectionPoint,
+    Bollard,
+    Environment,
+    SimulationInput,
+    LineResult,
+    SimulationResult,
+)
+
+__all__ = [
+    "Ship",
+    "MooringLine",
+    "ConnectionPoint",
+    "Bollard",
+    "Environment",
+    "SimulationInput",
+    "LineResult",
+    "SimulationResult",
+]
