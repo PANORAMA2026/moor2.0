@@ -1,257 +1,244 @@
+"""Mooring line mechanics and equilibrium solver.
+
+This module intentionally makes no claim of complete MEG4 compliance. Source-
+sensitive material curves and operational limits must be validated separately.
 """
-core/line_mechanics.py
-Motore fisico non-lineare conforme a OCIMF MEG4 per calcoli di ormeggio e rigidezza elastica.
-Include pretensionamento base al 10% MBL.
-"""
+
+from __future__ import annotations
 
 import numpy as np
 import pandas as pd
 
-# Parametri curve di allungamento MEG4 (% Elongation = A * (T / MBL)^B)
-MATERIAL_ELONGATION_PARAMS = {
-    "HMPE": {"A": 0.025, "B": 0.85},       # Molto rigido
-    "POLYESTER": {"A": 0.070, "B": 0.75},  # Flessibilità media
-    "NYLON": {"A": 0.180, "B": 0.60},      # Molto elastico (alta assorbenza)
-    "STEEL_WIRE": {"A": 0.012, "B": 1.00}  # Lineare quasi rigido
-}
+from core.solver_status import SolverDiagnostics, SolverStatus
+
+
+def _material_key(material_type: str) -> str:
+    return str(material_type).upper().strip()
 
 
 def get_material_stiffness(material_type: str, tension_tons: float, mbl_tons: float, length_m: float) -> float:
-    """Calcola la rigidezza tangenziale k_tan = dT/dL (ton/m) in base alla tensione attuale (MEG4)."""
+    """Legacy compatibility stiffness model.
+
+    For engineering-grade analysis, callers should supply certified load-
+    extension data. Generic material curves are deliberately not presented as
+    MEG4-validated properties.
+    """
     if length_m <= 0 or mbl_tons <= 0:
-        return 0.0
-    
-    mat_key = str(material_type).upper().strip() if pd.notna(material_type) else "HMPE"
-    params = MATERIAL_ELONGATION_PARAMS.get(mat_key, MATERIAL_ELONGATION_PARAMS["HMPE"])
-    
-    # Rapporto di carico minimo di guardia (1% MBL) per evitare divisioni per zero
-    load_ratio = max(tension_tons / mbl_tons, 0.01)
-    
-    a = params["A"]
-    b = params["B"]
-    
-    k_tangent = (mbl_tons / length_m) * (1.0 / (a * b)) * (load_ratio ** (1.0 - b))
-    return max(k_tangent, 0.1)
+        raise ValueError("Line length and break strength must be greater than zero.")
+    if tension_tons < 0:
+        raise ValueError("Line tension cannot be negative.")
+
+    # Conservative fallback only; explicitly not a certification model.
+    fallback_strain_at_break = {
+        "HMPE": 0.025,
+        "POLYESTER": 0.070,
+        "NYLON": 0.180,
+        "STEEL_WIRE": 0.012,
+    }.get(_material_key(material_type), 0.050)
+
+    # Secant linear fallback for legacy data lacking certified curves.
+    strain = max(fallback_strain_at_break, 1e-6)
+    return max(mbl_tons / (length_m * strain), 1e-9)
 
 
-def calculate_meg4_composite_stiffness(
-    main_mat: str, main_mbl: float, main_len: float, main_tension: float,
-    tail_mat: str, tail_mbl: float, tail_len: float
+def calculate_composite_stiffness(
+    main_mat: str,
+    main_mbl: float,
+    main_len: float,
+    main_tension: float,
+    tail_mat: str | None = None,
+    tail_mbl: float | None = None,
+    tail_len: float = 0.0,
 ) -> float:
-    """
-    Calcola la rigidezza equivalente di una linea composta (Cavo + Tail in serie).
-    1 / K_eq = 1 / K_main + 1 / K_tail
-    """
-    k_main = get_material_stiffness(main_mat, main_tension, main_mbl, main_len) if main_len > 0 else 0.0
-    k_tail = get_material_stiffness(tail_mat, main_tension, tail_mbl, tail_len) if tail_len > 0 else 0.0
-
-    if k_main > 0 and k_tail > 0:
-        return (k_main * k_tail) / (k_main + k_tail)
-    elif k_main > 0:
+    """Equivalent stiffness for main line and tail connected in series."""
+    k_main = get_material_stiffness(main_mat, main_tension, main_mbl, main_len)
+    if tail_len <= 0:
         return k_main
-    elif k_tail > 0:
-        return k_tail
-    return 0.0
+    if tail_mbl is None or tail_mbl <= 0:
+        raise ValueError("Tail length is positive but tail break strength is invalid.")
+
+    k_tail = get_material_stiffness(
+        tail_mat or "UNKNOWN", main_tension, tail_mbl, tail_len
+    )
+    return 1.0 / ((1.0 / k_main) + (1.0 / k_tail))
 
 
-def calculate_line_geometry(
-    lines_df: pd.DataFrame, 
-    bollards_df: pd.DataFrame, 
-    loa: float = 323.44, 
-    offset_fugro: float = 0.0,
-    *args, 
-    **kwargs
-) -> pd.DataFrame:
-    """Calcola vettori 3D, pendenza, azimuth, e coordinate con offset FUGRO."""
-    if lines_df is None or bollards_df is None:
-        return pd.DataFrame()
+# Backward-compatible name retained during migration.
+calculate_meg4_composite_stiffness = calculate_composite_stiffness
 
+
+def calculate_line_geometry(lines_df: pd.DataFrame, bollards_df: pd.DataFrame, loa: float = 323.44, offset_fugro: float = 0.0, *args, **kwargs) -> pd.DataFrame:
+    """Calculate 3D geometry without silently inventing missing coordinates."""
     if not isinstance(lines_df, pd.DataFrame) or not isinstance(bollards_df, pd.DataFrame):
-        return pd.DataFrame()
-
+        raise ValueError("Lines and bollards must be pandas DataFrames.")
     if lines_df.empty or bollards_df.empty:
         return pd.DataFrame()
 
     l_df = lines_df.copy()
     b_df = bollards_df.copy()
 
-    # Normalizzazione mappatura bitte
     bollard_col_map = {
         "x_m": "bollard_x_m", "y_m": "bollard_y_m", "z_m": "bollard_z_m",
         "X": "bollard_x_m", "Y": "bollard_y_m", "Z": "bollard_z_m",
-        "X_Coordinata_m": "bollard_x_m", "Y_Coordinata_m": "bollard_y_m", "Z_Altezza_m": "bollard_z_m"
+        "X_Coordinata_m": "bollard_x_m", "Y_Coordinata_m": "bollard_y_m", "Z_Altezza_m": "bollard_z_m",
     }
     b_df = b_df.rename(columns={k: v for k, v in bollard_col_map.items() if k in b_df.columns and v not in b_df.columns})
 
-    # Normalizzazione mappatura passacavi
     chock_col_map = {
         "x_m": "chock_x_m", "y_m": "chock_y_m", "z_m": "chock_z_m",
-        "X": "chock_x_m", "Y": "chock_y_m", "Z": "chock_z_m"
+        "X": "chock_x_m", "Y": "chock_y_m", "Z": "chock_z_m",
     }
     l_df = l_df.rename(columns={k: v for k, v in chock_col_map.items() if k in l_df.columns and v not in l_df.columns})
 
     if "bollard_id" not in l_df.columns or "bollard_id" not in b_df.columns:
-        return pd.DataFrame()
+        raise ValueError("Both line and bollard data require bollard_id.")
 
     merged = l_df.merge(b_df, on="bollard_id", how="inner", suffixes=("_line", "_bollard"))
     if merged.empty:
         return pd.DataFrame()
 
-    for col in ["bollard_x_m", "bollard_y_m", "bollard_z_m", "chock_x_m", "chock_y_m", "chock_z_m"]:
+    required = ["bollard_x_m", "bollard_y_m", "bollard_z_m", "chock_x_m", "chock_y_m", "chock_z_m"]
+    for col in required:
         if col not in merged.columns:
-            merged[col] = 0.0
-        else:
-            merged[col] = pd.to_numeric(merged[col], errors="coerce").fillna(0.0)
+            raise ValueError(f"Required engineering coordinate missing: {col}")
+        merged[col] = pd.to_numeric(merged[col], errors="coerce")
+        if merged[col].isna().any():
+            raise ValueError(f"Invalid or missing engineering coordinate: {col}")
 
-    # Applicazione Offset FUGRO ai passacavi nave
-    merged["chock_x_m"] = merged["chock_x_m"] + offset_fugro
-
+    merged["chock_x_m"] += float(offset_fugro)
     dx = merged["bollard_x_m"] - merged["chock_x_m"]
     dy = merged["bollard_y_m"] - merged["chock_y_m"]
     dz = merged["bollard_z_m"] - merged["chock_z_m"]
 
     length_3d = np.sqrt(dx**2 + dy**2 + dz**2)
-    azimuth = np.degrees(np.arctan2(dy, dx))
-    incline = np.degrees(np.arcsin(np.abs(dz) / np.maximum(length_3d, 0.1)))
+    if (length_3d <= 1e-6).any():
+        raise ValueError("Zero-length mooring geometry detected.")
 
-    merged["length_m"] = np.round(length_3d, 2)
-    merged["azimuth_deg"] = np.round(azimuth, 1)
-    merged["incline_deg"] = np.round(incline, 1)
-    merged["dx"] = dx
-    merged["dy"] = dy
-    merged["dz"] = dz
-
+    merged["length_m"] = length_3d
+    merged["azimuth_deg"] = np.degrees(np.arctan2(dy, dx))
+    merged["incline_deg"] = np.degrees(np.arcsin(np.clip(np.abs(dz) / length_3d, 0.0, 1.0)))
+    merged["dx"], merged["dy"], merged["dz"] = dx, dy, dz
     return merged
 
 
 def solve_line_tensions_3d(
-    geom_df: pd.DataFrame, 
-    forces_dict: dict, 
-    pretension_pct: float = 10.0, 
-    max_iter: int = 20, 
-    tol: float = 1e-3
+    geom_df: pd.DataFrame,
+    forces_dict: dict,
+    pretension_pct: float = 10.0,
+    max_iter: int = 50,
+    tol: float = 1e-3,
+    residual_tol: float = 1e-2,
 ) -> pd.DataFrame:
-    """
-    Risolutore Newton-Raphson 3D MEG4. 
-    Applica una tensione iniziale fissa pari al % MBL (default 10%) anche a 0 vento.
-    """
+    """Solve a linearised 3-DOF equilibrium problem with explicit diagnostics."""
+    if not 0 <= pretension_pct <= 100:
+        raise ValueError("Pretension percentage must be between 0 and 100.")
+    if geom_df is None or geom_df.empty:
+        result = pd.DataFrame() if geom_df is None else geom_df.copy()
+        result.attrs["solver_diagnostics"] = SolverDiagnostics(SolverStatus.INVALID_INPUT, 0, float("inf"), "No line geometry supplied.")
+        return result
+
     df = geom_df.copy()
-    num_lines = len(df)
+    required = ["mbl_tons", "azimuth_deg", "incline_deg", "chock_x_m", "chock_y_m", "length_m"]
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError(f"Missing solver fields: {', '.join(missing)}")
 
-    if num_lines == 0:
-        df["Tension_tons"] = []
-        df["Util_Percent"] = []
-        return df
-
-    if "mbl_tons" not in df.columns:
-        df["mbl_tons"] = 100.0
-    else:
-        df["mbl_tons"] = pd.to_numeric(df["mbl_tons"], errors="coerce").fillna(100.0)
+    for col in ["mbl_tons", "azimuth_deg", "incline_deg", "chock_x_m", "chock_y_m", "length_m"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+        if df[col].isna().any():
+            raise ValueError(f"Invalid numeric solver field: {col}")
+    if (df["mbl_tons"] <= 0).any() or (df["length_m"] <= 0).any():
+        raise ValueError("MBL and line length must be greater than zero.")
 
     f_ext = np.array([
-        forces_dict.get("Fx_total_t", 0.0),
-        forces_dict.get("Fy_total_t", 0.0),
-        forces_dict.get("Mz_total_tm", 0.0)
-    ], dtype=float)
+        float(forces_dict.get("Fx_total_t", 0.0)),
+        float(forces_dict.get("Fy_total_t", 0.0)),
+        float(forces_dict.get("Mz_total_tm", 0.0)),
+    ])
 
-    # PRETENSIONAMENTO INIZIALE (10% MBL fisso MEG4)
-    base_pretension = df["mbl_tons"].values * (pretension_pct / 100.0)
+    base_pretension = df["mbl_tons"].to_numpy() * (pretension_pct / 100.0)
     tensions = base_pretension.copy()
+    b_vectors = []
+    for _, row in df.iterrows():
+        az = np.radians(row["azimuth_deg"])
+        inc = np.radians(row["incline_deg"])
+        bx = np.cos(inc) * np.cos(az)
+        by = np.cos(inc) * np.sin(az)
+        bm = row["chock_x_m"] * by - row["chock_y_m"] * bx
+        b_vectors.append(np.array([bx, by, bm]))
 
-    # Se le forze esterne sono tutte nulle (0 vento, 0 corrente), restituisce direttamente la pretensione iniziale
     if np.allclose(f_ext, 0.0):
-        utils = (tensions / df["mbl_tons"].values) * 100.0
-        df["Tension_tons"] = np.round(tensions, 2)
-        df["Util_Percent"] = np.round(utils, 1)
+        df["Tension_tons"] = tensions
+        df["Util_Percent"] = tensions / df["mbl_tons"].to_numpy() * 100.0
+        df.attrs["solver_diagnostics"] = SolverDiagnostics(SolverStatus.CONVERGED, 0, 0.0, "Zero external load.")
         return df
 
-    for iteration in range(max_iter):
+    status = SolverStatus.MAX_ITERATIONS
+    residual_norm = float("inf")
+    iterations = 0
+
+    for iteration in range(1, max_iter + 1):
+        iterations = iteration
         k_global = np.zeros((3, 3))
-        b_vectors = []
-        k_eq_list = []
+        k_list = []
 
         for idx, row in df.iterrows():
-            rad_az = np.radians(row.get("azimuth_deg", 0.0))
-            rad_inc = np.radians(row.get("incline_deg", 0.0))
-            x_c = float(row.get("chock_x_m", 0.0))
-            y_c = float(row.get("chock_y_m", 0.0))
+            tail_len = float(row.get("tail_length_m", 0.0) or 0.0)
+            tail_mbl = row.get("tail_mbl_tons", None)
+            if tail_len > 0 and (tail_mbl is None or pd.isna(tail_mbl) or float(tail_mbl) <= 0):
+                raise ValueError(f"Line {row.get('line_id', idx)} has a tail length but no valid tail MBL.")
 
-            bx = np.cos(rad_inc) * np.cos(rad_az)
-            by = np.cos(rad_inc) * np.sin(rad_az)
-            bm = x_c * by - y_c * bx
-            b_vec = np.array([bx, by, bm])
-            b_vectors.append(b_vec)
-
-            if tensions[idx] <= 0.0:
-                k_eq = 0.0
-            else:
-                mat_main = row.get("material", "HMPE")
-                mat_tail = row.get("tail_material", "NYLON")
-                mbl = float(row.get("mbl_tons", 100.0))
-                l_main = float(row.get("length_m", 30.0))
-                l_tail = float(row.get("tail_length_m", 11.0))
-
-                k_eq = calculate_meg4_composite_stiffness(
-                    mat_main, mbl, l_main, tensions[idx],
-                    mat_tail, mbl, l_tail
-                )
-
-            k_eq_list.append(k_eq)
-            k_global += k_eq * np.outer(b_vec, b_vec)
-
-        k_global += np.eye(3) * 1e-6
+            k_eq = calculate_composite_stiffness(
+                str(row.get("material", "UNKNOWN")),
+                float(row["mbl_tons"]),
+                float(row["length_m"]),
+                float(tensions[idx]),
+                str(row.get("tail_material", "UNKNOWN")),
+                None if tail_mbl is None or pd.isna(tail_mbl) else float(tail_mbl),
+                tail_len,
+            )
+            k_list.append(k_eq)
+            k_global += k_eq * np.outer(b_vectors[idx], b_vectors[idx])
 
         try:
-            displacements = np.linalg.solve(k_global, f_ext)
+            displacement = np.linalg.solve(k_global, f_ext)
         except np.linalg.LinAlgError:
+            status = SolverStatus.SINGULAR_SYSTEM
             break
 
-        new_tensions = np.zeros(num_lines)
-        for i in range(num_lines):
-            delta_l = np.dot(b_vectors[i], displacements)
-            # Somma del Delta carico al pretensionamento di base
-            updated_t = base_pretension[i] + (k_eq_list[i] * delta_l)
-            new_tensions[i] = max(0.0, updated_t)
+        updated = np.maximum(
+            0.0,
+            np.array([
+                base_pretension[i] + k_list[i] * float(np.dot(b_vectors[i], displacement))
+                for i in range(len(df))
+            ]),
+        )
 
-        if np.max(np.abs(new_tensions - tensions)) < tol:
-            tensions = new_tensions
+        resisting = np.sum(
+            [updated[i] * b_vectors[i] for i in range(len(updated))],
+            axis=0,
+        )
+        residual_norm = float(np.linalg.norm(resisting - f_ext))
+
+        if np.max(np.abs(updated - tensions)) < tol and residual_norm <= residual_tol:
+            tensions = updated
+            status = SolverStatus.CONVERGED
             break
+        tensions = updated
 
-        tensions = new_tensions
+    df["Tension_tons"] = tensions
+    df["Util_Percent"] = tensions / df["mbl_tons"].to_numpy() * 100.0
+    df.attrs["solver_diagnostics"] = SolverDiagnostics(
+        status=status,
+        iterations=iterations,
+        residual_norm=residual_norm,
+        message="Equilibrium converged." if status == SolverStatus.CONVERGED else "Solver did not produce a verified equilibrium.",
+    )
+    df["Solver_Status"] = status.value
+    df["Residual_Norm"] = residual_norm
 
-    utils = [(t / mbl) * 100.0 if mbl > 0 else 0.0 for t, mbl in zip(tensions, df["mbl_tons"])]
-
-    df["Tension_tons"] = np.round(tensions, 2)
-    df["Util_Percent"] = np.round(utils, 1)
+    if status != SolverStatus.CONVERGED:
+        df["Tension_tons"] = np.nan
+        df["Util_Percent"] = np.nan
 
     return df
-
-
-def calculate_wind_operability_envelope(
-    geom_df: pd.DataFrame,
-    afw: float, alw: float, alc: float, loa: float,
-    v_curr: float = 0.0, dir_curr: float = 0.0
-) -> tuple:
-    """Calcola l'inviluppo di operabilità a 360° (limite 55% MBL)."""
-    from core.hydrodynamic_forces import calculate_environmental_forces
-
-    angles = list(range(0, 360, 10))
-    max_winds = []
-
-    for angle in angles:
-        speed = 10.0
-        safe = True
-        while safe and speed <= 90.0:
-            forces = calculate_environmental_forces(
-                speed, angle, v_curr, dir_curr, afw, alw, alc, loa
-            )
-            res_df = solve_line_tensions_3d(geom_df, forces, pretension_pct=10.0)
-
-            if "Util_Percent" in res_df.columns and (res_df["Util_Percent"] > 55.0).any():
-                safe = False
-            else:
-                speed += 2.0
-
-        max_winds.append(speed)
-
-    return angles, max_winds

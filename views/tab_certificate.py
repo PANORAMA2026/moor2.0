@@ -1,11 +1,13 @@
-"""
-views/tab_certificate.py
-Modulo per l'estrazione dati da certificati PDF tramite Gemini API
-e l'associazione immediata delle linee d'ormeggio ai verricelli di bordo.
-"""
+"""Certificate register and engineering review UI.
 
-import streamlit as st
+Extracted PDF values are presented as unverified until the operator reviews and
+accepts them. No generic elastic modulus or MEG4 status is invented by the UI.
+"""
+from __future__ import annotations
+
 import pandas as pd
+import streamlit as st
+
 from utils.pdf_parser import parse_line_certificate, parse_certificate_text
 from database.db_manager import (
     save_certificate_to_db,
@@ -13,186 +15,129 @@ from database.db_manager import (
     save_lines_inventory_to_db,
     load_lines_inventory_from_db,
 )
+from database.certificate_repository import save_reviewed_certificate, load_certificate_records
+
+
+def _positive(value: float) -> bool:
+    return float(value) > 0.0
 
 
 def render_tab_certificate():
-    st.header("📜 Modulo Certificati Cavi & Drag and Drop PDF")
-    st.caption("Caricamento, parsing istantaneo e associazione cavo alla stazione d'ormeggio")
+    st.header("📜 Modulo Certificati Cavi")
+    st.caption("Importazione, revisione e registrazione dei certificati di ormeggio")
 
     col_left, col_right = st.columns([1, 1.2])
 
-    # -------------------------------------------------------------------------
-    # COLONNA DI SINISTRA: UPLOAD PDF & TESTO
-    # -------------------------------------------------------------------------
     with col_left:
         st.subheader("📤 Carica Documento")
-        uploaded_file = st.file_uploader(
-            "Trascina qui il file PDF del certificato",
-            type=["pdf"],
-            key="pdf_uploader",
-        )
+        uploaded_file = st.file_uploader("Trascina qui il file PDF del certificato", type=["pdf"], key="pdf_uploader")
+        pasted_text = st.text_area("Oppure incolla il testo del certificato", height=160, key="pasted_text_area")
 
-        pasted_text = st.text_area(
-            "Oppure incolla qui il testo del certificato",
-            height=160,
-            key="pasted_text_area",
-        )
+        if st.button("🔍 Esegui Parsing Certificato", type="primary", use_container_width=True):
+            parsed = parse_line_certificate(uploaded_file) if uploaded_file is not None else parse_certificate_text(pasted_text)
+            if parsed:
+                st.session_state["parsed_cert_data"] = parsed
+                st.success("Estrazione completata. I dati richiedono revisione prima del salvataggio.")
+            else:
+                st.error("Impossibile estrarre dati dal certificato.")
 
-        btn_parse = st.button(
-            "🔍 Esegui Parsing Certificato",
-            type="primary",
-            use_container_width=True,
-        )
+        cdata = st.session_state.get("parsed_cert_data", {})
+        if cdata:
+            for warning in cdata.get("_warnings", []): st.warning(warning)
+            for error in cdata.get("_validation_errors", []): st.error(error)
+            st.info("🔎 REVIEW REQUIRED — l'estrazione automatica non costituisce validazione del certificato.")
 
-        if btn_parse:
-            with st.spinner("Parsing rapido in corso..."):
-                parsed = None
-                if uploaded_file is not None:
-                    parsed = parse_line_certificate(uploaded_file)
-                elif pasted_text.strip():
-                    parsed = parse_certificate_text(pasted_text)
-                else:
-                    st.warning("Seleziona un file PDF o incolla del testo.")
-
-                if parsed:
-                    st.session_state["parsed_cert_data"] = parsed
-                    st.success("✅ Parsing completato con successo!")
-                else:
-                    st.error("❌ Impossibile estrarre i dati dal certificato.")
-
-    # -------------------------------------------------------------------------
-    # COLONNA DI DESTRA: FORM RIEPILOGO, ASSEGNAZIONE WINCH E SALVATAGGIO
-    # -------------------------------------------------------------------------
     with col_right:
-        st.subheader("📝 Dettagli Certificato & Configurazione Cavo")
-
-        # Recupera i dati estratti dal parsing o imposta un dizionario vuoto
+        st.subheader("📝 Dettagli Certificato")
         cdata = st.session_state.get("parsed_cert_data", {})
 
         with st.form("form_save_certificate_and_line"):
             c1, c2 = st.columns(2)
             with c1:
-                cert_id = st.text_input(
-                    "ID Certificato / Serial No.",
-                    value=str(cdata.get("cert_id", "")),
-                )
-                manufacturer = st.text_input(
-                    "Produttore Cavo",
-                    value=str(cdata.get("manufacturer", "")),
-                )
-                material = st.text_input(
-                    "Materiale Principale",
-                    value=str(cdata.get("main_material", "")),
-                )
-                diameter_mm = st.number_input(
-                    "Diametro Cavo (mm)",
-                    value=float(cdata.get("main_diameter_mm", 0.0)),
-                    step=1.0,
-                )
+                cert_id = st.text_input("ID Certificato / Serial No.", value=str(cdata.get("cert_id", "")))
+                manufacturer = st.text_input("Produttore Cavo", value=str(cdata.get("manufacturer", "")))
+                material = st.text_input("Materiale / Grade", value=str(cdata.get("main_material", "")))
+                diameter_mm = st.number_input("Diametro Cavo (mm)", min_value=0.0, value=float(cdata.get("main_diameter_mm", 0.0)), step=1.0)
 
             with c2:
-                mbl_tons = st.number_input(
-                    "MBL Cavo (Tonnellate)",
-                    value=float(cdata.get("main_mbl_tons", 0.0)),
-                    step=0.1,
-                )
-                length_m = st.number_input(
-                    "Lunghezza Cavo (m)",
-                    value=float(cdata.get("main_length_m", 0.0)),
-                    step=5.0,
-                )
-                # Calcolo stima automatica Modulo Elastico E
-                default_e = 15.0 if "POLY" in str(material).upper() else 120.0 if "HMPE" in str(material).upper() else 20.0
-                e_modulus = st.number_input(
-                    "Modulo Elastico E (GPa)",
-                    value=default_e,
-                    help="Tipico: HMPE ~120 GPa, Poliestere/Polipropilene ~10-20 GPa",
-                )
-                standard = st.text_input(
-                    "Standard di Collaudo",
-                    value=str(cdata.get("standard", "MEG4")),
-                )
+                ldbf_tons = st.number_input("LDBF (ton-force)", min_value=0.0, value=float(cdata.get("ldbf_tons", 0.0)), step=0.1)
+                ship_mbl_tons = st.number_input("Ship Design MBL (ton-force)", min_value=0.0, value=float(cdata.get("ship_design_mbl_tons", 0.0)), step=0.1)
+                length_m = st.number_input("Lunghezza Cavo (m)", min_value=0.0, value=float(cdata.get("main_length_m", 0.0)), step=1.0)
+                standard = st.text_input("Standard / Basis", value=str(cdata.get("standard", "")))
 
             st.divider()
-            st.markdown("**⚙️ Associazione Verricello & Posizione sulla Nave**")
-
-            # Recupero inventario cavi dal session state
-            lines_df = st.session_state.get("lines_inventory", pd.DataFrame())
-            
-            line_options = ["Nessuna (Salva solo Certificato nel DB)"]
-            if not lines_df.empty and "line_name" in lines_df.columns:
-                line_options += lines_df["line_name"].tolist()
-
-            selected_line_name = st.selectbox(
-                "Assegna questo certificato/cavo al Verricello (Winch):",
-                options=line_options,
-            )
-
-            winch_location = st.radio(
-                "Configurazione Tamburo Verricello:",
-                ["Working Drum (In Tensione)", "Storage Basket (Riserva)"],
-                horizontal=True,
-            )
+            st.markdown("**📈 Average Immediate Strain**")
+            strain = cdata.get("average_immediate_strain_pct", {})
+            s_cols = st.columns(5)
+            strain_values = {pct: col.number_input(f"{pct}% LDBF", min_value=0.0, value=float(strain.get(str(pct), 0.0)), step=0.01, format="%.4f") for col, pct in zip(s_cols, (10,20,30,40,50))}
 
             st.divider()
-            st.markdown("**🪢 Dettagli Tail (Coda di Choc)**")
+            st.markdown("**🪢 Mooring Tail — dati separati**")
+            has_tail = st.checkbox("Presenza Tail", value=bool(cdata.get("has_tail", False)))
             t1, t2, t3 = st.columns(3)
-            with t1:
-                has_tail = st.checkbox("Presenza Tail", value=bool(cdata.get("has_tail", False)))
-                tail_mat = st.text_input("Mat. Tail", value=str(cdata.get("tail_material", "Nylon")))
-            with t2:
-                tail_len = st.number_input("Lunghezza (m)", value=float(cdata.get("tail_length_m", 11.0) if has_tail else 0.0))
-                tail_dia = st.number_input("Diametro (mm)", value=float(cdata.get("tail_diameter_mm", 0.0) if has_tail else 0.0))
-            with t3:
-                tail_mbl = st.number_input("MBL Tail (t)", value=float(cdata.get("tail_mbl_tons", 0.0) if has_tail else 0.0))
-                tail_e = st.number_input("E Tail (GPa)", value=6.0 if has_tail else 0.0)
+            tail_mat = t1.text_input("Materiale Tail", value=str(cdata.get("tail_material", "")), disabled=not has_tail)
+            tail_len = t2.number_input("Tail Length (m)", min_value=0.0, value=float(cdata.get("tail_length_m", 0.0)), step=0.5, disabled=not has_tail)
+            tail_mbl = t3.number_input("Tail TDBF (ton-force)", min_value=0.0, value=float(cdata.get("tail_mbl_tons", 0.0)), step=0.1, disabled=not has_tail)
 
-            btn_save = st.form_submit_button("💾 Salva Certificato e Aggiorna Inventario Cavi", type="primary", use_container_width=True)
+            st.divider()
+            lines_df = st.session_state.get("lines_inventory", pd.DataFrame())
+            line_options = ["Nessuna (Salva solo Certificato)"]
+            if not lines_df.empty and "line_name" in lines_df.columns:
+                line_options += lines_df["line_name"].astype(str).tolist()
+            selected_line_name = st.selectbox("Associa alla linea", line_options)
+            winch_location = st.radio("Configurazione", ["Working Drum", "Storage Basket"], horizontal=True)
+            accepted = st.checkbox("Confermo di aver verificato i valori contro il certificato originale.")
+            btn_save = st.form_submit_button("💾 Salva Certificato", type="primary", use_container_width=True)
 
             if btn_save:
-                # 1. Salvataggio Certificato nel DB Registro
-                cert_record = {
-                    "cert_id": cert_id,
-                    "manufacturer": manufacturer,
-                    "material": material,
-                    "diameter_mm": diameter_mm,
-                    "mbl_tons": mbl_tons,
-                    "standard": standard,
-                    "issue_date": pd.Timestamp.now().strftime("%Y-%m-%d"),
-                }
-                save_certificate_to_db(cert_record)
-                st.session_state.certificates_db = load_certificates_from_db()
-
-                # 2. Aggiornamento Inventario Cavi se associato a un Winch
-                if selected_line_name != "Nessuna (Salva solo Certificato nel DB)" and not lines_df.empty:
-                    idx = lines_df[lines_df["line_name"] == selected_line_name].index
-                    if not idx.empty:
-                        i = idx[0]
-                        lines_df.at[i, "cert_id"] = cert_id
-                        lines_df.at[i, "material"] = material
-                        lines_df.at[i, "diameter_mm"] = diameter_mm
-                        lines_df.at[i, "mbl_tons"] = mbl_tons
-                        lines_df.at[i, "length_m"] = length_m
-                        lines_df.at[i, "E_modulus_GPa"] = e_modulus
-                        lines_df.at[i, "winch_location"] = winch_location
-                        lines_df.at[i, "has_tail"] = has_tail
-                        lines_df.at[i, "tail_length_m"] = tail_len
-                        lines_df.at[i, "tail_diameter_mm"] = tail_dia
-                        lines_df.at[i, "tail_mbl_tons"] = tail_mbl
-                        lines_df.at[i, "tail_E_modulus_GPa"] = tail_e
-                        
-                        save_lines_inventory_to_db(lines_df)
-                        st.session_state.lines_inventory = load_lines_inventory_from_db()
-                        st.success(f"✅ Certificato {cert_id} associato con successo a **{selected_line_name}** ({winch_location})!")
+                errors = []
+                if not cert_id.strip(): errors.append("Certificate ID is required.")
+                if not manufacturer.strip(): errors.append("Manufacturer is required.")
+                if not material.strip(): errors.append("Material/grade is required.")
+                if not _positive(diameter_mm): errors.append("Diameter must be greater than zero.")
+                if not _positive(ldbf_tons): errors.append("LDBF must be greater than zero.")
+                if not _positive(length_m): errors.append("Line length must be greater than zero.")
+                if has_tail and (not _positive(tail_len) or not _positive(tail_mbl) or not tail_mat.strip()): errors.append("Tail material, length and TDBF are required when a tail is present.")
+                if not accepted: errors.append("Manual certificate review must be confirmed before saving.")
+                if errors:
+                    for error in errors: st.error(error)
                 else:
-                    st.success(f"✅ Certificato {cert_id} registrato nel Database!")
+                    record = {
+                        "cert_id": cert_id.strip(), "certificate_type": "MOORING_LINE",
+                        "manufacturer": manufacturer.strip(), "material_grade": material.strip(),
+                        "diameter_mm": float(diameter_mm), "length_m": float(length_m),
+                        "ship_design_mbl_t": float(ship_mbl_tons) if ship_mbl_tons > 0 else None,
+                        "ldbf_t": float(ldbf_tons), "tail_tdbf_t": float(tail_mbl) if has_tail else None,
+                        "tail_length_m": float(tail_len) if has_tail else None,
+                        "standard_basis": standard.strip(), "issue_date": "",
+                        "strain": strain_values, "source_text": str(cdata.get("_source_text", "")),
+                        "extraction_method": str(cdata.get("_extraction_method", "manual/review")),
+                        "review_status": "OPERATOR_VERIFIED",
+                    }
+                    save_reviewed_certificate(record)
+                    # Keep legacy tables synchronized during migration.
+                    save_certificate_to_db({
+                        "cert_id": cert_id.strip(), "manufacturer": manufacturer.strip(), "material": material.strip(),
+                        "diameter_mm": diameter_mm, "mbl_tons": ldbf_tons, "length_m": length_m,
+                        "standard": standard.strip(), "issue_date": "", "has_tail": "YES" if has_tail else "NO",
+                        "tail_material": tail_mat.strip() if has_tail else "N/A", "tail_length": tail_len if has_tail else 0.0,
+                        "tail_mbl": tail_mbl if has_tail else 0.0,
+                    })
+                    st.session_state.certificates_db = load_certificates_from_db()
 
-    # -------------------------------------------------------------------------
-    # TABELLA REGISTRO CERTIFICATI SALVATI
-    # -------------------------------------------------------------------------
-    st.divider()
-    st.subheader("📋 Registro Certificati Salvati nel Database")
-    if "certificates_db" in st.session_state and not st.session_state.certificates_db.empty:
-        st.dataframe(st.session_state.certificates_db, use_container_width=True)
-    else:
-        st.caption("Nessun certificato presente nel database.")
+                    if selected_line_name != "Nessuna (Salva solo Certificato)" and not lines_df.empty:
+                        idx = lines_df[lines_df["line_name"].astype(str) == selected_line_name].index
+                        if not idx.empty:
+                            i = idx[0]
+                            lines_df.at[i, "cert_id"] = cert_id.strip(); lines_df.at[i, "material"] = material.strip()
+                            lines_df.at[i, "diameter_mm"] = diameter_mm; lines_df.at[i, "mbl_tons"] = ldbf_tons
+                            lines_df.at[i, "length_m"] = length_m; lines_df.at[i, "winch_location"] = winch_location
+                            lines_df.at[i, "tail_length_m"] = tail_len if has_tail else 0.0
+                            lines_df.at[i, "tail_mbl_tons"] = tail_mbl if has_tail else 0.0
+                            save_lines_inventory_to_db(lines_df); st.session_state.lines_inventory = load_lines_inventory_from_db()
+                    st.success(f"Certificato {cert_id} salvato e marcato OPERATOR_VERIFIED.")
+
+    st.divider(); st.subheader("📋 Registro Certificati")
+    records = load_certificate_records()
+    if records: st.dataframe(pd.DataFrame(records), use_container_width=True)
+    else: st.caption("Nessun certificato revisionato presente nel database.")
