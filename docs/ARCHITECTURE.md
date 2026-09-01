@@ -14,25 +14,22 @@ Engineering Core
 Repositories / Database / External Services
 ```
 
-## Layer Rules
+## Core modules
 
-### Views
-Streamlit presentation and user interaction only.
+```text
+core/
+├── environmental_models.py   # SI physical equations
+├── environmental_adapters.py # legacy compatibility
+├── line_mechanics.py         # geometry and equilibrium
+├── solver_status.py          # explicit solver diagnostics
+└── units.py                  # canonical conversions
+```
 
-### Services
-Orchestrate workflows without embedding engineering mathematics.
+## Environmental design
+Coefficient sources are deliberately separated from physical equations.
+A coefficient provider must carry source provenance before being described as
+validated against an external engineering standard.
 
-### Domain
-Typed representations of ship, line, berth, environment and simulation data.
-
-### Core
-Deterministic engineering calculations. No Streamlit imports.
-
-### Validation
-Input and engineering-range validation.
-
-### Data
-Persistence and external integrations.
-
-## Refactoring Strategy
-The existing application will be migrated incrementally. Existing modules remain operational until replacement modules are validated.
+## Migration strategy
+Legacy modules remain operational until adapters and regression tests verify
+equivalent or intentionally corrected behaviour.
