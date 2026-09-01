@@ -29,6 +29,7 @@ from core.line_mechanics import (
     calculate_line_geometry,
     solve_line_tensions_3d,
 )
+from core.schedule_runtime import reconcile_schedule
 
 from database.db_manager import (
     init_db,
@@ -303,7 +304,7 @@ def load_and_parse_itinerary(uploaded_file):
     df_clean["ETA_dt"] = pd.to_datetime(df_clean["Date_Str"] + " " + df_clean["ETA"].astype(str), errors="coerce")
     df_clean["ETD_dt"] = pd.to_datetime(df_clean["Date_Str"] + " " + df_clean["ETD"].astype(str), errors="coerce")
     df_clean.loc[df_clean["ETD_dt"] < df_clean["ETA_dt"], "ETD_dt"] += pd.Timedelta(days=1)
-    
+
     parsed_df = pd.DataFrame({
         "Port": df_clean["Location"],
         "Port_Code": df_clean["Port Code"],
@@ -330,14 +331,12 @@ if schedule_file is not None:
     try:
         parsed_df = load_and_parse_itinerary(schedule_file)
         st.session_state["port_schedule"] = parsed_df
-        # Salvataggio fisico su disco per persistenza tra riavvii
         os.makedirs(os.path.dirname(CALENDAR_STORAGE_PATH), exist_ok=True)
         parsed_df.to_parquet(CALENDAR_STORAGE_PATH)
         st.sidebar.success("✅ Calendario caricato e salvato in memoria permanente!")
     except Exception as e:
         st.sidebar.error(f"Errore lettura Excel: {e}")
 
-# Stato e pulizia del calendario in memoria
 if "port_schedule" in st.session_state and not st.session_state["port_schedule"].empty:
     st.sidebar.caption(f"💾 **Scali salvati in memoria:** {len(st.session_state['port_schedule'])}")
     if st.sidebar.button("🗑️ Rimuovi Calendario Salvato"):
@@ -346,21 +345,37 @@ if "port_schedule" in st.session_state and not st.session_state["port_schedule"]
         st.session_state["port_schedule"] = pd.DataFrame()
         st.rerun()
 
-# Rilevamento automatico stato porto corrente
+# -----------------------------------------------------------------------------
+# CALENDAR -> MOORING RUNTIME
+# Il calendario diventa la sorgente primaria del porto corrente.
+# L'intervento manuale resta disponibile solo come eccezione.
+# -----------------------------------------------------------------------------
+port_runtime = {"status": "IN_TRANSIT", "port": None, "operator": False}
 if "port_schedule" in st.session_state and not st.session_state["port_schedule"].empty:
-    now_dt = datetime.now()
+    try:
+        port_runtime = reconcile_schedule(st.session_state["port_schedule"])
+        st.session_state["mooring_runtime"] = port_runtime
+    except Exception as exc:
+        st.session_state["mooring_runtime_error"] = str(exc)
+        st.sidebar.warning(f"⚠️ Mooring runtime non disponibile: {exc}")
+
+# Rilevamento automatico e visualizzazione del porto corrente
+runtime_port = port_runtime.get("port")
+if runtime_port:
     sched = st.session_state["port_schedule"]
-    active_port_df = sched[(sched["ETA"] <= now_dt) & (sched["ETD"] >= now_dt)]
-    
-    if not active_port_df.empty:
-        curr_row = active_port_df.iloc[0]
-        st.sidebar.info(
-            f"📍 **Porto Attuale:** {curr_row['Port']}\n\n"
-            f"⏱️ **ETA:** {curr_row['ETA'].strftime('%d/%m %H:%M')}\n\n"
-            f"⏱️ **ETD:** {curr_row['ETD'].strftime('%d/%m %H:%M')}"
-        )
-    else:
-        st.sidebar.caption("⚓ Nave in navigazione o nessun ormeggio attivo.")
+    try:
+        active_rows = sched[sched["Port"].astype(str) == str(runtime_port)]
+        curr_row = active_rows.iloc[-1] if not active_rows.empty else None
+        if curr_row is not None:
+            st.sidebar.info(
+                f"📍 **Porto Attuale:** {curr_row['Port']}\n\n"
+                f"⏱️ **ETA:** {pd.to_datetime(curr_row['ETA']).strftime('%d/%m %H:%M')}\n\n"
+                f"⏱️ **ETD:** {pd.to_datetime(curr_row['ETD']).strftime('%d/%m %H:%M')}"
+            )
+    except Exception:
+        st.sidebar.info(f"📍 **Porto Attuale:** {runtime_port}")
+else:
+    st.sidebar.caption("⚓ Nave in navigazione o nessun ormeggio attivo.")
 
 st.sidebar.divider()
 
@@ -371,9 +386,28 @@ meteo_mode = st.sidebar.radio(
     index=0,
 )
 
-selected_port = st.sidebar.selectbox(
-    "📌 Porto di Riferimento", list(st.session_state.ports_bollards.keys())
-)
+port_options = list(st.session_state.ports_bollards.keys())
+manual_default = st.session_state.get("selected_port_widget", port_options[0])
+if manual_default not in port_options:
+    manual_default = port_options[0]
+
+# In funzionamento normale il porto è comandato dal calendario.
+# Se il runtime segnala un'eccezione, l'operatore può selezionare manualmente.
+auto_port_active = bool(runtime_port) and not bool(port_runtime.get("operator", False))
+if auto_port_active:
+    selected_port = str(runtime_port)
+    st.session_state["selected_port"] = selected_port
+    st.sidebar.success(f"🔄 Porto selezionato automaticamente: **{selected_port}**")
+else:
+    selected_port = st.sidebar.selectbox(
+        "📌 Porto di Riferimento (override manuale)",
+        port_options,
+        index=port_options.index(manual_default),
+        key="selected_port_widget",
+    )
+    st.session_state["selected_port"] = selected_port
+    if runtime_port and port_runtime.get("operator", False):
+        st.sidebar.warning("⚠️ Modifica calendario/setup: selezione manuale disponibile.")
 
 current_berth_heading = st.session_state.port_headings.get(selected_port, 0.0)
 
@@ -479,13 +513,13 @@ st.title("⚓ OpenMooring MEG4 Pro — Carnival Panorama")
 ])
 
 # -----------------------------------------------------------------------------
-# TAB AUTOMAZIONE ORMEGGIO (30 MINUTI & TRIGGER VENTO +-6 KTS)
+# TAB AUTOMAZIONE ORMEGGIO
 # -----------------------------------------------------------------------------
 with tab_auto_engine:
     render_tab_mooring_engine()
 
 # -----------------------------------------------------------------------------
-# TAB 1: CERTIFICATI CAVI (PERSISTENTE)
+# TAB 1: CERTIFICATI CAVI
 # -----------------------------------------------------------------------------
 with tab_certs:
     render_tab_certificate()
@@ -497,7 +531,7 @@ with tab_stations:
     render_tab_plans()
 
 # -----------------------------------------------------------------------------
-# TAB 3: LAYOUT BANCHINA & BITTE (TELEMETRO)
+# TAB 3: LAYOUT BANCHINA & BITTE
 # -----------------------------------------------------------------------------
 with tab_3d_editor:
     render_tab_berth(selected_port, DEFAULT_SHIP)
