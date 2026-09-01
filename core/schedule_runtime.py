@@ -1,10 +1,4 @@
-"""Automatic reconciliation of the port-call calendar with mooring sessions.
-
-The itinerary ETA/ETD values are local port times when the spreadsheet does
-not contain an explicit timezone.  Active-call selection is therefore made
-in the port's local timezone first, then the selected timestamps are stored
-as UTC for the persistent session model.
-"""
+"""Automatic reconciliation of the port-call calendar with mooring sessions."""
 from __future__ import annotations
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
@@ -36,12 +30,6 @@ def _port_timezone(row) -> ZoneInfo | None:
 
 
 def _as_utc(value, row=None) -> datetime | None:
-    """Convert a timestamp to UTC.
-
-    Naive calendar timestamps are interpreted as local time at the port.  For
-    persisted session timestamps without timezone information, UTC remains
-    the safe backwards-compatible fallback.
-    """
     if value is None or pd.isna(value):
         return None
     dt = pd.to_datetime(value).to_pydatetime()
@@ -55,26 +43,16 @@ def _local_naive(value) -> datetime | None:
     if value is None or pd.isna(value):
         return None
     dt = pd.to_datetime(value).to_pydatetime()
-    if dt.tzinfo is not None:
-        return dt.replace(tzinfo=None)
-    return dt
+    return dt.replace(tzinfo=None) if dt.tzinfo is not None else dt
 
 
 def _active_row(schedule: pd.DataFrame, now: datetime):
-    """Return the port call active *now* using each port's local clock.
-
-    This deliberately avoids relying on the timezone of the Streamlit server.
-    If a spreadsheet says 07:00-17:00 at LGB, those are 07:00-17:00 Los
-    Angeles time, regardless of where the app is hosted.
-    """
     if schedule is None or schedule.empty:
         return None
-
     rows = schedule.copy()
     rows["ETA"] = pd.to_datetime(rows["ETA"], errors="coerce")
     rows["ETD"] = pd.to_datetime(rows["ETD"], errors="coerce")
     rows = rows.dropna(subset=["ETA", "ETD"])
-
     now_utc = now.astimezone(timezone.utc) if now.tzinfo else now.replace(tzinfo=timezone.utc)
     candidates = []
 
@@ -84,10 +62,6 @@ def _active_row(schedule: pd.DataFrame, now: datetime):
         etd_local = _local_naive(row["ETD"])
         if eta_local is None or etd_local is None:
             continue
-
-        # If a timezone is known, compare local wall-clock values directly.
-        # This is the key correction for Excel itineraries containing local
-        # port times without timezone metadata.
         if tz is not None:
             local_now = now_utc.astimezone(tz).replace(tzinfo=None)
             if eta_local <= local_now <= etd_local:
@@ -98,8 +72,6 @@ def _active_row(schedule: pd.DataFrame, now: datetime):
                 normalized["ETD"] = etd_utc
                 candidates.append((eta_utc, normalized))
         else:
-            # Unknown port: preserve the previous UTC fallback rather than
-            # inventing a timezone.
             eta_utc = _as_utc(row["ETA"], row)
             etd_utc = _as_utc(row["ETD"], row)
             if eta_utc and etd_utc and eta_utc <= now_utc <= etd_utc:
@@ -108,9 +80,7 @@ def _active_row(schedule: pd.DataFrame, now: datetime):
                 normalized["ETD"] = etd_utc
                 candidates.append((eta_utc, normalized))
 
-    if not candidates:
-        return None
-    return sorted(candidates, key=lambda item: item[0])[-1][1]
+    return sorted(candidates, key=lambda item: item[0])[-1][1] if candidates else None
 
 
 def resolve_setup(port: str) -> tuple[str | None, str]:
@@ -123,6 +93,7 @@ def resolve_setup(port: str) -> tuple[str | None, str]:
 
 
 def reconcile_schedule(schedule: pd.DataFrame, now: datetime | None = None) -> dict:
+    """Reconcile the calendar without confusing 'no setup' with 'at sea'."""
     now = now or _utc_now()
     if now.tzinfo is None:
         now = now.replace(tzinfo=timezone.utc)
@@ -132,21 +103,55 @@ def reconcile_schedule(schedule: pd.DataFrame, now: datetime | None = None) -> d
     row = _active_row(schedule, now)
     existing = load_active_or_scheduled()
 
-    # Close sessions whose scheduled port call has ended.
     for session in existing:
         end = _as_utc(session.scheduled_end_utc)
         if session.status.value == "ACTIVE" and end and now > end:
             session.stop(end.isoformat())
             save_session(session)
 
+    # No calendar call covers the current instant: this is genuinely at sea
+    # (or outside the loaded itinerary window).
     if row is None:
-        return {"status": "IN_TRANSIT", "action": "NO_ACTIVE_PORT_CALL", "session": None, "operator": False}
+        return {
+            "status": "IN_TRANSIT",
+            "action": "NO_ACTIVE_PORT_CALL",
+            "session": None,
+            "operator": False,
+            "port": None,
+            "setup": None,
+            "setup_source": "NO_PORT_CALL",
+        }
 
-    setup_name, setup_source = resolve_setup(str(row["Port"]))
+    port = str(row["Port"]).strip()
+    setup_name, setup_source = resolve_setup(port)
+
+    # A valid port call is already established by the calendar. Missing setup
+    # is a configuration/input problem, never evidence that the vessel is at sea.
+    if not setup_name:
+        return {
+            "status": "PORT_CALL_ACTIVE_SETUP_MISSING",
+            "action": "MOORING_SETUP_MISSING",
+            "session": None,
+            "operator": True,
+            "port": port,
+            "setup": None,
+            "setup_source": "NO_SETUP",
+            "scheduled_start_utc": _as_utc(row["ETA"], row).isoformat(),
+            "scheduled_end_utc": _as_utc(row["ETD"], row).isoformat(),
+        }
+
     proposed_decision = decide_for_active_call(row, setup_name)
     proposed = proposed_decision.session
     if proposed is None:
-        return {"status": "NO_ACTION", "action": proposed_decision.action, "session": None, "operator": proposed_decision.requires_operator}
+        return {
+            "status": "PORT_CALL_ACTIVE",
+            "action": proposed_decision.action,
+            "session": None,
+            "operator": proposed_decision.requires_operator,
+            "port": port,
+            "setup": setup_name,
+            "setup_source": setup_source,
+        }
 
     current = load_by_session_id(proposed.session_id)
     decision = reconcile(current, proposed)
@@ -172,5 +177,5 @@ def reconcile_schedule(schedule: pd.DataFrame, now: datetime | None = None) -> d
         "operator": decision.requires_operator,
         "setup": setup_name,
         "setup_source": setup_source,
-        "port": str(row["Port"]),
+        "port": port,
     }
