@@ -4,8 +4,9 @@ Definizione delle costanti globali dell'applicazione.
 """
 
 # Percorso database SQLite
-DB_FILE_PATH = "openmooring.db"
-DB_PATH = "openmooring.db"
+# Prefixing with './' ensures os.path.dirname(DB_FILE_PATH) is a valid directory.
+DB_FILE_PATH = "./openmooring.db"
+DB_PATH = "./openmooring.db"
 
 # Offset delle piattaforme di osservazione rispetto a prua e poppa (in metri)
 OFFSET_PLATFORM_FWD_M = 27.0
@@ -82,10 +83,10 @@ DEFAULT_SHIP = {
     "Air_Draft_Mast": 63.25,
     "Bridge_To_Bow": 39.50,
     "Bridge_Eye_Height": 26.40,
-    "Obs_Platform_Fwd_Height": 12.00,  
-    "Obs_Platform_Aft_Height": 7.5,  
-    "Mooring_Deck_Fwd_Height": 12.00,  
-    "Mooring_Deck_Aft_Height": 7.5,   
+    "Obs_Platform_Fwd_Height": 12.00,
+    "Obs_Platform_Aft_Height": 7.5,
+    "Mooring_Deck_Fwd_Height": 12.00,
+    "Mooring_Deck_Aft_Height": 7.5,
     "AFW": 2100.0,
     "ALW": 9500.0,
     "ALC": 1800.0,
