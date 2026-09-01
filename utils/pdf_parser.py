@@ -1,12 +1,14 @@
-"""
-utils/pdf_parser.py
-Parser minimale a prova di errore di sintassi.
-"""
+"""Compatibility facade for certificate PDF parsing.
 
-import json
-import os
+The engineering parser lives in ``core.certificate_parser``. This module is
+kept for existing Streamlit imports, but it deliberately does not let an LLM
+silently invent certificate values. AI/OCR can be added later as an explicitly
+unverified extraction source.
+"""
+from __future__ import annotations
+
 import re
-import streamlit as st
+from typing import Any
 
 try:
     import fitz
@@ -14,11 +16,7 @@ try:
 except ImportError:
     HAS_PYMUPDF = False
 
-try:
-    import google.generativeai as genai
-    HAS_GEMINI = True
-except ImportError:
-    HAS_GEMINI = False
+from core.certificate_parser import parse_certificate_text as _parse_core_certificate
 
 
 def extract_bytes_from_file(uploaded_file) -> bytes:
@@ -27,170 +25,130 @@ def extract_bytes_from_file(uploaded_file) -> bytes:
     try:
         if hasattr(uploaded_file, "getvalue"):
             return uploaded_file.getvalue()
-        elif hasattr(uploaded_file, "read"):
+        if hasattr(uploaded_file, "read"):
             uploaded_file.seek(0)
             data = uploaded_file.read()
             uploaded_file.seek(0)
             return data
     except Exception:
-        pass
+        return b""
     return b""
 
 
 def extract_text_from_pdf(uploaded_file) -> str:
-    file_bytes = extract_bytes_from_file(uploaded_file)
-    if not file_bytes or not HAS_PYMUPDF:
+    data = extract_bytes_from_file(uploaded_file)
+    if not data or not HAS_PYMUPDF:
+        return ""
+    try:
+        with fitz.open(stream=data, filetype="pdf") as doc:
+            pages = [page.get_text("text") for page in doc]
+        return "\n".join(p for p in pages if p).strip()
+    except Exception:
         return ""
 
-    text = ""
-    try:
-        doc = fitz.open(stream=file_bytes, filetype="pdf")
-        for page in doc:
-            t = page.get_text("text")
-            if t:
-                text += t + "\n"
-        doc.close()
-    except Exception:
-        pass
 
-    return text.strip()
+def _field(extraction, name: str, default: Any = None):
+    value = extraction.get(name)
+    return default if value is None else value
 
 
-def resolve_working_model():
-    try:
-        available_models = genai.list_models()
-        for m in available_models:
-            if "generateContent" in m.supported_generation_methods:
-                return m.name
-    except Exception:
-        pass
-    return "models/gemini-3.6-flash"
+def _kn_or_tons_to_tons(value: float | None, unit: str | None) -> float:
+    if value is None:
+        return 0.0
+    u = (unit or "").lower().strip()
+    if u == "kn":
+        return float(value) / 9.80665
+    return float(value)
 
 
-def safe_extract_json(text_response: str) -> dict:
-    if not text_response:
-        return None
+def _to_legacy_dict(extraction) -> dict:
+    ldbf_field = next((f for f in extraction.fields if f.name == "ldbf"), None)
+    mbl_field = next((f for f in extraction.fields if f.name == "ship_design_mbl"), None)
+    ldbf_tons = _kn_or_tons_to_tons(
+        ldbf_field.value if ldbf_field else None,
+        ldbf_field.unit if ldbf_field else None,
+    )
+    ship_mbl_tons = _kn_or_tons_to_tons(
+        mbl_field.value if mbl_field else None,
+        mbl_field.unit if mbl_field else None,
+    )
 
-    cleaned = text_response.strip()
-    if "```" in cleaned:
-        cleaned = re.sub(r"```(?:json)?\s*", "", cleaned)
-        cleaned = cleaned.replace("```", "").strip()
+    material_match = re.search(r"(?:material|grade)\s*[:=]\s*([^\n,;]+)", extraction.raw_text, re.I)
+    manufacturer_match = re.search(r"manufacturer\s*[:=]\s*([^\n,;]+)", extraction.raw_text, re.I)
+    cert_match = re.search(r"(?:certificate|cert\.?|serial|no\.?)\s*[:#=]\s*([A-Z0-9./_-]+)", extraction.raw_text, re.I)
 
-    json_match = re.search(r"\{.*\}", cleaned, re.DOTALL)
-    if json_match:
-        try:
-            return json.loads(json_match.group(0))
-        except Exception:
-            pass
+    strain = {}
+    for f in extraction.fields:
+        if f.name.startswith("average_immediate_strain_"):
+            pct = f.name.split("_")[4]
+            strain[pct] = f.value
 
-    try:
-        return json.loads(cleaned)
-    except Exception:
-        return None
-
-
-def parse_line_certificate(uploaded_file) -> dict:
-    if uploaded_file is None:
-        return None
-
-    text = extract_text_from_pdf(uploaded_file)
-    if text and len(text) > 40:
-        parsed_data = parse_certificate_text(text)
-        if parsed_data:
-            return parsed_data
-
-    api_key = st.secrets.get("GEMINI_API_KEY") or os.environ.get("GEMINI_API_KEY")
-    if HAS_GEMINI and api_key and HAS_PYMUPDF:
-        try:
-            file_bytes = extract_bytes_from_file(uploaded_file)
-            doc = fitz.open(stream=file_bytes, filetype="pdf")
-            page = doc[0]
-            pix = page.get_pixmap(dpi=90)
-            img_bytes = pix.tobytes("jpeg")
-            doc.close()
-
-            genai.configure(api_key=str(api_key).strip())
-            model_name = resolve_working_model()
-            model = genai.GenerativeModel(model_name)
-
-            prompt = (
-                "Sei un ingegnere navale. Estrai i dati del certificato cavi MEG4 in JSON con i campi: "
-                "cert_id, manufacturer, standard, main_material, main_diameter_mm, main_mbl_tons, main_length_m, "
-                "has_tail, tail_material, tail_diameter_mm, tail_mbl_tons, tail_length_m."
-            )
-
-            response = model.generate_content([
-                prompt,
-                {"mime_type": "image/jpeg", "data": img_bytes}
-            ])
-
-            result_dict = safe_extract_json(response.text)
-            if result_dict:
-                return result_dict
-
-        except Exception as e:
-            st.warning(f"Errore Vision: {e}")
-
-    return dynamic_regex_parse(text)
-
-
-def parse_certificate_text(text: str) -> dict:
-    if not text or not text.strip():
-        return None
-
-    api_key = st.secrets.get("GEMINI_API_KEY") or os.environ.get("GEMINI_API_KEY")
-
-    if HAS_GEMINI and api_key:
-        try:
-            genai.configure(api_key=str(api_key).strip())
-            model_name = resolve_working_model()
-            model = genai.GenerativeModel(model_name)
-
-            prompt = (
-                "Estrai i dati di questo certificato cavi MEG4 in formato JSON (cert_id, manufacturer, main_material, "
-                "main_diameter_mm, main_mbl_tons, main_length_m):\n\n" + text[:2000]
-            )
-
-            response = model.generate_content(prompt)
-            result_dict = safe_extract_json(response.text)
-            if result_dict:
-                return result_dict
-
-        except Exception as e:
-            st.warning(f"Errore Text Parsing: {e}")
-
-    return dynamic_regex_parse(text)
-
-
-def dynamic_regex_parse(text: str) -> dict:
-    data = {
-        "cert_id": "UNKNOWN",
-        "manufacturer": "N/A",
-        "main_material": "N/A",
-        "main_diameter_mm": 0.0,
-        "main_mbl_tons": 0.0,
-        "main_length_m": 0.0,
+    return {
+        "cert_id": cert_match.group(1) if cert_match else "UNKNOWN",
+        "manufacturer": manufacturer_match.group(1).strip() if manufacturer_match else "N/A",
+        "main_material": material_match.group(1).strip() if material_match else "N/A",
+        "main_diameter_mm": float(_field(extraction, "diameter_mm", 0.0)),
+        "main_mbl_tons": ldbf_tons or ship_mbl_tons,
+        "ship_design_mbl_tons": ship_mbl_tons,
+        "ldbf_tons": ldbf_tons,
+        "main_length_m": float(_field(extraction, "length_m", 0.0)),
+        "line_linear_density": _field(extraction, "line_linear_density", None),
+        "average_immediate_strain_pct": strain,
         "has_tail": False,
         "tail_material": "",
         "tail_diameter_mm": 0.0,
         "tail_mbl_tons": 0.0,
         "tail_length_m": 0.0,
-        "standard": "MEG4"
+        "standard": "",
+        "_warnings": list(extraction.warnings),
+        "_validation_errors": [],
+        "_source_text": extraction.raw_text,
+        "_extraction_method": "PyMuPDF + deterministic parser",
+        "_requires_review": True,
     }
 
+
+def parse_line_certificate(uploaded_file) -> dict | None:
+    if uploaded_file is None:
+        return None
+    text = extract_text_from_pdf(uploaded_file)
     if not text:
-        return data
+        return {
+            "cert_id": "UNKNOWN",
+            "_warnings": ["No text extracted. PDF may be scanned; OCR is required."],
+            "_validation_errors": ["No extractable PDF text"],
+            "_requires_review": True,
+            "_extraction_method": "NONE",
+        }
+    return parse_certificate_text(text)
 
-    cert_m = re.search(r"(?:Cert|Certificate|Nr|No)\.?\s*:?\s*([A-Z0-9\/\-]+)", text, re.IGNORECASE)
-    if cert_m:
-        data["cert_id"] = cert_m.group(1)
 
-    dia_m = re.search(r"(\d+(?:\.\d+)?)\s*mm", text, re.IGNORECASE)
-    if dia_m:
-        data["main_diameter_mm"] = float(dia_m.group(1))
+def parse_certificate_text(text: str) -> dict | None:
+    if not text or not text.strip():
+        return None
+    extraction = _parse_core_certificate(text)
+    result = _to_legacy_dict(extraction)
+    result["_validation_errors"] = []
+    if result["ldbf_tons"] <= 0:
+        result["_validation_errors"].append("LDBF not extracted")
+    if result["main_diameter_mm"] <= 0:
+        result["_validation_errors"].append("Diameter not extracted")
+    if result["main_length_m"] <= 0:
+        result["_validation_errors"].append("Length not extracted")
+    return result
 
-    mbl_m = re.search(r"(\d+(?:\.\d+)?)\s*(?:kN|t|tons)", text, re.IGNORECASE)
-    if mbl_m:
-        data["main_mbl_tons"] = float(mbl_m.group(1))
 
-    return data
+def dynamic_regex_parse(text: str) -> dict:
+    return parse_certificate_text(text) or {}
+
+
+def safe_extract_json(text_response: str) -> dict | None:
+    """Legacy helper retained for callers; JSON is never treated as certified data."""
+    import json
+    if not text_response:
+        return None
+    cleaned = re.sub(r"```(?:json)?\s*|```", "", text_response.strip())
+    try:
+        return json.loads(cleaned)
+    except Exception:
+        return None
