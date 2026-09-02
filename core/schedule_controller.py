@@ -44,10 +44,20 @@ def decide_for_active_call(row: Any, setup_name: str | None = None) -> ScheduleD
         schedule_fingerprint=fingerprint)
     return ScheduleDecision("UPSERT_SCHEDULED", "Active calendar call resolved", session)
 
+def _same_scheduled_call(existing: MooringSession, proposed: MooringSession) -> bool:
+    return (
+        _norm(existing.port_name) == _norm(proposed.port_name)
+        and _norm(existing.berth_name) == _norm(proposed.berth_name)
+        and _norm(existing.scheduled_start_utc) == _norm(proposed.scheduled_start_utc)
+        and _norm(existing.scheduled_end_utc) == _norm(proposed.scheduled_end_utc)
+    )
+
 def reconcile(existing: MooringSession | None, proposed: MooringSession) -> ScheduleDecision:
     if existing is None:
         return ScheduleDecision("CREATE", "No existing session", proposed)
     if existing.status is SessionStatus.ACTIVE:
+        if existing.setup_source == "OPERATOR_OVERRIDE" and _same_scheduled_call(existing, proposed):
+            return ScheduleDecision("KEEP_ACTIVE", "Active session uses operator-selected mooring setup", existing)
         if existing.schedule_fingerprint != proposed.schedule_fingerprint:
             return ScheduleDecision("FLAG_SCHEDULE_CHANGE", "Calendar/setup changed while session is active; preserve active record and require operator review", existing, True)
         return ScheduleDecision("KEEP_ACTIVE", "Active session matches calendar", existing)
