@@ -1,9 +1,9 @@
 """OpenMooring MEG4 Pro — Carnival Panorama."""
 from __future__ import annotations
 
-from datetime import datetime
 import os
 import sys
+from datetime import datetime
 
 import pandas as pd
 import streamlit as st
@@ -11,6 +11,13 @@ import streamlit as st
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from config.constants import DB_FILE_PATH, DEFAULT_SHIP, PORT_COORDINATES
+from core.auth import require_login, logout_button
+from core.calendar_manager import (
+    CALENDAR_STORAGE_PATH,
+    calendar_state,
+    clear_calendar_storage,
+    persist_calendar,
+)
 from core.hydrodynamic_forces import calculate_environmental_forces
 from core.line_mechanics import calculate_line_geometry, solve_line_tensions_3d
 from core.schedule_runtime import reconcile_schedule
@@ -31,9 +38,11 @@ from views.tab_polar import render_tab_polar
 from views.tab_mooring_engine import render_tab_mooring_engine
 
 st.set_page_config(page_title="OpenMooring MEG4 Pro — Carnival Panorama", layout="wide")
-CALENDAR_STORAGE_PATH = os.path.join(os.path.dirname(DB_FILE_PATH), "saved_schedule.parquet")
 
+# Security gate: no engineering UI/data is rendered before authentication.
+require_login()
 init_db()
+logout_button()
 
 # -----------------------------------------------------------------------------
 # Persistent engineering inputs
@@ -62,8 +71,8 @@ if "lines_inventory" not in st.session_state:
             {"line_id": "1", "line_name": "Head Line 1", "line_type": "Head", "station_id": "Prua (Forward Station)", "winch_id": "W1", "cert_id": "CERT-HMPE-2025-01", "chock_x_m": 155.0, "chock_y_m": 2.0, "chock_z_m": 12.0, "material": "HMPE", "diameter_mm": 64.0, "E_modulus_GPa": 120.0, "mbl_tons": 105.0, "tail_length_m": 11.0, "tail_diameter_mm": 72.0, "tail_E_modulus_GPa": 6.0, "tail_mbl_tons": 100.0, "bollard_id": "B1"},
             {"line_id": "2", "line_name": "Head Line 2", "line_type": "Head", "station_id": "Prua (Forward Station)", "winch_id": "W2", "cert_id": "CERT-HMPE-2025-01", "chock_x_m": 155.0, "chock_y_m": -2.0, "chock_z_m": 12.0, "material": "HMPE", "diameter_mm": 64.0, "E_modulus_GPa": 120.0, "mbl_tons": 105.0, "tail_length_m": 11.0, "tail_diameter_mm": 72.0, "tail_E_modulus_GPa": 6.0, "tail_mbl_tons": 100.0, "bollard_id": "B1"},
             {"line_id": "3", "line_name": "Fwd Breast 1", "line_type": "Fwd Breast", "station_id": "Prua (Forward Station)", "winch_id": "W3", "cert_id": "CERT-HMPE-2025-02", "chock_x_m": 140.0, "chock_y_m": 18.0, "chock_z_m": 10.0, "material": "HMPE", "diameter_mm": 64.0, "E_modulus_GPa": 120.0, "mbl_tons": 105.0, "tail_length_m": 11.0, "tail_diameter_mm": 72.0, "tail_E_modulus_GPa": 6.0, "tail_mbl_tons": 100.0, "bollard_id": "B2"},
-            {"line_id": "4", "line_name": "Fwd Spring 1", "line_type": "Fwd Spring", "station_id": "Prua (Forward Station)", "winch_id": "W4", "cert_id": "CERT-HMPE-2025-02", "chock_x_m": 110.0, "chock_y_m": 18.0, "chock_z_m": 8.0, "material": "HMPE", "diameter_mm": 64.0, "E_modulus_GPa": 120.0, "mbl_tons": 105.0, "tail_length_m": 0.0, "tail_diameter_mm": 0.0, "tail_E_modulus_GPa": 0.0, "tail_mbl_tons": 0.0, "bollard_id": "B3"},
-            {"line_id": "5", "line_name": "Aft Spring 1", "line_type": "Aft Spring", "station_id": "Poppa (Aft Station)", "winch_id": "W5", "cert_id": "CERT-HMPE-2025-01", "chock_x_m": -110.0, "chock_y_m": 18.0, "chock_z_m": 8.0, "material": "HMPE", "diameter_mm": 64.0, "E_modulus_GPa": 120.0, "mbl_tons": 105.0, "tail_length_m": 0.0, "tail_diameter_mm": 0.0, "tail_E_modulus_GPa": 0.0, "tail_mbl_tons": 0.0, "bollard_id": "B4"},
+            {"line_id": "4", "line_name": "Fwd Spring 1", "line_type": "Fwd Spring", "station_id": "Prua (Forward Station)", "winch_id": "W4", "cert_id": "CERT-HMPE-2025-02", "chock_x_m": 110.0, "chock_y_m": 18.0, "chock_z_m": 8.0, "material": "HMPE", "diameter_mm": 64.0, "mbl_tons": 105.0, "tail_length_m": 0.0, "tail_diameter_mm": 0.0, "tail_E_modulus_GPa": 0.0, "tail_mbl_tons": 0.0, "bollard_id": "B3"},
+            {"line_id": "5", "line_name": "Aft Spring 1", "line_type": "Aft Spring", "station_id": "Poppa (Aft Station)", "winch_id": "W5", "cert_id": "CERT-HMPE-2025-01", "chock_x_m": -110.0, "chock_y_m": 18.0, "chock_z_m": 8.0, "material": "HMPE", "diameter_mm": 64.0, "mbl_tons": 105.0, "tail_length_m": 0.0, "tail_diameter_mm": 0.0, "tail_E_modulus_GPa": 0.0, "tail_mbl_tons": 0.0, "bollard_id": "B4"},
             {"line_id": "6", "line_name": "Aft Breast 1", "line_type": "Aft Breast", "station_id": "Poppa (Aft Station)", "winch_id": "W6", "cert_id": "CERT-HMPE-2025-02", "chock_x_m": -140.0, "chock_y_m": 18.0, "chock_z_m": 10.0, "material": "HMPE", "diameter_mm": 64.0, "E_modulus_GPa": 120.0, "mbl_tons": 105.0, "tail_length_m": 11.0, "tail_diameter_mm": 72.0, "tail_E_modulus_GPa": 6.0, "tail_mbl_tons": 100.0, "bollard_id": "B5"},
             {"line_id": "7", "line_name": "Stern Line 1", "line_type": "Stern", "station_id": "Poppa (Aft Station)", "winch_id": "W7", "cert_id": "CERT-HMPE-2025-02", "chock_x_m": -155.0, "chock_y_m": 0.0, "chock_z_m": 12.0, "material": "HMPE", "diameter_mm": 64.0, "E_modulus_GPa": 120.0, "mbl_tons": 105.0, "tail_length_m": 11.0, "tail_diameter_mm": 72.0, "tail_E_modulus_GPa": 6.0, "tail_mbl_tons": 100.0, "bollard_id": "B5"},
         ])
@@ -72,10 +81,7 @@ if "lines_inventory" not in st.session_state:
     st.session_state["lines_inventory"] = lines
 
 if "ports_bollards" not in st.session_state:
-    st.session_state["ports_bollards"] = {
-        port: load_port_bollards_from_db(port)
-        for port in PORT_COORDINATES
-    }
+    st.session_state["ports_bollards"] = {port: load_port_bollards_from_db(port) for port in PORT_COORDINATES}
 
 if "port_headings" not in st.session_state:
     st.session_state["port_headings"] = {
@@ -89,11 +95,12 @@ if "port_headings" not in st.session_state:
     }
 
 # -----------------------------------------------------------------------------
-# Calendar — single source of truth for automatic port-call state
+# Calendar — persistent monthly source of truth
 # -----------------------------------------------------------------------------
 st.sidebar.title("🚢 Carnival Panorama")
 st.sidebar.caption(f"LOA: {DEFAULT_SHIP['LOA']} m | Beam: {DEFAULT_SHIP['Beam']} m | Draft: {DEFAULT_SHIP['Draft']} m")
 st.sidebar.divider()
+
 
 def load_and_parse_itinerary(uploaded_file):
     df = pd.read_excel(uploaded_file)
@@ -115,31 +122,42 @@ def load_and_parse_itinerary(uploaded_file):
         "Call_Type": df_clean["Call Type"],
     })
 
-if "port_schedule" not in st.session_state:
-    if os.path.exists(CALENDAR_STORAGE_PATH):
-        try:
-            st.session_state["port_schedule"] = pd.read_parquet(CALENDAR_STORAGE_PATH)
-        except Exception:
-            st.session_state["port_schedule"] = pd.DataFrame()
-    else:
-        st.session_state["port_schedule"] = pd.DataFrame()
+calendar_info = calendar_state()
+st.session_state["port_schedule"] = calendar_info["schedule"] if not calendar_info["completed"] else pd.DataFrame()
+
+# One-time browser-session popup when the stored month has ended.
+if calendar_info["completed"] and not st.session_state.get("calendar_expiry_popup_shown", False):
+    @st.dialog("📅 Calendario mensile completato")
+    def show_calendar_expired_dialog():
+        month = calendar_info.get("calendar_month") or "precedente"
+        st.warning(f"Il calendario {month} è stato completato.")
+        st.write("Caricare ora il calendario del mese successivo per riattivare l'automazione dei port call.")
+        st.info("Il calendario precedente rimane conservato nello storage fino alla sostituzione.")
+        if st.button("OK — Caricherò il nuovo calendario", use_container_width=True):
+            st.session_state["calendar_expiry_popup_shown"] = True
+            st.rerun()
+    show_calendar_expired_dialog()
 
 st.sidebar.header("📅 Port Call Schedule")
+if calendar_info["calendar_month"] and not calendar_info["completed"]:
+    st.sidebar.success(f"📅 Calendario attivo: {calendar_info['calendar_month']}")
+
 schedule_file = st.sidebar.file_uploader("Carica Calendario Scali (.xlsx)", type=["xlsx", "xls"], key="schedule_uploader")
 if schedule_file is not None:
     try:
         parsed_df = load_and_parse_itinerary(schedule_file)
+        month = persist_calendar(parsed_df, getattr(schedule_file, "name", None))
         st.session_state["port_schedule"] = parsed_df
-        parsed_df.to_parquet(CALENDAR_STORAGE_PATH)
-        st.sidebar.success("✅ Calendario caricato e salvato.")
+        st.session_state["calendar_expiry_popup_shown"] = True
+        st.sidebar.success(f"✅ Calendario {month} caricato e salvato.")
+        st.rerun()
     except Exception as exc:
         st.sidebar.error(f"Errore lettura Excel: {exc}")
 
 if not st.session_state["port_schedule"].empty:
     st.sidebar.caption(f"💾 Scali salvati: {len(st.session_state['port_schedule'])}")
     if st.sidebar.button("🗑️ Rimuovi Calendario Salvato"):
-        if os.path.exists(CALENDAR_STORAGE_PATH):
-            os.remove(CALENDAR_STORAGE_PATH)
+        clear_calendar_storage()
         st.session_state["port_schedule"] = pd.DataFrame()
         st.rerun()
 
@@ -154,18 +172,12 @@ runtime_setup = port_runtime.get("setup")
 if runtime_status == "IN_TRANSIT":
     st.sidebar.caption("⚓ Nessun port call attivo — nave in navigazione.")
 elif runtime_status == "PORT_CALL_ACTIVE_SETUP_MISSING":
-    st.sidebar.warning(
-        f"📍 Port Call Attivo: {runtime_port}\n\n"
-        "⚠️ Mooring Setup non disponibile/configurato."
-    )
+    st.sidebar.warning(f"📍 Port Call Attivo: {runtime_port}\n\n⚠️ Mooring Setup non disponibile/configurato.")
 elif runtime_port:
-    st.sidebar.info(
-        f"📍 Port Call Attivo: {runtime_port}\n\n"
-        f"⚓ Mooring Setup: {runtime_setup or 'N/A'}"
-    )
+    st.sidebar.info(f"📍 Port Call Attivo: {runtime_port}\n\n⚓ Mooring Setup: {runtime_setup or 'N/A'}")
 
 # -----------------------------------------------------------------------------
-# Common operator/environment inputs used by the legacy simulation tab
+# Common environment inputs used by legacy simulation tab
 # -----------------------------------------------------------------------------
 st.sidebar.divider()
 st.sidebar.header("🌐 Condizioni Meteo-Marine")
@@ -181,7 +193,6 @@ dir_wind = float(st.sidebar.slider("Direzione Vento Relativa (°)", 0, 360, 45, 
 v_curr = float(st.sidebar.slider("Corrente (knots)", 0.0, 4.0, 0.5, key="v_curr_slider"))
 dir_curr = float(st.sidebar.slider("Direzione Corrente (deg)", 0, 360, 0, key="dir_curr_slider"))
 st.session_state.update({"v_wind": v_wind, "dir_wind": dir_wind, "v_curr": v_curr, "dir_curr": dir_curr})
-
 offset_fugro_m = float(st.sidebar.number_input("Offset from FUGRO position (m)", value=float(st.session_state.get("offset_fugro_m", 0.0)), step=0.5))
 st.session_state["offset_fugro_m"] = offset_fugro_m
 
@@ -191,13 +202,8 @@ st.session_state["offset_fugro_m"] = offset_fugro_m
 st.title("⚓ OpenMooring MEG4 Pro — Carnival Panorama")
 
 (
-    tab_auto_engine,
-    tab_certs,
-    tab_stations,
-    tab_3d_editor,
-    tab_sim,
-    tab_polar,
-    tab_maint,
+    tab_auto_engine, tab_certs, tab_stations, tab_3d_editor,
+    tab_sim, tab_polar, tab_maint,
 ) = st.tabs([
     "⚡ Automazione Ormeggio",
     "📜 1. Certificati Cavi",
@@ -210,23 +216,18 @@ st.title("⚓ OpenMooring MEG4 Pro — Carnival Panorama")
 
 with tab_auto_engine:
     render_tab_mooring_engine()
-
 with tab_certs:
     render_tab_certificate()
-
 with tab_stations:
     render_tab_plans()
-
 with tab_3d_editor:
     render_tab_berth(selected_port, DEFAULT_SHIP)
 
 active_bollards_df = st.session_state["ports_bollards"].get(selected_port, pd.DataFrame())
 try:
     geom_df = calculate_line_geometry(
-        st.session_state["lines_inventory"],
-        active_bollards_df,
-        loa=DEFAULT_SHIP["LOA"],
-        offset_fugro=offset_fugro_m,
+        st.session_state["lines_inventory"], active_bollards_df,
+        loa=DEFAULT_SHIP["LOA"], offset_fugro=offset_fugro_m,
     )
 except Exception as exc:
     geom_df = pd.DataFrame()
@@ -255,6 +256,5 @@ with tab_sim:
 
 with tab_polar:
     render_tab_polar(v_wind=v_wind, dir_wind=dir_wind)
-
 with tab_maint:
     render_tab_history()
