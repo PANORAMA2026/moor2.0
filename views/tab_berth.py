@@ -10,7 +10,7 @@ from config.constants import DEFAULT_SHIP
 from core.berth_profiles import get_berth_profile, list_berth_profiles
 
 GLB_MODEL_PATH = Path(__file__).resolve().parent.parent / "asset" / "carnivalpanorama.glb"
-BERTH_BLOCK_DEPTH_M = 6.0
+BERTH_BLOCK_DEPTH_M = 15.0
 BERTH_BLOCK_MARGIN_X_M = 20.0
 BERTH_BLOCK_MARGIN_Y_M = 8.0
 
@@ -25,14 +25,7 @@ def load_ship_glb(path: str):
     return loaded
 
 def ship_mesh_to_plotly(mesh, ship: dict, offset_x: float = 0.0):
-    """Calibrate the GLB to the configured vessel dimensions, then translate only.
-
-    The GLB asset is evidently not expressed in metres: its raw bounding box was
-    approximately 963 x 128.1 x 196.8, while Carnival Panorama is configured as
-    LOA 323.44 m, beam 37.20 m. Therefore raw GLB extents cannot be treated as
-    physical metres. The displayed engineering model is calibrated to the vessel
-    profile, with the bow/stern centre at X=0 and the keel at Z=-draft.
-    """
+    """Calibrate the GLB to configured vessel dimensions, then translate only."""
     vertices = np.asarray(mesh.vertices, dtype=float).copy()
     faces = np.asarray(mesh.faces, dtype=int)
     if vertices.size == 0 or faces.size == 0:
@@ -47,20 +40,14 @@ def ship_mesh_to_plotly(mesh, ship: dict, offset_x: float = 0.0):
     width_axis = int(order[2])
 
     aligned = np.zeros_like(vertices)
-    # +X = bow. Preserve handedness in Y; reverse only the longitudinal axis.
     aligned[:, 0] = -vertices[:, length_axis]
     aligned[:, 1] = vertices[:, width_axis]
     aligned[:, 2] = vertices[:, height_axis]
 
-    # Translate to a centred vessel coordinate system before calibration.
     aligned[:, 0] -= (aligned[:, 0].min() + aligned[:, 0].max()) / 2.0
     aligned[:, 1] -= (aligned[:, 1].min() + aligned[:, 1].max()) / 2.0
     aligned[:, 2] -= aligned[:, 2].min()
 
-    # Physical vessel dimensions from the vessel profile. X is the primary
-    # calibration and Y uses the configured moulded beam. Z uses keel-to-mast
-    # height where available. This is deliberately explicit rather than treating
-    # the GLB's raw coordinate units as metres.
     loa_m = float(ship.get("LOA", DEFAULT_SHIP["LOA"]))
     beam_m = float(ship.get("Beam", DEFAULT_SHIP["Beam"]))
     draft_m = float(ship.get("Draft", DEFAULT_SHIP["Draft"]))
@@ -184,6 +171,7 @@ def _add_fixed_berth(fig: go.Figure, bollards: pd.DataFrame) -> None:
     ))
 
 def _add_berth_block(fig: go.Figure, bollards: pd.DataFrame, profile_name: str) -> None:
+    """Draw a true 3D rectangular berth solid, not a 2D surface."""
     if bollards.empty:
         return
     profile = get_berth_profile(profile_name)
@@ -195,17 +183,24 @@ def _add_berth_block(fig: go.Figure, bollards: pd.DataFrame, profile_name: str) 
     top_z = float(bollards["z_m"].median())
     bottom_z = top_z - BERTH_BLOCK_DEPTH_M
 
+    # 8 vertices: top face = 0..3, bottom face = 4..7.
     xs = [xmin, xmax, xmax, xmin, xmin, xmax, xmax, xmin]
     ys = [ymin, ymin, ymax, ymax, ymin, ymin, ymax, ymax]
     zs = [top_z, top_z, top_z, top_z, bottom_z, bottom_z, bottom_z, bottom_z]
-    i = [0, 0, 0, 1, 1, 2, 4, 4, 4, 5, 5, 6]
-    j = [1, 2, 3, 2, 3, 3, 5, 6, 7, 6, 7, 7]
-    k = [2, 3, 1, 3, 0, 0, 6, 7, 5, 7, 4, 4]
+
+    # Correct closed cuboid: 6 faces x 2 triangles = 12 triangles.
+    i = [0, 0, 4, 4, 0, 0, 1, 1, 2, 2, 3, 3]
+    j = [1, 2, 5, 6, 4, 5, 2, 6, 3, 7, 0, 4]
+    k = [2, 3, 6, 7, 5, 1, 6, 5, 7, 6, 4, 7]
+
     fig.add_trace(go.Mesh3d(
         x=xs, y=ys, z=zs, i=i, j=j, k=k,
-        opacity=0.42, flatshading=True,
-        name=f"{profile_name} — 3D berth block",
-        hovertemplate="Berth 3D block<br>Top reference=%{z:.2f} m<extra></extra>",
+        color="#3A8F5B", opacity=0.58, flatshading=False,
+        lighting=dict(ambient=0.35, diffuse=0.80, specular=0.12, roughness=0.85),
+        lightposition=dict(x=100, y=-100, z=200),
+        name=f"{profile_name} — 3D berth solid",
+        hovertemplate="Berth 3D solid<br>Top reference=%{z:.2f} m<br>Depth=%{customdata:.1f} m<extra></extra>",
+        customdata=[BERTH_BLOCK_DEPTH_M] * 8,
     ))
 
 def _add_berth_reference_lines(fig: go.Figure, bollards: pd.DataFrame) -> None:
@@ -283,7 +278,7 @@ def render_tab_berth(selected_port, ship_dict):
             st.caption(
                 "Modello calibrato sul profilo Carnival Panorama: LOA 323.44 m, Beam 37.20 m, "
                 "Draft 8.5 m. Il GLB originale viene usato come forma, mentre le dimensioni fisiche "
-                "sono quelle configurate della nave."
+                "sono quelle configurate della nave. La banchina è rappresentata come solido 3D verde."
             )
         except Exception as exc:
             st.error(f"⚠️ Impossibile caricare il modello 3D originale: {exc}")
