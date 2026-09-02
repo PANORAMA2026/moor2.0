@@ -7,7 +7,7 @@ import plotly.graph_objects as go
 import streamlit as st
 import trimesh
 from config.constants import DEFAULT_SHIP
-from core.berth_profiles import bollard_points_as_dicts, get_berth_profile, list_berth_profiles
+from core.berth_profiles import get_berth_profile, list_berth_profiles
 from database.db_manager import load_port_bollards_from_db
 
 GLB_MODEL_PATH = Path(__file__).resolve().parent.parent / "asset" / "carnivalpanorama.glb"
@@ -48,7 +48,7 @@ def ship_mesh_to_plotly(mesh, ship_length_m: float, ship_beam_m: float, draft_m:
     return aligned, faces
 
 def _profile_dataframe(selected_port: str) -> tuple[pd.DataFrame, float | None]:
-    """Prefer the authoritative onboard survey profile, never the 5-row default DB layout."""
+    """Return authoritative fixed survey geometry for Ensenada; never use the 5-row DB fallback."""
     normalized = str(selected_port).strip().lower()
     aliases = {
         "ens": "Ensenada Pier #2",
@@ -56,15 +56,37 @@ def _profile_dataframe(selected_port: str) -> tuple[pd.DataFrame, float | None]:
         "ensenada pier #2": "Ensenada Pier #2",
         "ensenada pier 2": "Ensenada Pier #2",
     }
-    profile_name = aliases.get(normalized, selected_port)
+    profile_name = aliases.get(normalized)
+    if profile_name is None:
+        # Be tolerant of itinerary strings such as "Ensenada Pier #2, Mexico".
+        if normalized.startswith("ensenada"):
+            profile_name = "Ensenada Pier #2"
+        else:
+            profile_name = str(selected_port).strip()
+
     if profile_name in list_berth_profiles():
         profile = get_berth_profile(profile_name)
-        rows = bollard_points_as_dicts(profile_name)
-        df = pd.DataFrame(rows)
-        # Defensive validation: the real Ensenada survey must contain exactly 12 points.
+        # Build the DataFrame explicitly from the reconstructed point dictionaries.
+        # This prevents any DB schema/fallback columns from contaminating the real survey.
+        points = profile.get("points", ())
+        rows = []
+        for point in points:
+            rows.append({
+                "bollard_id": str(point.bollard_id),
+                "measurement_station": str(point.measurement_station),
+                "side": str(point.side),
+                "x_m": float(point.x_m),
+                "y_m": float(point.y_m),
+                "z_m": float(point.z_m),
+                "survey_water_level_m": float(point.survey_water_level_m),
+            })
+        df = pd.DataFrame.from_records(rows, columns=[
+            "bollard_id", "measurement_station", "side", "x_m", "y_m", "z_m", "survey_water_level_m"
+        ])
         if profile_name == "Ensenada Pier #2" and len(df) != 12:
             raise ValueError(f"Ensenada Pier #2 survey integrity error: expected 12 bollards, got {len(df)}")
         return df, float(profile["survey_water_level_m"])
+
     df = load_port_bollards_from_db(selected_port)
     if df.empty:
         return pd.DataFrame(), None
@@ -88,15 +110,16 @@ def _add_ship(fig: go.Figure, ship: dict, offset: float) -> None:
     fig.add_trace(go.Scatter3d(x=[bridge_x, bridge_x], y=[-wing_y, wing_y], z=[bridge_eye, bridge_eye], mode="lines+markers", line=dict(width=7), marker=dict(size=4), name="Bridge Wings", hoverinfo="skip"))
 
 def _add_fixed_berth(fig: go.Figure, bollards: pd.DataFrame) -> None:
-    required = {"x_m", "y_m", "z_m", "bollard_id"}
-    if bollards.empty or not required.issubset(bollards.columns):
-        raise ValueError(f"Bollard geometry missing columns: {sorted(required - set(bollards.columns))}")
+    required = {"x_m", "y_m", "z_m", "bollard_id", "measurement_station", "side"}
+    missing = sorted(required - set(bollards.columns))
+    if bollards.empty or missing:
+        raise ValueError(f"Bollard geometry missing columns: {missing}")
     x = pd.to_numeric(bollards["x_m"], errors="coerce")
     y = pd.to_numeric(bollards["y_m"], errors="coerce")
     z = pd.to_numeric(bollards["z_m"], errors="coerce")
     if x.isna().any() or y.isna().any() or z.isna().any():
         raise ValueError("Bollard geometry contains non-numeric coordinates")
-    labels = [f"{r.get('measurement_station', '')} — {r.get('bollard_id', '')} — {r.get('side', '')}" for _, r in bollards.iterrows()]
+    labels = [f"{r['measurement_station']} — {r['bollard_id']} — {r['side']}" for _, r in bollards.iterrows()]
     fig.add_trace(go.Scatter3d(x=x.tolist(), y=y.tolist(), z=z.tolist(), mode="markers+text", text=bollards["bollard_id"].astype(str).tolist(), textposition="top center", customdata=labels, marker=dict(size=9, symbol="diamond"), name="Ensenada Pier #2 — PORT Bollards", hovertemplate="%{customdata}<br>X=%{x:.2f} m<br>Y=%{y:.2f} m<br>Z=%{z:.2f} m<extra></extra>"))
     for station in ("FWD", "AFT"):
         part = bollards[bollards["measurement_station"].astype(str).str.upper() == station].sort_values("x_m")
@@ -127,7 +150,7 @@ def render_tab_berth(selected_port, ship_dict):
         ship_dict.setdefault(key, value)
     offset = float(st.session_state.get("offset_fugro_m", 0.0))
     df, survey_level = _profile_dataframe(selected_port)
-    is_real_profile = str(selected_port).strip().lower() in {"ens", "ensenada", "ensenada pier #2", "ensenada pier 2"}
+    is_real_profile = str(selected_port).strip().lower().startswith("ensenada") or str(selected_port).strip().lower() == "ens"
     if is_real_profile:
         st.success("✅ Ensenada Pier #2 — RILIEVO REALE: 12 BITTE PORT (SINISTRA)")
         st.caption(f"Riferimento rilievo: livello acqua +{survey_level:.2f} m. Bitte fisse; la nave trasla soltanto longitudinalmente.")
