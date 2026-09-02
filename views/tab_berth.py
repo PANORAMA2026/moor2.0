@@ -8,7 +8,6 @@ import streamlit as st
 import trimesh
 from config.constants import DEFAULT_SHIP
 from core.berth_profiles import get_berth_profile, list_berth_profiles
-from database.db_manager import load_port_bollards_from_db
 
 GLB_MODEL_PATH = Path(__file__).resolve().parent.parent / "asset" / "carnivalpanorama.glb"
 
@@ -48,7 +47,7 @@ def ship_mesh_to_plotly(mesh, ship_length_m: float, ship_beam_m: float, draft_m:
     return aligned, faces
 
 def _profile_dataframe(selected_port: str) -> tuple[pd.DataFrame, float | None]:
-    """Return authoritative fixed survey geometry for Ensenada; never use the 5-row DB fallback."""
+    """Return only authoritative fixed survey geometry for the 3D berth view."""
     normalized = str(selected_port).strip().lower()
     aliases = {
         "ens": "Ensenada Pier #2",
@@ -58,7 +57,6 @@ def _profile_dataframe(selected_port: str) -> tuple[pd.DataFrame, float | None]:
     }
     profile_name = aliases.get(normalized)
     if profile_name is None:
-        # Be tolerant of itinerary strings such as "Ensenada Pier #2, Mexico".
         if normalized.startswith("ensenada"):
             profile_name = "Ensenada Pier #2"
         else:
@@ -66,8 +64,6 @@ def _profile_dataframe(selected_port: str) -> tuple[pd.DataFrame, float | None]:
 
     if profile_name in list_berth_profiles():
         profile = get_berth_profile(profile_name)
-        # Build the DataFrame explicitly from the reconstructed point dictionaries.
-        # This prevents any DB schema/fallback columns from contaminating the real survey.
         points = profile.get("points", ())
         rows = []
         for point in points:
@@ -87,11 +83,9 @@ def _profile_dataframe(selected_port: str) -> tuple[pd.DataFrame, float | None]:
             raise ValueError(f"Ensenada Pier #2 survey integrity error: expected 12 bollards, got {len(df)}")
         return df, float(profile["survey_water_level_m"])
 
-    df = load_port_bollards_from_db(selected_port)
-    if df.empty:
-        return pd.DataFrame(), None
-    df = df.rename(columns={"X_Coordinata_m": "x_m", "Y_Coordinata_m": "y_m", "Z_Altezza_m": "z_m"})
-    return df, None
+    # IMPORTANT: do not use the legacy 5-bollard database defaults here.
+    # They are synthetic and are not a surveyed berth geometry.
+    return pd.DataFrame(), None
 
 def _add_ship(fig: go.Figure, ship: dict, offset: float) -> None:
     loa = float(ship.get("LOA", DEFAULT_SHIP["LOA"]))
@@ -150,28 +144,29 @@ def render_tab_berth(selected_port, ship_dict):
         ship_dict.setdefault(key, value)
     offset = float(st.session_state.get("offset_fugro_m", 0.0))
     df, survey_level = _profile_dataframe(selected_port)
-    is_real_profile = str(selected_port).strip().lower().startswith("ensenada") or str(selected_port).strip().lower() == "ens"
+    normalized = str(selected_port).strip().lower()
+    is_real_profile = normalized in {"ens", "ensenada", "ensenada pier #2", "ensenada pier 2"} or normalized.startswith("ensenada")
     if is_real_profile:
         st.success("✅ Ensenada Pier #2 — RILIEVO REALE: 12 BITTE PORT (SINISTRA)")
         st.caption(f"Riferimento rilievo: livello acqua +{survey_level:.2f} m. Bitte fisse; la nave trasla soltanto longitudinalmente.")
     else:
-        st.info("Nessun profilo di rilievo fisso disponibile per questa banchina.")
+        st.info("ℹ️ Nessun profilo di rilievo fisso disponibile per questa banchina. Il layout DB predefinito non viene mostrato come rilievo reale.")
     c1, c2, c3 = st.columns(3)
     c1.metric("Nave", ship_dict.get("Name", "N/A"))
     c2.metric("Offset longitudinale", f"{offset:+.1f} m")
     c3.metric("Bitte nel rilievo", str(len(df)))
     new_offset = st.number_input("Spostamento longitudinale nave — + PRUA / − POPPA (m)", value=offset, step=0.5, format="%.1f", key="berth_longitudinal_offset")
     st.session_state["offset_fugro_m"] = float(new_offset)
-    if not df.empty:
+    if is_real_profile:
         st.subheader("🚢 Carnival Panorama — modello 3D originale + banchina + bitte")
         try:
             fig = _figure_3d(ship_dict, df, float(new_offset))
             st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False, "scrollZoom": True})
         except Exception as exc:
-            st.error(f"⚠️ Impossibile caricare il modello 3D originale: {exc}")
+            st.error(f"⚠️ Errore nella costruzione della scena 3D: {exc}")
             st.info(f"Percorso previsto del GLB: {GLB_MODEL_PATH}")
         with st.expander("📐 Dati completi del rilievo", expanded=False):
-            cols = [c for c in ["bollard_id", "measurement_station", "side", "x_m", "y_m", "z_m", "survey_water_level_m"] if c in df.columns]
+            cols = ["bollard_id", "measurement_station", "side", "x_m", "y_m", "z_m", "survey_water_level_m"]
             st.dataframe(df[cols], use_container_width=True, hide_index=True)
     else:
-        st.warning("Nessuna geometria di banchina disponibile per questo porto.")
+        st.caption("Per questo porto occorre inserire un rilievo reale di banchina prima di visualizzare bitte e collegamenti nel modello 3D.")
