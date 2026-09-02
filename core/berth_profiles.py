@@ -5,6 +5,7 @@ Survey convention:
 - Y positive toward PORT (left when looking toward the bow).
 - Z positive upward.
 - Azimuth is unsigned: 0 deg = bow, 90 deg = abeam, 180 deg = stern.
+- Survey distance/azimuth are measured FROM the vessel mooring platform.
 - The berth is fixed; runtime ship positioning is a longitudinal ship offset only.
 """
 from __future__ import annotations
@@ -33,8 +34,13 @@ class BollardPoint:
 
 ENSENADA_PIER_2_SURVEY_LEVEL_M = 0.20
 SHIP_LOA_M = 323.44
+SHIP_BEAM_M = 37.20
 FWD_PLATFORM_X_M = SHIP_LOA_M / 2.0 - 27.0
 AFT_PLATFORM_X_M = -SHIP_LOA_M / 2.0 + 14.0
+# The range-finder observations are relative to the PORT mooring platforms.
+# Therefore the platform itself is at the PORT ship side, approximately +Beam/2.
+FWD_PLATFORM_Y_M = SHIP_BEAM_M / 2.0
+AFT_PLATFORM_Y_M = SHIP_BEAM_M / 2.0
 FWD_PLATFORM_Z_M = 12.0
 AFT_PLATFORM_Z_M = 7.5
 
@@ -61,17 +67,36 @@ def survey_to_local_xyz(survey: BollardSurvey) -> tuple[float, float, float]:
         raise ValueError("side must be PORT or STBD")
     if not 0.0 <= survey.azimuth_deg <= 180.0:
         raise ValueError("azimuth_deg must be between 0 and 180 degrees")
+
     horizontal = survey.distance_m * cos(radians(survey.slope_deg))
     dx = horizontal * cos(radians(survey.azimuth_deg))
     dy = horizontal * sin(radians(survey.azimuth_deg))
     if survey.side == "STBD":
         dy = -dy
+
     platform_x = FWD_PLATFORM_X_M if survey.measurement_station == "FWD" else AFT_PLATFORM_X_M
+    platform_y = FWD_PLATFORM_Y_M if survey.measurement_station == "FWD" else AFT_PLATFORM_Y_M
     platform_z = FWD_PLATFORM_Z_M if survey.measurement_station == "FWD" else AFT_PLATFORM_Z_M
-    return platform_x + dx, dy, platform_z + survey.distance_m * sin(radians(survey.slope_deg))
+
+    # IMPORTANT: bollard coordinates are reconstructed from the actual
+    # measurement-platform origin, not from the ship centreline.
+    return (
+        platform_x + dx,
+        platform_y + dy,
+        platform_z + survey.distance_m * sin(radians(survey.slope_deg)),
+    )
 
 def reconstruct_berth_points() -> Tuple[BollardPoint, ...]:
-    return tuple(BollardPoint(s.bollard_id, s.measurement_station, s.side, *survey_to_local_xyz(s), ENSENADA_PIER_2_SURVEY_LEVEL_M) for s in ENSENADA_PIER_2_BOLLARDS)
+    return tuple(
+        BollardPoint(
+            s.bollard_id,
+            s.measurement_station,
+            s.side,
+            *survey_to_local_xyz(s),
+            ENSENADA_PIER_2_SURVEY_LEVEL_M,
+        )
+        for s in ENSENADA_PIER_2_BOLLARDS
+    )
 
 ENSENADA_PIER_2_POINTS = reconstruct_berth_points()
 
@@ -80,11 +105,16 @@ BERTH_PROFILES: Dict[str, Dict[str, object]] = {
         "survey_water_level_m": ENSENADA_PIER_2_SURVEY_LEVEL_M,
         "bollards": ENSENADA_PIER_2_BOLLARDS,
         "points": ENSENADA_PIER_2_POINTS,
+        "platforms": {
+            "FWD": {"x_m": FWD_PLATFORM_X_M, "y_m": FWD_PLATFORM_Y_M, "z_m": FWD_PLATFORM_Z_M},
+            "AFT": {"x_m": AFT_PLATFORM_X_M, "y_m": AFT_PLATFORM_Y_M, "z_m": AFT_PLATFORM_Z_M},
+        },
         "coordinate_system": {
             "x": "+ toward bow",
             "y": "+ toward PORT",
             "z": "+ upward",
             "azimuth": "0 bow / 90 abeam / 180 stern",
+            "measurement_origin": "FWD/AFT PORT mooring platform",
             "positioning": "berth fixed; ship longitudinal offset only",
             "survey_level": "+0.20 m water level reference",
         },
