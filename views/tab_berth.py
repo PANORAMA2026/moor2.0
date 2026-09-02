@@ -1,4 +1,4 @@
-"""3D berth layout: original Carnival Panorama GLB + fixed surveyed berth."""
+"""3D berth layout: calibrated Carnival Panorama GLB + fixed surveyed berth."""
 from __future__ import annotations
 from pathlib import Path
 import numpy as np
@@ -12,7 +12,7 @@ from core.berth_profiles import get_berth_profile, list_berth_profiles
 GLB_MODEL_PATH = Path(__file__).resolve().parent.parent / "asset" / "carnivalpanorama.glb"
 BERTH_BLOCK_DEPTH_M = 6.0
 BERTH_BLOCK_MARGIN_X_M = 20.0
-BERTH_BLOCK_MARGIN_Y_M = 12.0
+BERTH_BLOCK_MARGIN_Y_M = 8.0
 
 @st.cache_resource(show_spinner=False)
 def load_ship_glb(path: str):
@@ -24,33 +24,59 @@ def load_ship_glb(path: str):
         return trimesh.util.concatenate(geometries)
     return loaded
 
-def ship_mesh_to_plotly(mesh, draft_m: float, offset_x: float = 0.0):
-    """Use the original GLB dimensions; only re-axis and translate the mesh."""
+def ship_mesh_to_plotly(mesh, ship: dict, offset_x: float = 0.0):
+    """Calibrate the GLB to the configured vessel dimensions, then translate only.
+
+    The GLB asset is evidently not expressed in metres: its raw bounding box was
+    approximately 963 x 128.1 x 196.8, while Carnival Panorama is configured as
+    LOA 323.44 m, beam 37.20 m. Therefore raw GLB extents cannot be treated as
+    physical metres. The displayed engineering model is calibrated to the vessel
+    profile, with the bow/stern centre at X=0 and the keel at Z=-draft.
+    """
     vertices = np.asarray(mesh.vertices, dtype=float).copy()
     faces = np.asarray(mesh.faces, dtype=int)
     if vertices.size == 0 or faces.size == 0:
         raise ValueError("Empty ship mesh")
-    extents = np.ptp(vertices, axis=0)
-    if np.any(extents <= 0):
-        raise ValueError(f"Invalid GLB dimensions: {extents.tolist()}")
+    raw_extents = np.ptp(vertices, axis=0)
+    if np.any(raw_extents <= 0):
+        raise ValueError(f"Invalid GLB dimensions: {raw_extents.tolist()}")
 
-    order = np.argsort(extents)[::-1]
+    order = np.argsort(raw_extents)[::-1]
     length_axis = int(order[0])
-    width_axis = int(order[2])
     height_axis = int(order[1])
+    width_axis = int(order[2])
 
     aligned = np.zeros_like(vertices)
+    # +X = bow. Preserve handedness in Y; reverse only the longitudinal axis.
     aligned[:, 0] = -vertices[:, length_axis]
     aligned[:, 1] = vertices[:, width_axis]
     aligned[:, 2] = vertices[:, height_axis]
 
-    # Translation only: NO scaling of the original GLB.
+    # Translate to a centred vessel coordinate system before calibration.
     aligned[:, 0] -= (aligned[:, 0].min() + aligned[:, 0].max()) / 2.0
-    aligned[:, 0] += float(offset_x)
     aligned[:, 1] -= (aligned[:, 1].min() + aligned[:, 1].max()) / 2.0
     aligned[:, 2] -= aligned[:, 2].min()
-    aligned[:, 2] -= float(draft_m)
-    return aligned, faces
+
+    # Physical vessel dimensions from the vessel profile. X is the primary
+    # calibration and Y uses the configured moulded beam. Z uses keel-to-mast
+    # height where available. This is deliberately explicit rather than treating
+    # the GLB's raw coordinate units as metres.
+    loa_m = float(ship.get("LOA", DEFAULT_SHIP["LOA"]))
+    beam_m = float(ship.get("Beam", DEFAULT_SHIP["Beam"]))
+    draft_m = float(ship.get("Draft", DEFAULT_SHIP["Draft"]))
+    air_draft_m = float(ship.get("Air_Draft_Mast", 0.0))
+    target_height_m = draft_m + air_draft_m if air_draft_m > 0 else None
+
+    aligned[:, 0] *= loa_m / raw_extents[length_axis]
+    aligned[:, 1] *= beam_m / raw_extents[width_axis]
+    if target_height_m is not None:
+        aligned[:, 2] *= target_height_m / raw_extents[height_axis]
+    else:
+        aligned[:, 2] *= loa_m / raw_extents[length_axis]
+
+    aligned[:, 0] += float(offset_x)
+    aligned[:, 2] -= draft_m
+    return aligned, faces, raw_extents
 
 def _profile_dataframe(selected_port: str) -> tuple[pd.DataFrame, float | None]:
     normalized = str(selected_port).strip().lower()
@@ -86,18 +112,17 @@ def _profile_dataframe(selected_port: str) -> tuple[pd.DataFrame, float | None]:
     return df, float(profile["survey_water_level_m"])
 
 def _add_ship(fig: go.Figure, ship: dict, offset: float) -> tuple[float, float, float]:
-    draft = float(ship.get("Draft", DEFAULT_SHIP["Draft"]))
     if not GLB_MODEL_PATH.exists():
         raise FileNotFoundError(f"Original 3D model not found: {GLB_MODEL_PATH}")
     mesh = load_ship_glb(str(GLB_MODEL_PATH))
-    vertices, faces = ship_mesh_to_plotly(mesh, draft, offset)
+    vertices, faces, raw_extents = ship_mesh_to_plotly(mesh, ship, offset)
     fig.add_trace(go.Mesh3d(
         x=vertices[:, 0], y=vertices[:, 1], z=vertices[:, 2],
         i=faces[:, 0], j=faces[:, 1], k=faces[:, 2],
         color="gainsboro", flatshading=False, opacity=0.96,
         name=ship.get("Name", "Carnival Panorama"), hoverinfo="skip"
     ))
-    # Reference bridge wings, positioned with the ship (therefore also moving with offset).
+
     loa_cfg = float(ship.get("LOA", DEFAULT_SHIP["LOA"]))
     bridge_bow = float(ship.get("Bridge_To_Bow", DEFAULT_SHIP.get("Bridge_To_Bow", 39.5)))
     bridge_eye = float(ship.get("Bridge_Eye_Height", DEFAULT_SHIP.get("Bridge_Eye_Height", 26.4)))
@@ -117,7 +142,6 @@ def _add_ship(fig: go.Figure, ship: dict, offset: float) -> tuple[float, float, 
     return model_dims
 
 def _add_platform_origins(fig: go.Figure, profile_name: str, ship_offset: float) -> None:
-    """Show the two actual ship-side survey origins; these move with the ship."""
     profile = get_berth_profile(profile_name)
     for station in ("FWD", "AFT"):
         p = profile.get("platforms", {}).get(station)
@@ -127,13 +151,14 @@ def _add_platform_origins(fig: go.Figure, profile_name: str, ship_offset: float)
         y = float(p["y_m"])
         z = float(p["z_m"])
         deck = "Deck 3" if station == "FWD" else "Deck 1"
+        aft_bow_note = "27 m aft of extreme bow" if station == "FWD" else "14 m forward of extreme stern"
         fig.add_trace(go.Scatter3d(
             x=[x], y=[y], z=[z],
             mode="markers+text", text=[f"{station} MOORING PLATFORM — {deck}"],
             textposition="top center", marker=dict(size=8, symbol="cross"),
             name=f"{station} mooring platform", showlegend=False,
             hovertemplate=(
-                f"{station} mooring platform — {deck}<br>"
+                f"{station} mooring platform — {deck}<br>{aft_bow_note}<br>"
                 "X=%{x:.2f} m<br>Y=%{y:.2f} m<br>Z=%{z:.2f} m<extra></extra>"
             )
         ))
@@ -158,22 +183,18 @@ def _add_fixed_berth(fig: go.Figure, bollards: pd.DataFrame) -> None:
         hovertemplate="%{customdata}<br>X=%{x:.2f} m<br>Y=%{y:.2f} m<br>Z=%{z:.2f} m<extra></extra>"
     ))
 
-def _add_berth_block(fig: go.Figure, bollards: pd.DataFrame) -> None:
-    """Draw a 3D solid berth block using the surveyed bollard elevation as top reference.
-
-    The block thickness/outer margins are visualization parameters only. The bollard
-    coordinates themselves remain the authoritative surveyed geometry.
-    """
+def _add_berth_block(fig: go.Figure, bollards: pd.DataFrame, profile_name: str) -> None:
     if bollards.empty:
         return
+    profile = get_berth_profile(profile_name)
+    platform_y = float(profile["platforms"]["FWD"]["y_m"])
     xmin = float(bollards["x_m"].min()) - BERTH_BLOCK_MARGIN_X_M
     xmax = float(bollards["x_m"].max()) + BERTH_BLOCK_MARGIN_X_M
-    ymin = 0.0
+    ymin = platform_y - 4.0
     ymax = float(bollards["y_m"].max()) + BERTH_BLOCK_MARGIN_Y_M
     top_z = float(bollards["z_m"].median())
     bottom_z = top_z - BERTH_BLOCK_DEPTH_M
 
-    # Rectangular prism: 8 vertices and 12 triangular faces.
     xs = [xmin, xmax, xmax, xmin, xmin, xmax, xmax, xmin]
     ys = [ymin, ymin, ymax, ymax, ymin, ymin, ymax, ymax]
     zs = [top_z, top_z, top_z, top_z, bottom_z, bottom_z, bottom_z, bottom_z]
@@ -182,8 +203,8 @@ def _add_berth_block(fig: go.Figure, bollards: pd.DataFrame) -> None:
     k = [2, 3, 1, 3, 0, 0, 6, 7, 5, 7, 4, 4]
     fig.add_trace(go.Mesh3d(
         x=xs, y=ys, z=zs, i=i, j=j, k=k,
-        opacity=0.38, flatshading=True,
-        name="Ensenada Pier #2 — 3D berth block",
+        opacity=0.42, flatshading=True,
+        name=f"{profile_name} — 3D berth block",
         hovertemplate="Berth 3D block<br>Top reference=%{z:.2f} m<extra></extra>",
     ))
 
@@ -201,7 +222,7 @@ def _figure_3d(ship: dict, bollards: pd.DataFrame, offset: float) -> tuple[go.Fi
     fig = go.Figure()
     model_dims = _add_ship(fig, ship, offset)
     _add_platform_origins(fig, "Ensenada Pier #2", offset)
-    _add_berth_block(fig, bollards)
+    _add_berth_block(fig, bollards, "Ensenada Pier #2")
     _add_fixed_berth(fig, bollards)
     _add_berth_reference_lines(fig, bollards)
     fig.update_layout(
@@ -232,9 +253,9 @@ def render_tab_berth(selected_port, ship_dict):
         st.success("✅ Ensenada Pier #2 — RILIEVO REALE: 12 BITTE PORT (SINISTRA)")
         st.caption(
             f"Riferimento rilievo: livello acqua +{survey_level:.2f} m. "
-            "FWD: rilievo dalla mooring platform su Deck 3, 27 m a poppavia della prua. "
-            "AFT: rilievo dalla mooring platform su Deck 1, 14 m a pruavia della poppa. "
-            "Le bitte sono fisse; la nave trasla soltanto longitudinalmente."
+            "FWD: origine rilievo su Deck 3, 27 m a poppavia dell'estrema prua. "
+            "AFT: origine rilievo su Deck 1, 14 m a pruavia dell'estrema poppa. "
+            "Le bitte sono fisse; la nave e le mooring platforms traslano soltanto longitudinalmente."
         )
     else:
         st.info("ℹ️ Nessun profilo di rilievo fisso disponibile per questa banchina.")
@@ -251,15 +272,19 @@ def render_tab_berth(selected_port, ship_dict):
     st.session_state["offset_fugro_m"] = float(new_offset)
 
     if is_real_profile:
-        st.subheader("🚢 Carnival Panorama — GLB originale + mooring platforms + banchina 3D + 12 bitte")
+        st.subheader("🚢 Carnival Panorama — modello calibrato + mooring platforms + banchina 3D + 12 bitte")
         try:
             fig, model_dims = _figure_3d(ship_dict, df, float(new_offset))
             st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False, "scrollZoom": True})
             d1, d2, d3 = st.columns(3)
-            d1.metric("GLB LOA", f"{model_dims[0]:.1f} m")
-            d2.metric("GLB Beam", f"{model_dims[1]:.1f} m")
-            d3.metric("GLB Height", f"{model_dims[2]:.1f} m")
-            st.caption("Il GLB non viene scalato. Il pescaggio della nave è impostato a 8.5 m e il modello viene posizionato con il fondo a Z = −8.5 m rispetto al riferimento acqua.")
+            d1.metric("Modello LOA", f"{model_dims[0]:.1f} m")
+            d2.metric("Modello Beam", f"{model_dims[1]:.1f} m")
+            d3.metric("Keel → Mast", f"{model_dims[2]:.1f} m")
+            st.caption(
+                "Modello calibrato sul profilo Carnival Panorama: LOA 323.44 m, Beam 37.20 m, "
+                "Draft 8.5 m. Il GLB originale viene usato come forma, mentre le dimensioni fisiche "
+                "sono quelle configurate della nave."
+            )
         except Exception as exc:
             st.error(f"⚠️ Impossibile caricare il modello 3D originale: {exc}")
             st.info(f"Percorso previsto del GLB: {GLB_MODEL_PATH}")
