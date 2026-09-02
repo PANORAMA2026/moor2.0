@@ -1,8 +1,11 @@
 """Fixed berth geometry profiles reconstructed from onboard survey measurements.
 
-The survey is stored as distance/slope/azimuth from a FWD or AFT mooring
-station.  The berth is fixed.  Runtime ship positioning is handled separately
-by a longitudinal ship offset.
+Survey convention for the current berth data:
+- X positive toward BOW.
+- Y positive toward PORT (left when looking toward the bow).
+- Z positive upward.
+- Azimuth is unsigned: 0 deg = bow, 90 deg = abeam, 180 deg = stern.
+- The berth is fixed; runtime ship positioning is a longitudinal ship offset only.
 """
 
 from __future__ import annotations
@@ -33,18 +36,14 @@ class BollardPoint:
     survey_water_level_m: float
 
 
-# Ensenada Pier #2, PORT side. Surveyed at +0.20 m water level.
-# Azimuth convention: 0 deg = forward, 90 deg = abeam, 90-180 deg = aft.
-# The PORT side determines the sign of Y; no 0-360 bearing is required.
 ENSENADA_PIER_2_SURVEY_LEVEL_M = 0.20
-
-# Longitudinal station positions relative to the ship centre, using Panorama LOA
-# 323.44 m and the surveyed platform distances: FWD 27 m from bow, AFT 14 m
-# from stern. These values are survey-reference geometry, not live positioning.
 SHIP_LOA_M = 323.44
-FWD_PLATFORM_X_M = SHIP_LOA_M / 2.0 - 27.0   # +134.72 m
-AFT_PLATFORM_X_M = -SHIP_LOA_M / 2.0 + 14.0 # -147.72 m
+FWD_PLATFORM_X_M = SHIP_LOA_M / 2.0 - 27.0
+AFT_PLATFORM_X_M = -SHIP_LOA_M / 2.0 + 14.0
+FWD_PLATFORM_Z_M = 12.0
+AFT_PLATFORM_Z_M = 7.5
 
+# Ensenada Pier #2, all surveyed bollards are on PORT side.
 ENSENADA_PIER_2_BOLLARDS: Tuple[BollardSurvey, ...] = (
     BollardSurvey("B1", "FWD", "PORT", 72.0, -7.0, 68.0),
     BollardSurvey("B2", "FWD", "PORT", 71.0, -7.0, 75.0),
@@ -62,12 +61,7 @@ ENSENADA_PIER_2_BOLLARDS: Tuple[BollardSurvey, ...] = (
 
 
 def survey_to_local_xyz(survey: BollardSurvey) -> tuple[float, float, float]:
-    """Convert a range-finder survey to ship-reference XYZ.
-
-    X is positive toward bow. Y is positive toward starboard. Z is positive up.
-    For the PORT side, Y is negative. Azimuth is the unsigned 0-180 deg angle
-    measured from bow toward the surveyed point. Slope is positive upward.
-    """
+    """Convert the onboard range-finder convention into ship-reference XYZ."""
     if survey.measurement_station not in {"FWD", "AFT"}:
         raise ValueError("measurement_station must be FWD or AFT")
     if survey.side not in {"PORT", "STBD"}:
@@ -76,17 +70,17 @@ def survey_to_local_xyz(survey: BollardSurvey) -> tuple[float, float, float]:
         raise ValueError("azimuth_deg must be between 0 and 180 degrees")
 
     horizontal = survey.distance_m * cos(radians(survey.slope_deg))
-    longitudinal = horizontal * cos(radians(survey.azimuth_deg))
-    transverse = horizontal * sin(radians(survey.azimuth_deg))
-    if survey.measurement_station == "AFT":
-        longitudinal = -longitudinal
-    if survey.side == "PORT":
-        transverse = -transverse
+    # Same azimuth reference at FWD and AFT: 0=bow and 180=stern.
+    dx = horizontal * cos(radians(survey.azimuth_deg))
+    dy = horizontal * sin(radians(survey.azimuth_deg))
+    if survey.side == "STBD":
+        dy = -dy
 
     platform_x = FWD_PLATFORM_X_M if survey.measurement_station == "FWD" else AFT_PLATFORM_X_M
-    x = platform_x + longitudinal
-    z = survey.distance_m * sin(radians(survey.slope_deg))
-    return x, transverse, z
+    platform_z = FWD_PLATFORM_Z_M if survey.measurement_station == "FWD" else AFT_PLATFORM_Z_M
+    x = platform_x + dx
+    z = platform_z + survey.distance_m * sin(radians(survey.slope_deg))
+    return x, dy, z
 
 
 def reconstruct_berth_points() -> Tuple[BollardPoint, ...]:
@@ -111,9 +105,10 @@ BERTH_PROFILES: Dict[str, Dict[str, object]] = {
         "points": ENSENADA_PIER_2_POINTS,
         "coordinate_system": {
             "x": "ship longitudinal axis; + toward bow",
-            "y": "transverse axis; + starboard",
-            "z": "vertical; + upward",
-            "positioning": "survey reference; runtime ship uses longitudinal offset only",
+            "y": "transverse axis; + PORT",
+            "z": "vertical; + upward; platform absolute reference used for display",
+            "positioning": "berth fixed; runtime ship uses longitudinal offset only",
+            "survey_level": "+0.20 m water level reference",
         },
     }
 }
