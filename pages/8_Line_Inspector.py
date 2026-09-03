@@ -1,4 +1,4 @@
-"""Single-line digital record: calculation, topology, certificate, history and AI inspection."""
+"""Single-line digital record: calculation, topology, certificate, history and visual inspection."""
 from __future__ import annotations
 import json, sqlite3
 import pandas as pd
@@ -9,9 +9,9 @@ from core.auth import require_login, logout_button
 from core.ai_inspection import ai_is_configured, inspect_image, save_inspection, list_inspections, get_inspection_image, confirm_inspection
 from core.setup_store import list_setup_names, load_setup
 
+st.set_page_config(page_title="Line Inspector — OpenMooring", layout="wide")
 if not require_login(): st.stop()
 logout_button()
-st.set_page_config(page_title="Line Inspector — OpenMooring", layout="wide")
 st.title("🪢 Line Inspector")
 st.caption("Una linea, un record: configurazione → certificato → tensione → esposizione → inspection history.")
 
@@ -23,7 +23,9 @@ if id_col is None: st.error("Line inventory senza line_id."); st.stop()
 name_col="line_name" if "line_name" in inventory.columns else None
 inventory=inventory.copy(); inventory[id_col]=inventory[id_col].astype(str)
 labels=inventory.apply(lambda r:f"{r[id_col]} — {r[name_col]}" if name_col and str(r[name_col]).strip() else str(r[id_col]),axis=1).tolist()
-choice=st.selectbox("Seleziona linea",labels); selected_id=str(inventory.iloc[labels.index(choice)][id_col]); line=inventory[inventory[id_col]==selected_id].iloc[0]
+preselected=str(st.session_state.get("selected_line_id","")).strip()
+pre_index=next((i for i,label in enumerate(labels) if label.split(" — ",1)[0].strip()==preselected),0)
+choice=st.selectbox("Seleziona linea",labels,index=pre_index); selected_id=str(inventory.iloc[labels.index(choice)][id_col]); st.session_state["selected_line_id"]=selected_id; line=inventory[inventory[id_col]==selected_id].iloc[0]
 live=pd.DataFrame()
 if isinstance(results,pd.DataFrame) and not results.empty and "line_id" in results.columns: live=results[results.line_id.astype(str)==selected_id].copy()
 
@@ -88,7 +90,7 @@ else:
         if st.button("✅ Conferma osservazione AI",key=f"confirm_{result['inspection_id']}"):
             confirm_inspection(result["inspection_id"],note); result["operator_status"]="OPERATOR_CONFIRMED"; st.session_state["last_ai_inspection_result"]=result; st.success("Osservazione confermata e archiviata nello storico della linea.")
 
-st.divider(); st.markdown("### 🗂️ Inspection History")
+st.divider(); st.markdown("### 📋 Inspection History")
 for item in list_inspections(selected_id):
     with st.expander(f"{item['timestamp_utc']} · {item['overall_severity']} · {item['operator_status']}"):
         st.write(item.get("ai_summary", "")); st.caption(f"Provider: {item.get('provider','Google Gemini')} · Model: {item.get('model','')}")
