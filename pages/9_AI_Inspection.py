@@ -16,11 +16,12 @@ from core.ai_inspection import (
     save_inspection,
 )
 from core.auth import require_login, logout_button
-from database.db_manager import load_lines_inventory_from_db
+from database.db_manager import init_db, load_lines_inventory_from_db
 
 st.set_page_config(page_title="AI Line Inspection — OpenMooring", layout="wide")
 require_login()
 logout_button()
+init_db()
 
 st.title("🤖 AI Line Inspection")
 st.caption("AI-assisted visual inspection: damage classification → operator confirmation → inspection history.")
