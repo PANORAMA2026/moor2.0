@@ -1,4 +1,4 @@
-"""3D berth layout: Carnival Panorama + surveyed berth + drawing-derived fairleads."""
+"""3D berth layout: Carnival Panorama + surveyed berth + drawing-derived fairleads + lines."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -11,6 +11,7 @@ import trimesh
 from config.constants import DEFAULT_SHIP
 from core.berth_profiles import get_berth_profile, list_berth_profiles
 from core.mooring_equipment import get_fairleads, get_mooring_platforms
+from core.mooring_setup_profiles import get_normal_setup, setup_counts
 
 GLB_MODEL_PATH = Path(__file__).resolve().parent.parent / "asset" / "carnivalpanorama.glb"
 BERTH_BLOCK_DEPTH_M = 15.0
@@ -190,6 +191,76 @@ def _add_fixed_berth(fig: go.Figure, bollards: pd.DataFrame) -> None:
     ))
 
 
+def _connection_dataframe(bollards: pd.DataFrame, ship_offset: float) -> tuple[pd.DataFrame, list[str]]:
+    fairleads = {p.point_id: p for p in get_fairleads(side="PORT")}
+    bollard_rows = {}
+    for _, row in bollards.iterrows():
+        key = (str(row["measurement_station"]).upper(), str(row["bollard_id"]).upper())
+        bollard_rows[key] = row
+
+    records = []
+    unresolved = []
+    for conn in get_normal_setup():
+        fairlead = fairleads.get(conn.fairlead_id)
+        bollard = bollard_rows.get((conn.bollard_station.upper(), conn.bollard_id.upper()))
+        if fairlead is None or bollard is None:
+            unresolved.append(conn.line_id)
+            continue
+        fx = float(fairlead.x_m) + float(ship_offset)
+        fy = float(fairlead.y_m)
+        fz = float(fairlead.z_m)
+        bx = float(bollard["x_m"])
+        by = float(bollard["y_m"])
+        bz = float(bollard["z_m"])
+        length = float(np.linalg.norm(np.array([bx - fx, by - fy, bz - fz])))
+        records.append({
+            "line_id": conn.line_id,
+            "station": conn.station,
+            "line_type": conn.line_type,
+            "fairlead_id": conn.fairlead_id,
+            "bollard_id": conn.bollard_id,
+            "fairlead_x_m": fx,
+            "fairlead_y_m": fy,
+            "fairlead_z_m": fz,
+            "bollard_x_m": bx,
+            "bollard_y_m": by,
+            "bollard_z_m": bz,
+            "straight_3d_length_m": length,
+            "status": conn.status,
+        })
+    return pd.DataFrame.from_records(records), unresolved
+
+
+def _add_mooring_connections(fig: go.Figure, connections: pd.DataFrame) -> None:
+    line_style = {
+        "HEAD": {"color": "#E6B800", "width": 5},
+        "SPRING": {"color": "#FF7F0E", "width": 5},
+        "STERN": {"color": "#1F77B4", "width": 5},
+    }
+    shown = set()
+    for _, row in connections.iterrows():
+        kind = str(row["line_type"])
+        style = line_style.get(kind, {"color": "#777777", "width": 4})
+        showlegend = kind not in shown
+        shown.add(kind)
+        fig.add_trace(go.Scatter3d(
+            x=[row["fairlead_x_m"], row["bollard_x_m"]],
+            y=[row["fairlead_y_m"], row["bollard_y_m"]],
+            z=[row["fairlead_z_m"], row["bollard_z_m"]],
+            mode="lines",
+            line=style,
+            name=f"{kind} lines" if showlegend else kind,
+            legendgroup=kind,
+            showlegend=showlegend,
+            hovertemplate=(
+                f"{row['line_id']} — {kind}<br>"
+                f"Fairlead: {row['fairlead_id']}<br>"
+                f"Bollard: {row['bollard_id']} ({row['station']})<br>"
+                f"3D straight length: {row['straight_3d_length_m']:.1f} m<extra></extra>"
+            ),
+        ))
+
+
 def _add_berth_reference_lines(fig: go.Figure, bollards: pd.DataFrame) -> None:
     for station in ("FWD", "AFT"):
         part = bollards[bollards["measurement_station"].astype(str).str.upper() == station].sort_values("x_m")
@@ -206,6 +277,8 @@ def _figure_3d(ship: dict, bollards: pd.DataFrame, offset: float, fairlead_stati
     model_dims = _add_ship(fig, ship, offset)
     _add_platforms(fig, offset)
     fairlead_df = _add_fairleads(fig, offset, fairlead_station)
+    connections, unresolved = _connection_dataframe(bollards, offset)
+    _add_mooring_connections(fig, connections)
     _add_berth_block(fig, bollards, "Ensenada Pier #2")
     _add_fixed_berth(fig, bollards)
     _add_berth_reference_lines(fig, bollards)
@@ -244,11 +317,13 @@ def render_tab_berth(selected_port, ship_dict):
         "AFT platform: Deck 1, 14 m a pruavia dell'estrema poppa. Le bitte sono fisse; la nave e gli elementi di bordo traslano longitudinalmente."
     )
 
-    c1, c2, c3, c4 = st.columns(4)
+    counts = setup_counts()
+    c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Nave", ship_dict.get("Name", "N/A"))
     c2.metric("Offset longitudinale", f"{offset:+.1f} m")
     c3.metric("Bitte nel rilievo", str(len(df)))
     c4.metric("Fairlead PORT", str(len(get_fairleads(side="PORT"))))
+    c5.metric("Cime normal setup", str(counts["TOTAL"]))
 
     new_offset = st.number_input(
         "Spostamento longitudinale nave — + PRUA / − POPPA (m)",
@@ -257,7 +332,7 @@ def render_tab_berth(selected_port, ship_dict):
     st.session_state["offset_fugro_m"] = float(new_offset)
 
     station = st.selectbox("Fairleads da visualizzare", ["ALL", "FWD", "AFT"], format_func=lambda x: "Tutti" if x == "ALL" else x)
-    st.subheader("🚢 Carnival Panorama — modello 3D + mooring platforms + fairleads + banchina 3D + 12 bitte")
+    st.subheader("🚢 Carnival Panorama — modello 3D + fairleads + 18 cime + banchina 3D + 12 bitte")
 
     try:
         fig, model_dims, fairlead_df = _figure_3d(ship_dict, df, float(new_offset), station)
@@ -272,12 +347,23 @@ def render_tab_berth(selected_port, ship_dict):
         return
 
     st.caption(
-        "Geometria fairlead: ricostruzione dal disegno di Mooring & Anchoring Functional Plan. "
-        "X deriva dal frame di riferimento della mooring platform e dal frame spacing del disegno. "
-        "Le coordinate trasversali sono ancora REFERENCE e non sono abilitate come geometria solver-grade."
+        "Le 18 connessioni sono la topologia del normal setup Ensenada fornita dall'equipaggio. "
+        "I fairlead sono ancora geometria REFERENCE derivata dal disegno; le linee mostrano quindi la connessione geometrica "
+        "attuale e la loro lunghezza rettilinea 3D, non una lunghezza reale sotto sag/pretensionamento."
     )
 
-    with st.expander("📐 Coordinate fairleads — reference geometry", expanded=True):
+    with st.expander("⚓ Normal Mooring Setup — Ensenada Pier #2", expanded=True):
+        connections, unresolved = _connection_dataframe(df, float(new_offset))
+        if unresolved:
+            st.warning(f"Connessioni non risolte: {', '.join(unresolved)}")
+        if not connections.empty:
+            cols = ["line_id", "station", "line_type", "fairlead_id", "bollard_id", "straight_3d_length_m", "status"]
+            st.dataframe(connections[cols], use_container_width=True, hide_index=True)
+            fwd = int((connections["station"] == "FWD").sum())
+            aft = int((connections["station"] == "AFT").sum())
+            st.write(f"**FWD:** {fwd} cime — **AFT:** {aft} cime — **Totale:** {len(connections)} cime")
+
+    with st.expander("📐 Coordinate fairleads — reference geometry", expanded=False):
         if fairlead_df.empty:
             st.warning("Nessun fairlead disponibile per il filtro selezionato.")
         else:
@@ -285,6 +371,6 @@ def render_tab_berth(selected_port, ship_dict):
             st.dataframe(fairlead_df[cols].sort_values(["station", "x_m"]), use_container_width=True, hide_index=True)
 
     st.info(
-        "Prossimo livello: collegare ogni fairlead al relativo winch/chock e poi costruire le 18 linee del normal setup di Ensenada "
-        "(FWD 9 + AFT 9). Le connessioni saranno modificabili e salvabili come setup alternativi."
+        "Passo successivo: validare visivamente i fairlead/chock del disegno e poi sostituire i collegamenti REFERENCE con i punti "
+        "engineering-grade. Dopo questa validazione potremo aggiungere winch → fairlead → linea → bitta e rendere ogni collegamento modificabile."
     )
