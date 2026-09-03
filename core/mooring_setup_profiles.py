@@ -1,9 +1,8 @@
 """Mooring setup topology for the Ensenada Pier #2 normal configuration.
 
-This module defines the current operational line-to-bollard topology supplied by the
-vessel team. Fairlead identifiers refer to the drawing-derived reference geometry in
-core.mooring_equipment. The topology is intentionally separate from the numerical
-solver so it can later be edited and saved as alternative setups.
+A mooring connection is not a one-to-one winch-to-line or bollard-to-line
+relationship. A single winch can serve multiple lines and a single bollard can
+carry multiple lines, subject to the physical equipment capacity/SWL.
 """
 from __future__ import annotations
 
@@ -20,7 +19,20 @@ class MooringConnection:
     bollard_station: str
     side: str = "PORT"
     status: str = "REFERENCE"
+    winch_id: str | None = None
+    winch_slot: int | None = None
 
+
+# Four winches are available at each mooring station. Each physical winch may
+# accommodate up to four lines; the actual line-to-winch assignment is left
+# unpopulated until verified from onboard arrangement/inventory data.
+FWD_WINCH_IDS = ("FWD-W1", "FWD-W2", "FWD-W3", "FWD-W4")
+AFT_WINCH_IDS = ("AFT-W1", "AFT-W2", "AFT-W3", "AFT-W4")
+WINCH_MAX_LINES_REFERENCE = 4
+
+# Bollard loading is many-to-one: several lines may share a bollard. The
+# permitted number of lines must be evaluated against the individual bollard
+# SWL/MWLL and arrangement; no universal capacity is assumed here.
 
 # Ensenada Pier #2 — normal setup supplied by vessel team.
 # FWD: B1 x2, B2 x2, B3 x3, B4 spring x2.
