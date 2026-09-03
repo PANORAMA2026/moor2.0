@@ -65,6 +65,10 @@ def reconcile(existing: MooringSession | None, proposed: MooringSession) -> Sche
         if existing.schedule_fingerprint == proposed.schedule_fingerprint:
             return ScheduleDecision("KEEP_COMPLETED", "Completed session matches calendar", existing)
         return ScheduleDecision("CREATE_NEW", "Calendar call changed after completion", proposed, True)
-    if existing.schedule_fingerprint == proposed.schedule_fingerprint:
-        return ScheduleDecision("KEEP_SCHEDULED", "Scheduled session matches calendar", existing)
-    return ScheduleDecision("UPDATE_SCHEDULED", "Calendar or mooring setup changed before operation started", proposed, True)
+    if existing.status is SessionStatus.SCHEDULED:
+        if existing.setup_source == "OPERATOR_OVERRIDE" and _same_scheduled_call(existing, proposed):
+            return ScheduleDecision("KEEP_SCHEDULED", "Scheduled session uses operator-selected mooring setup", existing)
+        if existing.schedule_fingerprint == proposed.schedule_fingerprint:
+            return ScheduleDecision("KEEP_SCHEDULED", "Scheduled session matches calendar", existing)
+        return ScheduleDecision("UPDATE_SCHEDULED", "Calendar or mooring setup changed before operation started", proposed, True)
+    return ScheduleDecision("UPDATE_SCHEDULED", "Session state requires reconciliation", proposed, True)
