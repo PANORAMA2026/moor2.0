@@ -28,7 +28,7 @@ def load_ship_glb(path: str):
         return trimesh.util.concatenate(geometries)
     return loaded
 
-def ship_mesh_to_plotly(mesh, ship: dict, offset_x: float = 0.0):
+def ship_mesh_to_plotly(mesh: trimesh.Trimesh, ship: dict, offset_x: float = 0.0):
     vertices = np.asarray(mesh.vertices, dtype=float).copy()
     faces = np.asarray(mesh.faces, dtype=int)
     if vertices.size == 0 or faces.size == 0:
@@ -154,6 +154,91 @@ def _figure_3d(ship, bollards, offset, fairlead_station):
     fig.update_layout(height=820, margin=dict(l=0, r=0, t=25, b=0), scene=dict(xaxis_title="X — Longitudinale (+ PRUA) [m]", yaxis_title="Y — Trasversale (+ PORT) [m]", zaxis_title="Z — Quota [m]", aspectmode="data"), legend=dict(orientation="h", yanchor="bottom", y=1.01, xanchor="left", x=0))
     return fig, fairlead_df, connections, unresolved, model_dims
 
+def _render_mooring_summary(connections: pd.DataFrame) -> None:
+    """Human-first summary of the Normal setup; detailed rows remain available below."""
+    if connections.empty:
+        st.warning("Nessuna connessione risolta.")
+        return
+
+    st.markdown("### ⚓ Mooring plan — vista operativa")
+    st.caption("La vista mostra il piano in modo leggibile. I dettagli geometrici restano disponibili sotto, senza appesantire la schermata principale.")
+
+    total = len(connections)
+    fwd = connections[connections["station"].astype(str).str.upper() == "FWD"]
+    aft = connections[connections["station"].astype(str).str.upper() == "AFT"]
+    heads = int((connections["line_type"] == "HEAD").sum())
+    springs = int((connections["line_type"] == "SPRING").sum())
+    sterns = int((connections["line_type"] == "STERN").sum())
+
+    a, b, c, d = st.columns(4)
+    a.metric("TOTAL LINES", total)
+    b.metric("FWD", len(fwd))
+    c.metric("AFT", len(aft))
+    d.metric("HEAD / SPRING / STERN", f"{heads} / {springs} / {sterns}")
+
+    def route_rows(frame: pd.DataFrame):
+        rows = []
+        for kind, label in (("HEAD", "HEAD"), ("SPRING", "SPRING"), ("STERN", "STERN")):
+            part = frame[frame["line_type"] == kind]
+            for _, r in part.iterrows():
+                rows.append((label, str(r["fairlead_id"]), str(r["bollard_id"])))
+        return rows
+
+    def card_html(title: str, frame: pd.DataFrame, subtitle: str):
+        rows = route_rows(frame)
+        body = "".join(
+            f'<div class="moor-route"><span class="moor-type {kind.lower()}">{kind}</span><span class="moor-node">{fairlead}</span><span class="moor-arrow">→</span><span class="moor-node bollard">{bollard}</span></div>'
+            for kind, fairlead, bollard in rows
+        ) or '<div class="moor-empty">No resolved lines</div>'
+        return f'''<div class="moor-card"><div class="moor-card-title">{title}</div><div class="moor-card-sub">{subtitle}</div>{body}</div>'''
+
+    st.markdown(
+        '<style>\n'
+        '.moor-card{border:1px solid rgba(128,128,128,.25);border-radius:14px;padding:16px 18px;margin:2px 0 10px;background:linear-gradient(135deg,rgba(128,128,128,.08),rgba(128,128,128,.025));}\n'
+        '.moor-card-title{font-size:1.15rem;font-weight:700;margin-bottom:2px}.moor-card-sub{font-size:.82rem;opacity:.68;margin-bottom:12px}\n'
+        '.moor-route{display:flex;align-items:center;gap:9px;padding:7px 0;border-top:1px solid rgba(128,128,128,.13);font-size:.9rem}\n'
+        '.moor-type{min-width:62px;font-size:.68rem;font-weight:800;letter-spacing:.04em;padding:3px 7px;border-radius:7px;background:rgba(128,128,128,.14);text-align:center}\n'
+        '.moor-node{font-family:monospace;font-weight:700}.moor-node.bollard{font-size:1rem}.moor-arrow{opacity:.5;font-size:1.1rem}.moor-empty{opacity:.6;padding:8px 0}\n'
+        '</style>', unsafe_allow_html=True
+    )
+    left, right = st.columns(2, gap="large")
+    with left:
+        st.markdown(card_html("🛳️ FWD MOORING STATION", fwd, "Deck 3 · 9 lines · head + spring arrangement"), unsafe_allow_html=True)
+    with right:
+        st.markdown(card_html("🛳️ AFT MOORING STATION", aft, "Deck 1 · 9 lines · spring + stern arrangement"), unsafe_allow_html=True)
+
+    with st.expander("🔎 Dettaglio tecnico connessioni", expanded=False):
+        cols = ["line_id", "station", "line_type", "fairlead_id", "bollard_id", "straight_3d_length_m", "status"]
+        st.dataframe(connections[cols], use_container_width=True, hide_index=True)
+
+def _render_bollard_summary(bollards: pd.DataFrame) -> None:
+    """Visual berth/bollard strip with technical coordinates kept secondary."""
+    if bollards.empty:
+        st.info("Nessuna billetta rilevata.")
+        return
+    st.markdown("### ⚓ Berth hardware — vista rapida")
+    st.caption("Le bitte sono elementi fissi della banchina. Le coordinate complete sono disponibili solo come dato tecnico di riferimento.")
+
+    st.markdown(
+        '<style>\n'
+        '.bollard-strip{display:flex;gap:8px;overflow-x:auto;padding:8px 2px 14px 2px}\n'
+        '.bollard-group{min-width:49%;border:1px solid rgba(128,128,128,.22);border-radius:14px;padding:12px;background:rgba(128,128,128,.045)}\n'
+        '.bollard-title{font-weight:800;margin-bottom:10px}.bollard-items{display:flex;gap:8px;flex-wrap:wrap}\n'
+        '.bollard-chip{min-width:62px;text-align:center;border-radius:10px;padding:10px 8px;border:1px solid rgba(128,128,128,.18);background:rgba(128,128,128,.08)}\n'
+        '.bollard-id{font-size:1.05rem;font-weight:800;font-family:monospace}.bollard-side{font-size:.68rem;opacity:.65;margin-top:2px}\n'
+        '</style>', unsafe_allow_html=True
+    )
+    groups = []
+    for station in ("FWD", "AFT"):
+        part = bollards[bollards["measurement_station"].astype(str).str.upper() == station].sort_values("x_m")
+        chips = "".join(f'<div class="bollard-chip"><div class="bollard-id">{r["bollard_id"]}</div><div class="bollard-side">{r["side"]}</div></div>' for _, r in part.iterrows())
+        groups.append(f'<div class="bollard-group"><div class="bollard-title">{"🟦 FWD" if station == "FWD" else "🟧 AFT"} · {len(part)} survey points</div><div class="bollard-items">{chips}</div></div>')
+    st.markdown('<div class="bollard-strip">' + "".join(groups) + '</div>', unsafe_allow_html=True)
+
+    with st.expander("📐 Coordinate rilevate — dati tecnici", expanded=False):
+        display_cols = ["bollard_id", "measurement_station", "side", "x_m", "y_m", "z_m", "survey_water_level_m"]
+        st.dataframe(bollards[display_cols], use_container_width=True, hide_index=True)
+
 def render_tab_berth(selected_port: str = "Ensenada Pier #2", ship: dict | None = None):
     """Render the 3D berth/layout tab used by app.py."""
     ship = ship or DEFAULT_SHIP
@@ -182,14 +267,18 @@ def render_tab_berth(selected_port: str = "Ensenada Pier #2", ship: dict | None 
         return
     if unresolved:
         st.warning("Connessioni non risolte: " + ", ".join(unresolved))
-    with st.expander("🔗 Connessioni Winch/Fairlead → Bollard", expanded=False):
-        st.dataframe(connections, use_container_width=True, hide_index=True) if not connections.empty else st.warning("Nessuna connessione risolta.")
-    with st.expander("📍 Coordinate fairlead — riferimento da disegno", expanded=False):
-        if fairlead_df.empty: st.info("Nessun fairlead disponibile per il filtro selezionato.")
+
+    _render_mooring_summary(connections)
+
+    st.markdown("---")
+    _render_bollard_summary(bollards)
+
+    with st.expander("📍 Fairlead — dati tecnici da disegno", expanded=False):
+        if fairlead_df.empty:
+            st.info("Nessun fairlead disponibile per il filtro selezionato.")
         else:
             cols = [c for c in ["point_id", "station", "deck", "equipment_item", "frame_ref", "x_m", "y_m", "z_m", "confidence", "source"] if c in fairlead_df.columns]
             st.dataframe(fairlead_df[cols], use_container_width=True, hide_index=True)
-    with st.expander("⚓ Coordinate bitte rilevate", expanded=False):
-        st.dataframe(bollards, use_container_width=True, hide_index=True)
+
     with st.expander("📐 Modello e convenzioni", expanded=False):
         st.write({"GLB_path": str(GLB_MODEL_PATH), "GLB_calibrated_dimensions_m": {"LOA": round(model_dims[0], 2), "Beam": round(model_dims[1], 2), "Height": round(model_dims[2], 2)}, "ship_runtime_offset": float(offset), "ship_transverse_offset": 0.0, "ship_heading_offset_deg": 0.0, "berth_fixed": True, "coordinate_system": "+X bow / +Y PORT / +Z upward"})
