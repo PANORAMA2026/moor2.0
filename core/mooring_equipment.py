@@ -22,6 +22,14 @@ AFT_PLATFORM_X_M = -147.72
 FWD_PLATFORM_Z_M = 12.0
 AFT_PLATFORM_Z_M = 7.5
 
+# Four physical mooring winches are installed at each end of the vessel.
+# A winch may serve multiple lines; individual slot assignment is optional until
+# verified from the onboard arrangement. Slots 1-4 are the editor's topology
+# positions, not an assumed capacity statement for the machinery.
+FWD_WINCH_IDS = ("FWD-W1", "FWD-W2", "FWD-W3", "FWD-W4")
+AFT_WINCH_IDS = ("AFT-W1", "AFT-W2", "AFT-W3", "AFT-W4")
+WINCH_SLOT_IDS = (1, 2, 3, 4)
+
 # Carnival Panorama reference dimensions used by the 3D ship model.
 # PORT is +Y, therefore the nominal ship-side envelope is +Beam/2.
 SHIP_BEAM_M = 37.20
