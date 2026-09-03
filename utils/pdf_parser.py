@@ -4,7 +4,6 @@ OCR is local and deterministic; no AI API key is required. OCR output remains
 unverified until the operator reviews it.
 """
 from __future__ import annotations
-
 import io
 import os
 import re
@@ -66,7 +65,7 @@ def _tesseract_available() -> bool:
 
 
 def extract_ocr_text_from_pdf(uploaded_file) -> tuple[str, str | None]:
-    """Render pages and OCR them locally. Returns (text, diagnostic)."""
+    """OCR the document, prioritizing the certificate's right-hand data panel."""
     data = extract_bytes_from_file(uploaded_file)
     if not data:
         return "", "No PDF bytes received."
@@ -81,33 +80,38 @@ def extract_ocr_text_from_pdf(uploaded_file) -> tuple[str, str | None]:
     try:
         with fitz.open(stream=data, filetype="pdf") as doc:
             for page in doc:
-                # Render at ~216 DPI, then improve contrast for scanned certificates.
-                pix = page.get_pixmap(matrix=fitz.Matrix(3, 3), alpha=False)
+                pix = page.get_pixmap(matrix=fitz.Matrix(4, 4), alpha=False)
                 image = Image.open(io.BytesIO(pix.tobytes("png"))).convert("L")
-                image = ImageOps.autocontrast(image)
-                image = image.filter(ImageFilter.SHARPEN)
+                image = ImageOps.autocontrast(image).filter(ImageFilter.SHARPEN)
 
-                candidates = []
-                for psm in (3, 6):
-                    try:
-                        text = pytesseract.image_to_string(
-                            image,
-                            lang="eng",
-                            config=f"--psm {psm}",
-                        )
-                        candidates.append(text or "")
-                    except Exception:
-                        pass
+                # The uploaded Bexco certificates contain the engineering data
+                # on the right side. OCR that panel separately for much better
+                # recognition of values such as 81,1 T / 86,5 T / 1 x 200 m.
+                right = image.crop((int(image.width * 0.45), 0, image.width, image.height))
+                candidates: list[str] = []
+                for source in (right, image):
+                    for psm in (3, 6, 11):
+                        try:
+                            text = pytesseract.image_to_string(source, lang="eng", config=f"--psm {psm}")
+                            if text and text.strip():
+                                candidates.append(text.strip())
+                        except Exception:
+                            continue
 
-                # Prefer the OCR result containing engineering keywords.
                 def score(s: str) -> int:
                     low = s.lower()
                     keys = ("diameter", "breaking load", "calculated", "quantity", "unique id", "rope type")
                     return len(s) + 500 * sum(k in low for k in keys)
 
-                best = max(candidates, key=score, default="")
-                if best.strip():
-                    chunks.append(best.strip())
+                # Keep the strongest panel OCR plus the strongest full-page OCR.
+                ranked = sorted(candidates, key=score, reverse=True)
+                selected: list[str] = []
+                for candidate in ranked:
+                    if candidate not in selected:
+                        selected.append(candidate)
+                    if len(selected) >= 2:
+                        break
+                chunks.extend(selected)
     except Exception as exc:
         return "", f"Tesseract OCR failed: {type(exc).__name__}: {exc}"
 
@@ -133,7 +137,7 @@ def _text_value(text: str, patterns: list[str], default: str = "") -> str:
     for pattern in patterns:
         m = re.search(pattern, text, re.I | re.M)
         if m:
-            return m.group(1).strip()
+            return m.group(1).strip() if m.lastindex else m.group(0).strip()
     return default
 
 
@@ -144,15 +148,15 @@ def _to_legacy_dict(extraction) -> dict:
     ship_mbl_tons = _kn_or_tons_to_tons(mbl_field.value if mbl_field else None, mbl_field.unit if mbl_field else None)
     text = extraction.raw_text
 
-    cert_id = _text_value(text, [r"unique\s+id[- ]?number\s*[:=]\s*([A-Z0-9_-]+)", r"(?:certificate|cert\.?|serial)\s*(?:no\.?|number)?\s*[:#=]\s*([A-Z0-9./_-]+)"] , "UNKNOWN")
-    manufacturer = _text_value(text, [r"\bmanufacturer\s*[:=]\s*([^\n,;]+)", r"\bBexco\b"], "Bexco")
-    product = _text_value(text, [r"product\s*[:=]\s*([^\n]+)"] , "")
-    rope_type = _text_value(text, [r"rope\s+type\s*[:=]\s*([^\n]+)"] , "")
+    cert_id = _text_value(text, [r"unique\s+id[- ]?number\s*[:=]\s*([A-Z0-9_-]+)", r"(?:certificate|cert\.?|serial)\s*(?:no\.?|number)?\s*[:#=]\s*([A-Z0-9./_-]+)"], "UNKNOWN")
+    manufacturer = "Bexco" if re.search(r"\bbexco\b", text, re.I) else _text_value(text, [r"\bmanufacturer\s*[:=]\s*([^\n,;]+)"], "")
+    product = _text_value(text, [r"product\s*[:=]\s*([^\n]+)"], "")
+    rope_type = _text_value(text, [r"rope\s+type\s*[:=]\s*([^\n]+)"], "")
 
     return {
         "cert_id": cert_id,
-        "manufacturer": manufacturer,
-        "main_material": product or _text_value(text, [r"(?:material|grade)\s*[:=]\s*([^\n,;]+)"] , "N/A"),
+        "manufacturer": manufacturer or "N/A",
+        "main_material": product or "N/A",
         "main_diameter_mm": float(_field(extraction, "diameter_mm", 0.0)),
         "main_mbl_tons": ldbf_tons or ship_mbl_tons,
         "ship_design_mbl_tons": ship_mbl_tons,
@@ -180,25 +184,20 @@ def _to_legacy_dict(extraction) -> dict:
 def parse_line_certificate(uploaded_file) -> dict | None:
     if uploaded_file is None:
         return None
-
     text = extract_text_from_pdf(uploaded_file)
     extraction_method = "PyMuPDF + deterministic parser"
     ocr_diagnostic = None
-
     if not text:
         text, ocr_diagnostic = extract_ocr_text_from_pdf(uploaded_file)
         extraction_method = "PyMuPDF + Tesseract OCR + deterministic parser"
-
     if not text:
-        warning = ocr_diagnostic or "No readable text was extracted."
         return {
             "cert_id": "UNKNOWN",
-            "_warnings": [warning],
+            "_warnings": [ocr_diagnostic or "No readable text was extracted."],
             "_validation_errors": ["No extractable certificate text"],
             "_requires_review": True,
             "_extraction_method": "OCR_FAILED",
         }
-
     result = parse_certificate_text(text)
     if result:
         result["_extraction_method"] = extraction_method
