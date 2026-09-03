@@ -1,12 +1,11 @@
-"""Compatibility facade for certificate PDF parsing.
+"""Certificate PDF extraction with text-first parsing and local OCR fallback.
 
-The engineering parser lives in ``core.certificate_parser``. This module is
-kept for existing Streamlit imports, but it deliberately does not let an LLM
-silently invent certificate values. AI/OCR can be added later as an explicitly
-unverified extraction source.
+The OCR layer is intentionally local and deterministic: no AI API key is
+required. OCR output remains unverified until the operator reviews it.
 """
 from __future__ import annotations
 
+import io
 import re
 from typing import Any
 
@@ -15,6 +14,13 @@ try:
     HAS_PYMUPDF = True
 except ImportError:
     HAS_PYMUPDF = False
+
+try:
+    import pytesseract
+    from PIL import Image
+    HAS_OCR = True
+except ImportError:
+    HAS_OCR = False
 
 from core.certificate_parser import parse_certificate_text as _parse_core_certificate
 
@@ -36,6 +42,7 @@ def extract_bytes_from_file(uploaded_file) -> bytes:
 
 
 def extract_text_from_pdf(uploaded_file) -> str:
+    """Extract native PDF text. Returns empty string for image-only PDFs."""
     data = extract_bytes_from_file(uploaded_file)
     if not data or not HAS_PYMUPDF:
         return ""
@@ -45,6 +52,30 @@ def extract_text_from_pdf(uploaded_file) -> str:
         return "\n".join(p for p in pages if p).strip()
     except Exception:
         return ""
+
+
+def extract_ocr_text_from_pdf(uploaded_file) -> str:
+    """Render PDF pages and OCR them locally with Tesseract.
+
+    Returns an empty string when OCR dependencies or the Tesseract executable
+    are unavailable. The caller can then report the exact missing capability.
+    """
+    data = extract_bytes_from_file(uploaded_file)
+    if not data or not HAS_PYMUPDF or not HAS_OCR:
+        return ""
+    chunks: list[str] = []
+    try:
+        with fitz.open(stream=data, filetype="pdf") as doc:
+            for page in doc:
+                # 250-300 DPI is a good compromise for certificate scans.
+                pix = page.get_pixmap(matrix=fitz.Matrix(3, 3), alpha=False)
+                image = Image.open(io.BytesIO(pix.tobytes("png")))
+                text = pytesseract.image_to_string(image, config="--psm 6")
+                if text and text.strip():
+                    chunks.append(text.strip())
+    except Exception:
+        return ""
+    return "\n\n".join(chunks).strip()
 
 
 def _field(extraction, name: str, default: Any = None):
@@ -111,16 +142,35 @@ def _to_legacy_dict(extraction) -> dict:
 def parse_line_certificate(uploaded_file) -> dict | None:
     if uploaded_file is None:
         return None
+
+    # First try embedded/native PDF text because it is more precise than OCR.
     text = extract_text_from_pdf(uploaded_file)
+    extraction_method = "PyMuPDF + deterministic parser"
+
+    # Scanned/image-only certificate: automatically fall back to local OCR.
     if not text:
+        text = extract_ocr_text_from_pdf(uploaded_file)
+        extraction_method = "PyMuPDF + Tesseract OCR + deterministic parser"
+
+    if not text:
+        if not HAS_OCR:
+            warning = "No text extracted. PDF is likely scanned and the local OCR dependencies are not available."
+        else:
+            warning = "No text extracted. PDF may be scanned; OCR could not produce readable text."
         return {
             "cert_id": "UNKNOWN",
-            "_warnings": ["No text extracted. PDF may be scanned; OCR is required."],
+            "_warnings": [warning],
             "_validation_errors": ["No extractable PDF text"],
             "_requires_review": True,
-            "_extraction_method": "NONE",
+            "_extraction_method": "OCR_FAILED" if HAS_OCR else "OCR_UNAVAILABLE",
         }
-    return parse_certificate_text(text)
+
+    result = parse_certificate_text(text)
+    if result:
+        result["_extraction_method"] = extraction_method
+        result["_warnings"] = list(result.get("_warnings", []))
+        result["_warnings"].append("OCR output is unverified; compare all fields with the original certificate before saving.") if "Tesseract OCR" in extraction_method else None
+    return result
 
 
 def parse_certificate_text(text: str) -> dict | None:
