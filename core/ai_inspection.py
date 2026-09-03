@@ -64,9 +64,16 @@ def save_inspection(result: dict[str,Any], image_bytes: bytes) -> None:
     conn.execute("INSERT INTO ai_line_inspections (inspection_id,line_id,timestamp_utc,model,provider,image_sha256,image_mime,image_blob,image_quality,overall_severity,confidence,findings_json,ai_summary,retake_requested,operator_status,operator_note,confirmed_at_utc) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(result["inspection_id"],result["line_id"],result["timestamp_utc"],result["model"],result.get("provider","Google Gemini"),result["image_sha256"],result["image_mime"],sqlite3.Binary(image_bytes),result["image_quality"],result["overall_severity"],result.get("confidence"),json.dumps(result.get("findings",[]),ensure_ascii=False),result.get("summary",""),1 if result.get("retake_requested") else 0,"PENDING_OPERATOR_CONFIRMATION","",None)); conn.commit(); conn.close()
 
 def list_inspections(line_id: str|None=None)->list[dict[str,Any]]:
-    init_ai_repository(); conn=sqlite3.connect(DB_FILE_PATH,check_same_thread=False); q="SELECT inspection_id,line_id,timestamp_utc,model,provider,image_sha256,image_mime,image_quality,overall_severity,confidence,findings_json,ai_summary,retake_requested,operator_status,operator_note,confirmed_at_utc FROM ai_line_inspections"; p=()
-    if line_id: q+=" WHERE line_id=?"; p=(str(line_id),)
-    rows=conn.execute(q+" ORDER BY timestamp_utc DESC",p).fetchall(); conn.close(); cols="inspection_id line_id timestamp_utc model provider image_sha256 image_mime image_quality overall_severity confidence findings_json ai_summary retake_requested operator_status operator_note confirmed_at_utc".split(); return [dict(zip(cols,r)) for r in rows]
+    init_ai_repository(); conn=sqlite3.connect(DB_FILE_PATH,check_same_thread=False)
+    try:
+        if line_id:
+            rows=conn.execute("SELECT inspection_id,line_id,timestamp_utc,model,provider,image_sha256,image_mime,image_quality,overall_severity,confidence,findings_json,ai_summary,retake_requested,operator_status,operator_note,confirmed_at_utc FROM ai_line_inspections WHERE line_id=? ORDER BY timestamp_utc DESC",(str(line_id),)).fetchall()
+        else:
+            rows=conn.execute("SELECT inspection_id,line_id,timestamp_utc,model,provider,image_sha256,image_mime,image_quality,overall_severity,confidence,findings_json,ai_summary,retake_requested,operator_status,operator_note,confirmed_at_utc FROM ai_line_inspections ORDER BY timestamp_utc DESC").fetchall()
+    finally:
+        conn.close()
+    cols="inspection_id line_id timestamp_utc model provider image_sha256 image_mime image_quality overall_severity confidence findings_json ai_summary retake_requested operator_status operator_note confirmed_at_utc".split()
+    return [dict(zip(cols,r)) for r in rows]
 
 def get_inspection_image(inspection_id:str)->bytes|None:
     init_ai_repository(); conn=sqlite3.connect(DB_FILE_PATH,check_same_thread=False); r=conn.execute("SELECT image_blob FROM ai_line_inspections WHERE inspection_id=?",(inspection_id,)).fetchone(); conn.close(); return bytes(r[0]) if r and r[0] is not None else None
