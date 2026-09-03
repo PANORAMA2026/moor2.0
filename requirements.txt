@@ -16,3 +16,4 @@ trimesh
 scipy
 google-generativeai>=0.8.0
 PyMuPDF>=1.23.0
+pytesseract>=0.3.13
