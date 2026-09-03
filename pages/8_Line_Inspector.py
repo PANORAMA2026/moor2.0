@@ -9,9 +9,9 @@ from core.auth import require_login, logout_button
 from core.ai_inspection import ai_is_configured, inspect_image, save_inspection, list_inspections, get_inspection_image, confirm_inspection
 from core.setup_store import list_setup_names, load_setup
 
+st.set_page_config(page_title="Line Inspector — OpenMooring", layout="wide")
 if not require_login(): st.stop()
 logout_button()
-st.set_page_config(page_title="Line Inspector — OpenMooring", layout="wide")
 st.title("🪢 Line Inspector")
 st.caption("Una linea, un record: configurazione → certificato → tensione → esposizione → ispezione visiva AI.")
 
@@ -23,7 +23,9 @@ if id_col is None: st.error("Line inventory senza line_id."); st.stop()
 name_col="line_name" if "line_name" in inventory.columns else None
 inventory=inventory.copy(); inventory[id_col]=inventory[id_col].astype(str)
 labels=inventory.apply(lambda r:f"{r[id_col]} — {r[name_col]}" if name_col and str(r[name_col]).strip() else str(r[id_col]),axis=1).tolist()
-choice=st.selectbox("Seleziona linea",labels); selected_id=str(inventory.iloc[labels.index(choice)][id_col]); line=inventory[inventory[id_col]==selected_id].iloc[0]
+preselected=str(st.session_state.pop("selected_line_id", "")).strip()
+default_index=labels.index(next((label for label in labels if label.split(" — ",1)[0]==preselected), labels[0])) if preselected else 0
+choice=st.selectbox("Seleziona linea",labels,index=default_index); selected_id=str(inventory.iloc[labels.index(choice)][id_col]); line=inventory[inventory[id_col]==selected_id].iloc[0]
 live=pd.DataFrame()
 if isinstance(results,pd.DataFrame) and not results.empty and "line_id" in results.columns: live=results[results.line_id.astype(str)==selected_id].copy()
 
@@ -34,7 +36,6 @@ else:
     c1.metric("CALCULATED TENSION","N/A"); c2.metric("UTILIZATION","N/A"); c3.metric("MBL",f"{float(line.get('mbl_tons',0) or 0):.2f} t" if pd.notna(line.get('mbl_tons',0)) else "N/A"); c4.metric("SOLVER","No current result")
 
 st.markdown("### 🔗 Mooring connection")
-# Topology is setup-level: one winch can serve multiple lines and one bollard can receive multiple lines.
 setup_names=list_setup_names("Ensenada Pier #2")
 setup_name=st.session_state.get("active_setup_name",setup_names[0] if setup_names else "Normal")
 if setup_name not in setup_names: setup_name=setup_names[0] if setup_names else "Normal"
@@ -80,14 +81,14 @@ else:
     result=st.session_state.get("last_ai_inspection_result")
     if result and str(result.get("line_id"))==selected_id:
         st.markdown("#### Risultato AI — in attesa di conferma")
-        a,b,c=st.columns(3); a.metric("Visual severity",result.get("overall_severity","UNDETERMINED")); b.metric("Image quality",result.get("image_quality","UNDETERMINED")); b= c.metric("Confidence",f"{float(result['confidence'])*100:.0f}%" if result.get("confidence") is not None else "N/A")
+        a,b,c=st.columns(3); a.metric("Visual severity",result.get("overall_severity","UNDETERMINED")); b.metric("Image quality",result.get("image_quality","UNDETERMINED")); c.metric("Confidence",f"{float(result['confidence'])*100:.0f}%" if result.get("confidence") is not None else "N/A")
         if result.get("summary"): st.info(result["summary"])
         findings=result.get("findings",[])
         if findings: st.dataframe(pd.DataFrame(findings),use_container_width=True,hide_index=True)
         if result.get("retake_requested"): st.warning("L'AI richiede una nuova foto: la qualità/visibilità non è sufficiente.")
         note=st.text_area("Nota operatore / conferma",key=f"ai_note_{result['inspection_id']}")
         if st.button("✅ Conferma osservazione AI",key=f"confirm_{result['inspection_id']}"):
-            confirm_inspection(result["inspection_id"],note); st.success("Osservazione confermata e archiviata nello storico della linea.")
+            confirm_inspection(result["inspection_id"],note); result["operator_status"]="OPERATOR_CONFIRMED"; st.session_state["last_ai_inspection_result"]=result; st.success("Osservazione confermata e archiviata nello storico della linea.")
 
 st.divider(); st.markdown("### 🗂️ AI inspection history")
 for item in list_inspections(selected_id):
