@@ -1,10 +1,4 @@
-"""Certificate register and engineering review UI.
-
-Extracted PDF values remain unverified until operator review. The original PDF
-is retained with provenance when saved. LDBF is only populated when explicitly
-identified by the source certificate; manufacturer MBL and calculated breaking
-load are kept as separate fields.
-"""
+"""Certificate register: PDF/OCR parsing, component review and weak-link assignment."""
 from __future__ import annotations
 import pandas as pd
 import streamlit as st
@@ -12,95 +6,106 @@ from utils.pdf_parser import parse_line_certificate, parse_certificate_text
 from database.db_manager import save_certificate_to_db, load_certificates_from_db, save_lines_inventory_to_db, load_lines_inventory_from_db
 from database.certificate_repository import save_reviewed_certificate, load_certificate_records, get_certificate_pdf
 
-def _positive(value: float) -> bool: return float(value) > 0.0
+def _positive(v): return float(v)>0
+
+def _component_rows(cdata):
+    rows=[]
+    for c in cdata.get('components',[]):
+        rows.append({
+            'Component':c.get('component_type'), 'Component ID':c.get('component_id'), 'Certificate':c.get('certificate_id'),
+            'Diameter mm':c.get('diameter_mm'), 'Length m':c.get('length_m'),
+            'Linear kN':c.get('break_load_linear_kn'), 'Spliced kN':c.get('break_load_spliced_kn'),
+            'Grommet kN':c.get('break_load_grommet_kn'), 'Calculated kN':c.get('calculated_breaking_load_kn'),
+        })
+    return pd.DataFrame(rows)
 
 def render_tab_certificate():
-    st.header("📜 Modulo Certificati Cavi")
-    st.caption("Importazione PDF → OCR/parsing → revisione operatore → archivio tracciabile")
-    col_left, col_right = st.columns([1, 1.2])
-    with col_left:
-        st.subheader("📤 Carica Documento")
-        uploaded_file = st.file_uploader("Trascina qui il file PDF del certificato", type=["pdf"], key="pdf_uploader")
-        pasted_text = st.text_area("Oppure incolla il testo del certificato", height=160, key="pasted_text_area")
-        if st.button("🔍 Esegui Parsing Certificato", type="primary", use_container_width=True):
-            if uploaded_file is not None:
-                parsed = parse_line_certificate(uploaded_file)
-                st.session_state["parsed_cert_pdf_bytes"] = uploaded_file.getvalue(); st.session_state["parsed_cert_filename"] = uploaded_file.name
+    st.header('📜 Modulo Certificati Cavi')
+    st.caption('PDF → OCR → riconoscimento componenti → weak link → revisione operatore → archivio')
+    left,right=st.columns([1,1.25])
+    with left:
+        st.subheader('📤 Carica Documento')
+        uploaded=st.file_uploader('PDF certificato',type=['pdf'],key='pdf_uploader')
+        pasted=st.text_area('Oppure incolla testo',height=140,key='pasted_text_area')
+        if st.button('🔍 Esegui Parsing Certificato',type='primary',use_container_width=True):
+            if uploaded is not None:
+                parsed=parse_line_certificate(uploaded); st.session_state['parsed_cert_pdf_bytes']=uploaded.getvalue(); st.session_state['parsed_cert_filename']=uploaded.name
             else:
-                parsed = parse_certificate_text(pasted_text)
-                st.session_state["parsed_cert_pdf_bytes"] = None; st.session_state["parsed_cert_filename"] = ""
-            if parsed:
-                st.session_state["parsed_cert_data"] = parsed; st.success("Estrazione completata. I dati richiedono revisione prima del salvataggio.")
-            else: st.error("Impossibile estrarre dati dal certificato.")
-        cdata = st.session_state.get("parsed_cert_data", {})
+                parsed=parse_certificate_text(pasted); st.session_state['parsed_cert_pdf_bytes']=None; st.session_state['parsed_cert_filename']=''
+            st.session_state['parsed_cert_data']=parsed or {}
+        cdata=st.session_state.get('parsed_cert_data',{})
         if cdata:
-            for warning in cdata.get("_warnings", []): st.warning(warning)
-            for error in cdata.get("_validation_errors", []): st.error(error)
-            st.info("🔎 REVIEW REQUIRED — l'estrazione automatica non costituisce validazione del certificato.")
-            if st.session_state.get("parsed_cert_pdf_bytes"): st.caption(f"Source PDF: {st.session_state.get('parsed_cert_filename', 'certificate.pdf')}")
-    with col_right:
-        st.subheader("📝 Dettagli Certificato")
-        cdata = st.session_state.get("parsed_cert_data", {})
-        with st.form("form_save_certificate_and_line"):
-            c1, c2 = st.columns(2)
-            with c1:
-                cert_id = st.text_input("ID Certificato / Serial No.", value=str(cdata.get("cert_id", "")))
-                manufacturer = st.text_input("Produttore Cavo", value=str(cdata.get("manufacturer", "")))
-                material = st.text_input("Prodotto / Materiale / Grade", value=str(cdata.get("main_material", "")))
-                diameter_mm = st.number_input("Diametro Cavo (mm)", min_value=0.0, value=float(cdata.get("main_diameter_mm", 0.0)), step=1.0)
-            with c2:
-                mbl_tons = st.number_input("Minimum Breaking Load — MBL (ton-force)", min_value=0.0, value=float(cdata.get("minimum_breaking_load_tons", cdata.get("main_mbl_tons", 0.0))), step=0.1)
-                calc_bl_tons = st.number_input("Calculated Breaking Load (ton-force)", min_value=0.0, value=float(cdata.get("calculated_breaking_load_tons", 0.0)), step=0.1)
-                ldbf_tons = st.number_input("LDBF (ton-force) — solo se esplicitamente indicato", min_value=0.0, value=float(cdata.get("ldbf_tons", 0.0)), step=0.1)
-                length_m = st.number_input("Lunghezza Cavo (m)", min_value=0.0, value=float(cdata.get("main_length_m", 0.0)), step=1.0)
-                standard = st.text_input("Standard / Basis", value=str(cdata.get("standard", "")))
-            if cdata.get("calculated_breaking_load_tons", 0) > 0 and cdata.get("ldbf_tons", 0) <= 0:
-                st.caption("ℹ️ Questo certificato riporta un Calculated Breaking Load, ma non dichiara LDBF. Il valore non viene convertito automaticamente in LDBF.")
-            st.divider(); st.markdown("**📈 Average Immediate Strain**")
-            strain = cdata.get("average_immediate_strain_pct", {}); s_cols = st.columns(5)
-            strain_values = {pct: col.number_input(f"{pct}% LDBF", min_value=0.0, value=float(strain.get(str(pct), 0.0)), step=0.01, format="%.4f") for col,pct in zip(s_cols,(10,20,30,40,50))}
-            st.divider(); st.markdown("**🪢 Mooring Tail — dati separati**")
-            has_tail = st.checkbox("Presenza Tail", value=bool(cdata.get("has_tail", False)))
-            t1,t2,t3 = st.columns(3)
-            tail_mat=t1.text_input("Materiale Tail", value=str(cdata.get("tail_material", "")), disabled=not has_tail)
-            tail_len=t2.number_input("Tail Length (m)", min_value=0.0, value=float(cdata.get("tail_length_m", 0.0)), step=0.5, disabled=not has_tail)
-            tail_mbl=t3.number_input("Tail TDBF (ton-force)", min_value=0.0, value=float(cdata.get("tail_mbl_tons", 0.0)), step=0.1, disabled=not has_tail)
-            st.divider(); lines_df=st.session_state.get("lines_inventory", pd.DataFrame()); line_options=["Nessuna (Salva solo Certificato)"]
-            if not lines_df.empty and "line_name" in lines_df.columns: line_options += lines_df["line_name"].astype(str).tolist()
-            selected_line_name=st.selectbox("Associa alla linea",line_options); winch_location=st.radio("Configurazione",["Working Drum","Storage Basket"],horizontal=True)
-            accepted=st.checkbox("Confermo di aver verificato i valori contro il certificato originale."); btn_save=st.form_submit_button("💾 Salva Certificato",type="primary",use_container_width=True)
-            if btn_save:
-                errors=[]
-                if not cert_id.strip(): errors.append("Certificate ID is required.")
-                if not manufacturer.strip(): errors.append("Manufacturer is required.")
-                if not material.strip(): errors.append("Material/grade is required.")
-                if not _positive(diameter_mm): errors.append("Diameter must be greater than zero.")
-                if not _positive(mbl_tons): errors.append("Minimum Breaking Load (MBL) must be greater than zero.")
-                if not _positive(length_m): errors.append("Line length must be greater than zero.")
-                if has_tail and (not _positive(tail_len) or not _positive(tail_mbl) or not tail_mat.strip()): errors.append("Tail material, length and TDBF are required when a tail is present.")
-                if not accepted: errors.append("Manual certificate review must be confirmed before saving.")
-                if errors:
-                    for error in errors: st.error(error)
-                else:
-                    pdf_bytes=st.session_state.get("parsed_cert_pdf_bytes")
-                    record={"cert_id":cert_id.strip(),"certificate_type":"MOORING_LINE","manufacturer":manufacturer.strip(),"material_grade":material.strip(),"diameter_mm":float(diameter_mm),"length_m":float(length_m),"ldbf_t":float(ldbf_tons) if ldbf_tons>0 else None,"minimum_breaking_load_t":float(mbl_tons),"calculated_breaking_load_t":float(calc_bl_tons) if calc_bl_tons>0 else None,"tail_tdbf_t":float(tail_mbl) if has_tail else None,"tail_length_m":float(tail_len) if has_tail else None,"standard_basis":standard.strip(),"issue_date":"","strain":strain_values,"source_text":str(cdata.get("_source_text","")),"extraction_method":str(cdata.get("_extraction_method","manual/review")),"review_status":"OPERATOR_VERIFIED","source_pdf_bytes":pdf_bytes,"source_pdf_filename":st.session_state.get("parsed_cert_filename","")}
-                    save_reviewed_certificate(record)
-                    save_certificate_to_db({"cert_id":cert_id.strip(),"manufacturer":manufacturer.strip(),"material":material.strip(),"diameter_mm":diameter_mm,"mbl_tons":mbl_tons,"length_m":length_m,"standard":standard.strip(),"issue_date":"","has_tail":"YES" if has_tail else "NO","tail_material":tail_mat.strip() if has_tail else "N/A","tail_length":tail_len if has_tail else 0.0,"tail_mbl":tail_mbl if has_tail else 0.0})
-                    st.session_state.certificates_db=load_certificates_from_db()
-                    if selected_line_name!="Nessuna (Salva solo Certificato)" and not lines_df.empty:
-                        idx=lines_df[lines_df["line_name"].astype(str)==selected_line_name].index
-                        if not idx.empty:
-                            i=idx[0]
-                            for key,val in {"cert_id":cert_id.strip(),"material":material.strip(),"diameter_mm":diameter_mm,"mbl_tons":mbl_tons,"length_m":length_m,"winch_location":winch_location,"tail_length_m":tail_len if has_tail else 0.0,"tail_mbl_tons":tail_mbl if has_tail else 0.0}.items(): lines_df.at[i,key]=val
-                            save_lines_inventory_to_db(lines_df); st.session_state.lines_inventory=load_lines_inventory_from_db()
-                    st.success(f"Certificato {cert_id} salvato, PDF archiviato e marcato OPERATOR_VERIFIED.")
-    st.divider(); st.subheader("📋 Registro Certificati")
+            for w in cdata.get('_warnings',cdata.get('warnings',[])): st.warning(w)
+            for e in cdata.get('_validation_errors',[]): st.error(e)
+            st.info('🔎 REVIEW REQUIRED — verifica i dati contro il PDF originale prima del salvataggio.')
+            weak=cdata.get('weak_link',{})
+            if weak.get('status')=='VALID':
+                st.success(f"🔗 WEAK LINK: {weak.get('weak_link_component_type')} / {weak.get('weak_link_component_id')} — {weak.get('weak_link_breaking_load_kn'):.2f} kN ({weak.get('weak_link_breaking_load_t'):.2f} t) — {weak.get('weak_link_value_label')}")
+                st.caption('Il valore governing viene usato nei calcoli come capacità di rottura conservativa della cima. Non significa che la rottura sia certa a quella tensione.')
+            elif weak: st.error(f"Weak link non determinabile: {weak.get('diagnostic','dati insufficienti')}")
+            components=_component_rows(cdata)
+            if not components.empty:
+                st.subheader('🧩 Componenti riconosciuti')
+                st.dataframe(components,use_container_width=True,hide_index=True)
+                for c in cdata.get('components',[]):
+                    with st.expander(f"{c.get('component_type')} — {c.get('component_id')} — {c.get('certificate_id')}"):
+                        st.write('Description:',c.get('item_description',''))
+                        st.write('Raw material:',c.get('raw_material',''))
+                        st.write('Final presentation:',c.get('final_presentation',''))
+    with right:
+        st.subheader('📝 Revisione / Salvataggio')
+        cdata=st.session_state.get('parsed_cert_data',{})
+        comps=cdata.get('components',[])
+        weak=cdata.get('weak_link',{})
+        # Composite documents have one logical record with component JSON. The
+        # selected line receives the weak-link capacity used by the solver.
+        first=comps[0] if comps else {}
+        cert_id=st.text_input('ID principale certificato',value=str(first.get('certificate_id',cdata.get('cert_id',''))))
+        manufacturer=st.text_input('Produttore',value=str(cdata.get('manufacturer','Gleistein GmbH' if comps else '')))
+        material=st.text_input('Componente principale / materiale',value=str(first.get('item_description',cdata.get('main_material',''))))
+        diameter=st.number_input('Diametro principale (mm)',min_value=0.0,value=float(first.get('diameter_mm') or cdata.get('main_diameter_mm',0.0)),step=1.0)
+        main_governing_t=float('nan')
+        if comps:
+            main_strength=next((c for c in comps if c.get('component_type')=='MAIN LINE'),first)
+            vals=[main_strength.get(k) for k in ('break_load_linear_kn','break_load_spliced_kn','break_load_grommet_kn') if main_strength.get(k) and float(main_strength.get(k))>0]
+            main_governing_t=(min(vals)/9.80665) if vals else 0.0
+        else: main_governing_t=float(cdata.get('main_mbl_tons',0.0))
+        st.metric('MAIN LINE governing break load',f'{main_governing_t:.2f} t' if main_governing_t==main_governing_t else 'N/A')
+        weak_t=float(weak.get('weak_link_breaking_load_t') or 0.0)
+        st.metric('🔗 ASSEMBLY WEAK LINK',f'{weak_t:.2f} t' if weak_t>0 else 'N/A')
+        accepted=st.checkbox('Confermo di aver verificato i valori contro il certificato originale.')
+        lines_df=st.session_state.get('lines_inventory',pd.DataFrame())
+        options=['Nessuna (salva solo certificato)']+(lines_df['line_name'].astype(str).tolist() if not lines_df.empty and 'line_name' in lines_df.columns else [])
+        selected=st.selectbox('Associa alla cima fisica',options)
+        if st.button('💾 Salva Certificato / Weak Link',type='primary',use_container_width=True):
+            errors=[]
+            if not cert_id.strip():errors.append('Certificate ID is required.')
+            if not manufacturer.strip():errors.append('Manufacturer is required.')
+            if not _positive(diameter):errors.append('Main diameter must be greater than zero.')
+            if not accepted:errors.append('Manual certificate review must be confirmed.')
+            if comps and weak.get('status')!='VALID':errors.append('Weak link must be determinable before assigning a composite certificate to a line.')
+            if not comps and not _positive(float(cdata.get('main_mbl_tons',0))):errors.append('Breaking load not extracted.')
+            if errors:
+                for e in errors:st.error(e)
+            else:
+                record={'cert_id':cert_id.strip(),'certificate_type':'MOORING_ASSEMBLY' if len(comps)>1 else 'MOORING_LINE','manufacturer':manufacturer.strip(),'material_grade':material.strip(),'diameter_mm':float(diameter),'length_m':float(first.get('length_m') or cdata.get('main_length_m') or 0.0),'ldbf_t':None,'tail_tdbf_t':None,'tail_length_m':None,'standard_basis':'','issue_date':'','strain':{},'source_text':str(cdata.get('_source_text',cdata.get('raw_text',''))),'extraction_method':str(cdata.get('_extraction_method','')),'review_status':'OPERATOR_VERIFIED','source_pdf_bytes':st.session_state.get('parsed_cert_pdf_bytes'),'source_pdf_filename':st.session_state.get('parsed_cert_filename',''),'components':comps,'weak_link':weak}
+                if record['length_m']<=0: record['length_m']=1.0
+                save_reviewed_certificate(record)
+                # Keep legacy register synchronized while making weak-link capacity
+                # the value consumed by the operational solver.
+                save_certificate_to_db({'cert_id':cert_id.strip(),'manufacturer':manufacturer.strip(),'material':material.strip(),'diameter_mm':diameter,'mbl_tons':weak_t if weak_t>0 else main_governing_t,'length_m':record['length_m'],'weak_point':weak.get('weak_link_component_type','Main Line'),'has_geolink':'YES' if any(c.get('component_type')=='GEOLINK' for c in comps) else 'NO','geolink_mbl':next((float(min([x for x in [c.get('break_load_linear_kn'),c.get('break_load_spliced_kn'),c.get('break_load_grommet_kn')] if x and x>0]))/9.80665 for c in comps if c.get('component_type')=='GEOLINK'),0.0),'has_tail':'YES' if any(c.get('component_type')=='TAIL' for c in comps) else 'NO','tail_material':next((c.get('raw_material','') for c in comps if c.get('component_type')=='TAIL'),'N/A'),'tail_length':next((float(c.get('length_m') or 0) for c in comps if c.get('component_type')=='TAIL'),0.0),'tail_mbl':next((float(min([x for x in [c.get('break_load_linear_kn'),c.get('break_load_spliced_kn'),c.get('break_load_grommet_kn')] if x and x>0]))/9.80665 for c in comps if c.get('component_type')=='TAIL'),0.0)})
+                if selected!='Nessuna (salva solo certificato)' and not lines_df.empty:
+                    idx=lines_df.index[lines_df['line_name'].astype(str)==selected]
+                    if len(idx):
+                        i=idx[0]
+                        updates={'cert_id':cert_id.strip(),'material':material.strip(),'diameter_mm':float(diameter),'main_mbl_tons':main_governing_t,'weak_link_mbl_tons':weak_t if weak_t>0 else main_governing_t,'weak_link_component':weak.get('weak_link_component_type','MAIN LINE'),'weak_link_value_label':weak.get('weak_link_value_label',''),'mbl_tons':weak_t if weak_t>0 else main_governing_t}
+                        for k,v in updates.items():lines_df.at[i,k]=v
+                        save_lines_inventory_to_db(lines_df);st.session_state['lines_inventory']=load_lines_inventory_from_db()
+                st.session_state['certificates_db']=load_certificates_from_db();st.success(f'Certificato {cert_id} salvato. Weak link = {weak.get("weak_link_component_id","N/A")} @ {weak_t:.2f} t.')
+    st.divider();st.subheader('📋 Registro Certificati')
     records=load_certificate_records()
     if records:
-        display=pd.DataFrame(records); st.dataframe(display,use_container_width=True,hide_index=True); st.markdown("### 📎 Documento originale")
-        cert_options=display["cert_id"].astype(str).tolist(); selected_cert=st.selectbox("Seleziona certificato",cert_options,key="certificate_document_selector"); document=get_certificate_pdf(selected_cert)
-        if document and document.get("source_pdf_blob"):
-            st.caption(f"File: {document.get('source_pdf_filename') or 'certificate.pdf'} | SHA-256: {document.get('source_pdf_sha256','')}")
-            st.download_button("⬇️ Apri / scarica PDF originale",data=document["source_pdf_blob"],file_name=document.get("source_pdf_filename") or f"{selected_cert}.pdf",mime="application/pdf",use_container_width=True)
-        else: st.caption("Nessun PDF originale archiviato per questo certificato.")
-    else: st.caption("Nessun certificato revisionato presente nel database.")
+        display=pd.DataFrame(records);st.dataframe(display,use_container_width=True,hide_index=True)
+        ids=display['cert_id'].astype(str).tolist(); sel=st.selectbox('Documento originale',ids,key='certificate_document_selector'); doc=get_certificate_pdf(sel)
+        if doc and doc.get('source_pdf_blob'):st.download_button('⬇️ Apri / scarica PDF originale',data=doc['source_pdf_blob'],file_name=doc.get('source_pdf_filename') or f'{sel}.pdf',mime='application/pdf',use_container_width=True)
+    else:st.caption('Nessun certificato revisionato presente nel database.')
