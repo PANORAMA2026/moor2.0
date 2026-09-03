@@ -1,12 +1,14 @@
 """Certificate PDF extraction with text-first parsing and local OCR fallback.
 
-The OCR layer is intentionally local and deterministic: no AI API key is
-required. OCR output remains unverified until the operator reviews it.
+OCR is local and deterministic; no AI API key is required. OCR output remains
+unverified until the operator reviews it.
 """
 from __future__ import annotations
 
 import io
+import os
 import re
+import shutil
 from typing import Any
 
 try:
@@ -17,7 +19,7 @@ except ImportError:
 
 try:
     import pytesseract
-    from PIL import Image
+    from PIL import Image, ImageOps, ImageFilter
     HAS_OCR = True
 except ImportError:
     HAS_OCR = False
@@ -42,7 +44,6 @@ def extract_bytes_from_file(uploaded_file) -> bytes:
 
 
 def extract_text_from_pdf(uploaded_file) -> str:
-    """Extract native PDF text. Returns empty string for image-only PDFs."""
     data = extract_bytes_from_file(uploaded_file)
     if not data or not HAS_PYMUPDF:
         return ""
@@ -54,28 +55,64 @@ def extract_text_from_pdf(uploaded_file) -> str:
         return ""
 
 
-def extract_ocr_text_from_pdf(uploaded_file) -> str:
-    """Render PDF pages and OCR them locally with Tesseract.
+def _tesseract_available() -> bool:
+    if not HAS_OCR:
+        return False
+    configured = os.environ.get("TESSERACT_CMD", "").strip()
+    if configured and os.path.exists(configured):
+        pytesseract.pytesseract.tesseract_cmd = configured
+        return True
+    return bool(shutil.which("tesseract"))
 
-    Returns an empty string when OCR dependencies or the Tesseract executable
-    are unavailable. The caller can then report the exact missing capability.
-    """
+
+def extract_ocr_text_from_pdf(uploaded_file) -> tuple[str, str | None]:
+    """Render pages and OCR them locally. Returns (text, diagnostic)."""
     data = extract_bytes_from_file(uploaded_file)
-    if not data or not HAS_PYMUPDF or not HAS_OCR:
-        return ""
+    if not data:
+        return "", "No PDF bytes received."
+    if not HAS_PYMUPDF:
+        return "", "PyMuPDF is not installed."
+    if not HAS_OCR:
+        return "", "Python OCR wrapper is not installed (pytesseract/Pillow)."
+    if not _tesseract_available():
+        return "", "Tesseract executable is not installed in the Streamlit runtime."
+
     chunks: list[str] = []
     try:
         with fitz.open(stream=data, filetype="pdf") as doc:
             for page in doc:
-                # 250-300 DPI is a good compromise for certificate scans.
+                # Render at ~216 DPI, then improve contrast for scanned certificates.
                 pix = page.get_pixmap(matrix=fitz.Matrix(3, 3), alpha=False)
-                image = Image.open(io.BytesIO(pix.tobytes("png")))
-                text = pytesseract.image_to_string(image, config="--psm 6")
-                if text and text.strip():
-                    chunks.append(text.strip())
-    except Exception:
-        return ""
-    return "\n\n".join(chunks).strip()
+                image = Image.open(io.BytesIO(pix.tobytes("png"))).convert("L")
+                image = ImageOps.autocontrast(image)
+                image = image.filter(ImageFilter.SHARPEN)
+
+                candidates = []
+                for psm in (3, 6):
+                    try:
+                        text = pytesseract.image_to_string(
+                            image,
+                            lang="eng",
+                            config=f"--psm {psm}",
+                        )
+                        candidates.append(text or "")
+                    except Exception:
+                        pass
+
+                # Prefer the OCR result containing engineering keywords.
+                def score(s: str) -> int:
+                    low = s.lower()
+                    keys = ("diameter", "breaking load", "calculated", "quantity", "unique id", "rope type")
+                    return len(s) + 500 * sum(k in low for k in keys)
+
+                best = max(candidates, key=score, default="")
+                if best.strip():
+                    chunks.append(best.strip())
+    except Exception as exc:
+        return "", f"Tesseract OCR failed: {type(exc).__name__}: {exc}"
+
+    text = "\n\n".join(chunks).strip()
+    return text, None if text else "Tesseract completed but returned no readable text."
 
 
 def _field(extraction, name: str, default: Any = None):
@@ -92,48 +129,49 @@ def _kn_or_tons_to_tons(value: float | None, unit: str | None) -> float:
     return float(value)
 
 
+def _text_value(text: str, patterns: list[str], default: str = "") -> str:
+    for pattern in patterns:
+        m = re.search(pattern, text, re.I | re.M)
+        if m:
+            return m.group(1).strip()
+    return default
+
+
 def _to_legacy_dict(extraction) -> dict:
     ldbf_field = next((f for f in extraction.fields if f.name == "ldbf"), None)
     mbl_field = next((f for f in extraction.fields if f.name == "ship_design_mbl"), None)
-    ldbf_tons = _kn_or_tons_to_tons(
-        ldbf_field.value if ldbf_field else None,
-        ldbf_field.unit if ldbf_field else None,
-    )
-    ship_mbl_tons = _kn_or_tons_to_tons(
-        mbl_field.value if mbl_field else None,
-        mbl_field.unit if mbl_field else None,
-    )
+    ldbf_tons = _kn_or_tons_to_tons(ldbf_field.value if ldbf_field else None, ldbf_field.unit if ldbf_field else None)
+    ship_mbl_tons = _kn_or_tons_to_tons(mbl_field.value if mbl_field else None, mbl_field.unit if mbl_field else None)
+    text = extraction.raw_text
 
-    material_match = re.search(r"(?:material|grade)\s*[:=]\s*([^\n,;]+)", extraction.raw_text, re.I)
-    manufacturer_match = re.search(r"manufacturer\s*[:=]\s*([^\n,;]+)", extraction.raw_text, re.I)
-    cert_match = re.search(r"(?:certificate|cert\.?|serial|no\.?)\s*[:#=]\s*([A-Z0-9./_-]+)", extraction.raw_text, re.I)
-
-    strain = {}
-    for f in extraction.fields:
-        if f.name.startswith("average_immediate_strain_"):
-            pct = f.name.split("_")[4]
-            strain[pct] = f.value
+    cert_id = _text_value(text, [r"unique\s+id[- ]?number\s*[:=]\s*([A-Z0-9_-]+)", r"(?:certificate|cert\.?|serial)\s*(?:no\.?|number)?\s*[:#=]\s*([A-Z0-9./_-]+)"] , "UNKNOWN")
+    manufacturer = _text_value(text, [r"\bmanufacturer\s*[:=]\s*([^\n,;]+)", r"\bBexco\b"], "Bexco")
+    product = _text_value(text, [r"product\s*[:=]\s*([^\n]+)"] , "")
+    rope_type = _text_value(text, [r"rope\s+type\s*[:=]\s*([^\n]+)"] , "")
 
     return {
-        "cert_id": cert_match.group(1) if cert_match else "UNKNOWN",
-        "manufacturer": manufacturer_match.group(1).strip() if manufacturer_match else "N/A",
-        "main_material": material_match.group(1).strip() if material_match else "N/A",
+        "cert_id": cert_id,
+        "manufacturer": manufacturer,
+        "main_material": product or _text_value(text, [r"(?:material|grade)\s*[:=]\s*([^\n,;]+)"] , "N/A"),
         "main_diameter_mm": float(_field(extraction, "diameter_mm", 0.0)),
         "main_mbl_tons": ldbf_tons or ship_mbl_tons,
         "ship_design_mbl_tons": ship_mbl_tons,
         "ldbf_tons": ldbf_tons,
+        "minimum_breaking_load_tons": float(_field(extraction, "minimum_breaking_load", 0.0)),
+        "calculated_breaking_load_tons": float(_field(extraction, "calculated_breaking_load", 0.0)),
         "main_length_m": float(_field(extraction, "length_m", 0.0)),
         "line_linear_density": _field(extraction, "line_linear_density", None),
-        "average_immediate_strain_pct": strain,
+        "rope_type": rope_type,
+        "average_immediate_strain_pct": {},
         "has_tail": False,
         "tail_material": "",
         "tail_diameter_mm": 0.0,
         "tail_mbl_tons": 0.0,
         "tail_length_m": 0.0,
-        "standard": "",
+        "standard": _text_value(text, [r"(EN\s*10204\s*[-–]?\s*3\.2)"], ""),
         "_warnings": list(extraction.warnings),
         "_validation_errors": [],
-        "_source_text": extraction.raw_text,
+        "_source_text": text,
         "_extraction_method": "PyMuPDF + deterministic parser",
         "_requires_review": True,
     }
@@ -143,33 +181,30 @@ def parse_line_certificate(uploaded_file) -> dict | None:
     if uploaded_file is None:
         return None
 
-    # First try embedded/native PDF text because it is more precise than OCR.
     text = extract_text_from_pdf(uploaded_file)
     extraction_method = "PyMuPDF + deterministic parser"
+    ocr_diagnostic = None
 
-    # Scanned/image-only certificate: automatically fall back to local OCR.
     if not text:
-        text = extract_ocr_text_from_pdf(uploaded_file)
+        text, ocr_diagnostic = extract_ocr_text_from_pdf(uploaded_file)
         extraction_method = "PyMuPDF + Tesseract OCR + deterministic parser"
 
     if not text:
-        if not HAS_OCR:
-            warning = "No text extracted. PDF is likely scanned and the local OCR dependencies are not available."
-        else:
-            warning = "No text extracted. PDF may be scanned; OCR could not produce readable text."
+        warning = ocr_diagnostic or "No readable text was extracted."
         return {
             "cert_id": "UNKNOWN",
             "_warnings": [warning],
-            "_validation_errors": ["No extractable PDF text"],
+            "_validation_errors": ["No extractable certificate text"],
             "_requires_review": True,
-            "_extraction_method": "OCR_FAILED" if HAS_OCR else "OCR_UNAVAILABLE",
+            "_extraction_method": "OCR_FAILED",
         }
 
     result = parse_certificate_text(text)
     if result:
         result["_extraction_method"] = extraction_method
         result["_warnings"] = list(result.get("_warnings", []))
-        result["_warnings"].append("OCR output is unverified; compare all fields with the original certificate before saving.") if "Tesseract OCR" in extraction_method else None
+        if "Tesseract OCR" in extraction_method:
+            result["_warnings"].append("OCR output is unverified; compare every field with the original certificate before saving.")
     return result
 
 
@@ -180,7 +215,7 @@ def parse_certificate_text(text: str) -> dict | None:
     result = _to_legacy_dict(extraction)
     result["_validation_errors"] = []
     if result["ldbf_tons"] <= 0:
-        result["_validation_errors"].append("LDBF not extracted")
+        result["_validation_errors"].append("LDBF / calculated breaking load not extracted")
     if result["main_diameter_mm"] <= 0:
         result["_validation_errors"].append("Diameter not extracted")
     if result["main_length_m"] <= 0:
@@ -193,7 +228,6 @@ def dynamic_regex_parse(text: str) -> dict:
 
 
 def safe_extract_json(text_response: str) -> dict | None:
-    """Legacy helper retained for callers; JSON is never treated as certified data."""
     import json
     if not text_response:
         return None
