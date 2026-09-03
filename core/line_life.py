@@ -112,7 +112,7 @@ def summarize_exposure(
 
     if not rows:
         status = "NO_DATA"
-        reason = "No valid session exposure data."
+        reason = "No valid session exposure data; no replacement decision can be made."
     else:
         status = "DATA_ONLY"
         reason = (
