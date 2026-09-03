@@ -1,6 +1,8 @@
-"""
-views/tab_history.py
-Storico ormeggi, degrado cavi e manutenzione predittiva.
+"""Line lifecycle wrap-up: exposure, inspections and certificate linkage.
+
+This view deliberately does not invent rope retirement, end-for-ending or
+replacement thresholds. Any engineering status must come from manufacturer,
+MEG4, class/RO or the vessel SMS criteria once those criteria are configured.
 """
 
 import pandas as pd
@@ -9,21 +11,19 @@ import streamlit as st
 
 
 def ensure_table_exists(conn):
-    """Crea la tabella 'line_history' se non esiste usando executescript per evitare errori SQL."""
     try:
         cursor = conn.cursor()
-        schema_sql = """
+        cursor.executescript("""
         CREATE TABLE IF NOT EXISTS line_history (
             line_id TEXT PRIMARY KEY,
             line_name TEXT,
             cert_id TEXT,
             accumulated_hours REAL DEFAULT 0.0,
             high_load_hours REAL DEFAULT 0.0,
-            max_design_hours REAL DEFAULT 2000.0,
+            max_design_hours REAL,
             fatigue_index REAL DEFAULT 0.0
         );
-        """
-        cursor.executescript(schema_sql)
+        """)
         conn.commit()
     except Exception as e:
         st.sidebar.warning(f"Note DB: {e}")
@@ -32,95 +32,58 @@ def ensure_table_exists(conn):
 def get_lines_health_status():
     if "db_conn" not in st.session_state or st.session_state.db_conn is None:
         return pd.DataFrame()
-
     conn = st.session_state.db_conn
-
-    # Garanzia della presenza della tabella nel database
     ensure_table_exists(conn)
-
-    # Esecuzione query in sicurezza
     try:
         df = pd.read_sql_query("SELECT * FROM line_history", conn)
     except Exception:
-        # Se la tabella è vuota o inaccessibile restituisce dataframe vuoto senza crash
         return pd.DataFrame()
-
     if df.empty:
         return df
 
-    # Inizializzazione colonne mancanti con valori di default
-    default_cols = {
-        "max_design_hours": 2000.0,
-        "accumulated_hours": 0.0,
-        "fatigue_index": 0.0,
+    defaults = {
         "line_name": "Line",
         "line_id": "-",
         "cert_id": "-",
-        "high_load_hours": 0.0
+        "accumulated_hours": 0.0,
+        "high_load_hours": 0.0,
+        "fatigue_index": 0.0,
     }
-    for col, default_val in default_cols.items():
+    for col, default in defaults.items():
         if col not in df.columns:
-            df[col] = default_val
-        elif col in ["max_design_hours", "accumulated_hours", "fatigue_index"]:
-            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(default_val)
+            df[col] = default
+    for col in ["accumulated_hours", "high_load_hours", "fatigue_index"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
 
-    health_percent = []
-    recommendations = []
-
-    for _, row in df.iterrows():
-        max_h = row["max_design_hours"] if row["max_design_hours"] > 0 else 2000.0
-        hours_used_pct = (row["accumulated_hours"] / max_h) * 100.0
-        fatigue_pct = (row["fatigue_index"] / 300.0) * 100.0
-        wear_pct = max(hours_used_pct, fatigue_pct)
-        remaining_health = max(0.0, 100.0 - wear_pct)
-
-        health_percent.append(remaining_health)
-
-        if remaining_health <= 20.0:
-            recommendations.append("🚨 SOSTITUZIONE IMMINENTE: Cavo a fine vita utile!")
-        elif remaining_health <= 40.0:
-            recommendations.append("⚠️ ISPEZIONE: Valutare rotazione testa-coda (End-for-End).")
-        else:
-            recommendations.append("✅ IDONEO: Condizioni operative regolari.")
-
-    df["Health_Percent"] = health_percent
-    df["Recommendation"] = recommendations
+    # Status is intentionally informational only until authoritative criteria exist.
+    df["Assessment"] = "DATA ONLY — engineering criteria not configured"
     return df
 
 
 def render_tab_history():
-    st.header("📈 Registro Storico Usura & Suggerimento Sostituzione Cavi")
+    st.header("📈 Storico & Usura Cavi")
+    st.caption("Wrap-up della vita operativa dei cavi: esposizione, carichi, certificato e storico ispezioni.")
 
     health_df = get_lines_health_status()
-
     if not health_df.empty:
-        fig_health = px.bar(
+        fig = px.bar(
             health_df,
             x="line_name",
-            y="Health_Percent",
-            color="Health_Percent",
-            color_continuous_scale=["red", "yellow", "green"],
-            range_color=[0, 100],
+            y="accumulated_hours",
+            hover_data=[c for c in ["high_load_hours", "fatigue_index", "cert_id"] if c in health_df.columns],
+            labels={"accumulated_hours": "Accumulated exposure [h]", "line_name": "Line"},
         )
-        fig_health.add_hline(
-            y=20,
-            line_dash="dash",
-            line_color="red",
-            annotation_text="Soglia Sostituzione (20%)",
-        )
-        st.plotly_chart(fig_health, use_container_width=True)
+        fig.update_layout(title="Operational exposure by line")
+        st.plotly_chart(fig, use_container_width=True)
 
-        cols_to_display = [
-            "line_id",
-            "line_name",
-            "cert_id",
-            "accumulated_hours",
-            "high_load_hours",
-            "Health_Percent",
-            "Recommendation",
+        summary_cols = [
+            "line_id", "line_name", "cert_id", "accumulated_hours",
+            "high_load_hours", "fatigue_index", "Assessment",
         ]
-        available_cols = [c for c in cols_to_display if c in health_df.columns]
-
-        st.dataframe(health_df[available_cols], use_container_width=True)
+        st.dataframe(health_df[[c for c in summary_cols if c in health_df.columns]], use_container_width=True, hide_index=True)
+        st.info(
+            "⚠️ Nessuna soglia automatica di fine vita o sostituzione viene applicata. "
+            "L'app conserva i dati per la valutazione secondo criteri approvati e configurati."
+        )
     else:
         st.info("Nessun dato di storico ancora registrato nel database.")
