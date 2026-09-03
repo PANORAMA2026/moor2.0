@@ -25,13 +25,17 @@ class CertificateExtraction:
     def get(self, name: str):
         return next((f.value for f in self.fields if f.name == name), None)
 
+# Keep the legacy parser compatible with common MEG4 certificate wording,
+# including labels such as "Line Design Break Force (LDBF): ..." and
+# "Tail Design Break Force (TDBF): ...". This parser does not infer LDBF
+# from a differently labelled calculated/minimum breaking load.
 FIELD_PATTERNS = {
     "ship_design_mbl": [r"ship\s+design\s+mbl\s*[:=]?\s*([\d.,]+)\s*(kn|t|tonnes?|tons?)?"],
-    "ldbf": [r"(?:line\s+design\s+break\s+force|ldbf)\s*[:=]?\s*([\d.,]+)\s*(kn|t|tonnes?|tons?)?"],
+    "ldbf": [r"(?:line\s+design\s+break\s+force|ldbf)\s*(?:\(\s*ldbf\s*\))?\s*[:=]?\s*([\d.,]+)\s*(kn|t|tonnes?|tons?)?"],
     "diameter_mm": [r"(?:rope\s+)?diam(?:eter)?\s*[:=]?\s*([\d.,]+)\s*mm\b"],
     "length_m": [r"length\s*[:=]?\s*([\d.,]+)\s*(m|meter|metre|ft)\b", r"quantity\s*[:=]?\s*\d+\s*x\s*([\d.,]+)\s*m\b"],
     "line_linear_density": [r"line\s+linear\s+density\s*[:=]?\s*([\d.,]+)\s*(kg/m|kg/m2)?"],
-    "tail_design_break_force": [r"(?:tail\s+design\s+break\s+force|tdbf)\s*[:=]?\s*([\d.,]+)\s*(kn|t|tonnes?|tons?)?"],
+    "tail_design_break_force": [r"(?:tail\s+design\s+break\s+force|tdbf)\s*(?:\(\s*tdbf\s*\))?\s*[:=]?\s*([\d.,]+)\s*(kn|t|tonnes?|tons?)?"],
     "tail_linear_density": [r"tail\s+linear\s+density\s*[:=]?\s*([\d.,]+)"],
     "minimum_breaking_load": [r"(?:minimum|min\.?)\s+breaking\s+load(?:\s+(?:of|for))?(?:\s+rope)?\s*[:=]?\s*([\d.,]+)\s*(kn|t|tonnes?|tons?)\b", r"\bmbl\s*[:=]?\s*([\d.,]+)\s*(kn|t|tonnes?|tons?)\b"],
     "calculated_breaking_load": [r"calculated\s+breaking\s+load(?:\s+rope)?\s*[:=]?\s*([\d.,]+)\s*(kn|t|tonnes?|tons?)\b"],
