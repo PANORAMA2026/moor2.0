@@ -27,15 +27,16 @@ class CertificateExtraction:
 
 # Keep the legacy parser compatible with common MEG4 certificate wording,
 # including labels such as "Line Design Break Force (LDBF): ..." and
-# "Tail Design Break Force (TDBF): ...". This parser does not infer LDBF
-# from a differently labelled calculated/minimum breaking load.
+# "Tail Design Break Force (TDBF): ...". The LDBF/TDBF patterns are anchored
+# to the start of a line so references such as "10% LDBF" in strain tables are
+# not mistaken for the declared break-force field.
 FIELD_PATTERNS = {
     "ship_design_mbl": [r"ship\s+design\s+mbl\s*[:=]?\s*([\d.,]+)\s*(kn|t|tonnes?|tons?)?"],
-    "ldbf": [r"(?:line\s+design\s+break\s+force|ldbf)\s*(?:\(\s*ldbf\s*\))?\s*[:=]?\s*([\d.,]+)\s*(kn|t|tonnes?|tons?)?"],
+    "ldbf": [r"(?:^|\n)\s*(?:line\s+design\s+break\s+force\s*(?:\(\s*ldbf\s*\))?|ldbf)\s*[:=]\s*([\d.,]+)\s*(kn|t|tonnes?|tons?)?"],
     "diameter_mm": [r"(?:rope\s+)?diam(?:eter)?\s*[:=]?\s*([\d.,]+)\s*mm\b"],
     "length_m": [r"length\s*[:=]?\s*([\d.,]+)\s*(m|meter|metre|ft)\b", r"quantity\s*[:=]?\s*\d+\s*x\s*([\d.,]+)\s*m\b"],
     "line_linear_density": [r"line\s+linear\s+density\s*[:=]?\s*([\d.,]+)\s*(kg/m|kg/m2)?"],
-    "tail_design_break_force": [r"(?:tail\s+design\s+break\s+force|tdbf)\s*(?:\(\s*tdbf\s*\))?\s*[:=]?\s*([\d.,]+)\s*(kn|t|tonnes?|tons?)?"],
+    "tail_design_break_force": [r"(?:^|\n)\s*(?:tail\s+design\s+break\s+force\s*(?:\(\s*tdbf\s*\))?|tdbf)\s*[:=]\s*([\d.,]+)\s*(kn|t|tonnes?|tons?)?"],
     "tail_linear_density": [r"tail\s+linear\s+density\s*[:=]?\s*([\d.,]+)"],
     "minimum_breaking_load": [r"(?:minimum|min\.?)\s+breaking\s+load(?:\s+(?:of|for))?(?:\s+rope)?\s*[:=]?\s*([\d.,]+)\s*(kn|t|tonnes?|tons?)\b", r"\bmbl\s*[:=]?\s*([\d.,]+)\s*(kn|t|tonnes?|tons?)\b"],
     "calculated_breaking_load": [r"calculated\s+breaking\s+load(?:\s+rope)?\s*[:=]?\s*([\d.,]+)\s*(kn|t|tonnes?|tons?)\b"],
@@ -52,7 +53,7 @@ def _extract_from_text(text: str, page: int|None=None, certificate_type: str='MO
     normalized=re.sub(r'[\t ]+',' ',text)
     for name,patterns in FIELD_PATTERNS.items():
         matches=[]
-        for p in patterns: matches += list(re.finditer(p,normalized,re.I))
+        for p in patterns: matches += list(re.finditer(p,normalized,re.I|re.M))
         if not matches: continue
         vals={_number(m.group(1)) for m in matches}
         if len(vals)!=1:
