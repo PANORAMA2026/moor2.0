@@ -9,11 +9,11 @@ from core.auth import require_login, logout_button
 from core.ai_inspection import ai_is_configured, inspect_image, save_inspection, list_inspections, get_inspection_image, confirm_inspection
 from core.setup_store import list_setup_names, load_setup
 
-st.set_page_config(page_title="Line Inspector — OpenMooring", layout="wide")
 if not require_login(): st.stop()
 logout_button()
+st.set_page_config(page_title="Line Inspector — OpenMooring", layout="wide")
 st.title("🪢 Line Inspector")
-st.caption("Una linea, un record: configurazione → certificato → tensione → esposizione → ispezione visiva AI.")
+st.caption("Una linea, un record: configurazione → certificato → tensione → esposizione → inspection history.")
 
 inventory=st.session_state.get("lines_inventory",pd.DataFrame()); results=st.session_state.get("latest_mooring_results",pd.DataFrame())
 cert_records=pd.DataFrame(load_certificate_records())
@@ -23,15 +23,13 @@ if id_col is None: st.error("Line inventory senza line_id."); st.stop()
 name_col="line_name" if "line_name" in inventory.columns else None
 inventory=inventory.copy(); inventory[id_col]=inventory[id_col].astype(str)
 labels=inventory.apply(lambda r:f"{r[id_col]} — {r[name_col]}" if name_col and str(r[name_col]).strip() else str(r[id_col]),axis=1).tolist()
-preselected=str(st.session_state.pop("selected_line_id", "")).strip()
-default_index=labels.index(next((label for label in labels if label.split(" — ",1)[0]==preselected), labels[0])) if preselected else 0
-choice=st.selectbox("Seleziona linea",labels,index=default_index); selected_id=str(inventory.iloc[labels.index(choice)][id_col]); line=inventory[inventory[id_col]==selected_id].iloc[0]
+choice=st.selectbox("Seleziona linea",labels); selected_id=str(inventory.iloc[labels.index(choice)][id_col]); line=inventory[inventory[id_col]==selected_id].iloc[0]
 live=pd.DataFrame()
 if isinstance(results,pd.DataFrame) and not results.empty and "line_id" in results.columns: live=results[results.line_id.astype(str)==selected_id].copy()
 
 c1,c2,c3,c4=st.columns(4)
-if not live.empty and pd.notna(live.iloc[0].get("Tension_tons")):
-    c1.metric("CALCULATED TENSION",f"{float(live.iloc[0]['Tension_tons']):.2f} t"); c2.metric("UTILIZATION",f"{float(live.iloc[0].get('Util_Percent',float('nan'))):.1f}%"); c3.metric("MBL",f"{float(live.iloc[0].get('mbl_tons',line.get('mbl_tons',0))):.2f} t"); c4.metric("SOLVER",str(live.iloc[0].get("Solver_Status","N/A")))
+if not live.empty and pd.notna(live.iloc[0].get("Tension_t")):
+    c1.metric("CALCULATED TENSION",f"{float(live.iloc[0]['Tension_t']):.2f} t"); c2.metric("UTILIZATION",f"{float(live.iloc[0].get('Util_Percent',float('nan'))):.1f}%"); c3.metric("MBL",f"{float(live.iloc[0].get('mbl_tons',line.get('mbl_tons',0))):.2f} t"); c4.metric("SOLVER",str(live.iloc[0].get("Solver_Status","N/A")))
 else:
     c1.metric("CALCULATED TENSION","N/A"); c2.metric("UTILIZATION","N/A"); c3.metric("MBL",f"{float(line.get('mbl_tons',0) or 0):.2f} t" if pd.notna(line.get('mbl_tons',0)) else "N/A"); c4.metric("SOLVER","No current result")
 
@@ -65,7 +63,7 @@ with right:
     else:
         history["tension_t"]=history.tension_n/9806.65; history["duration_min"]=history.duration_s/60; a,b=st.columns(2); a.metric("EXPOSURE",f"{history.duration_s.sum()/3600:.2f} h"); b.metric("MAX UTILIZATION",f"{history.utilization_pct.max():.1f}%" if pd.notna(history.utilization_pct.max()) else "N/A"); st.dataframe(history[["timestamp_utc","tension_t","utilization_pct","duration_min","source"]],use_container_width=True,hide_index=True); st.caption("SOLVER_FORECAST = equilibrio statico calcolato; non è un carico misurato.")
 
-st.divider(); st.markdown("## 🤖 AI Visual Inspection")
+st.divider(); st.markdown("## 🤖 Visual Inspection")
 st.caption("La funzione AI è integrata nel Line Inspector. Analizza solo ciò che è visibile nella foto; l'operatore deve confermare l'osservazione.")
 if not ai_is_configured():
     st.warning("GEMINI_API_KEY non configurata nei Secrets di Streamlit.")
@@ -90,7 +88,7 @@ else:
         if st.button("✅ Conferma osservazione AI",key=f"confirm_{result['inspection_id']}"):
             confirm_inspection(result["inspection_id"],note); result["operator_status"]="OPERATOR_CONFIRMED"; st.session_state["last_ai_inspection_result"]=result; st.success("Osservazione confermata e archiviata nello storico della linea.")
 
-st.divider(); st.markdown("### 🗂️ AI inspection history")
+st.divider(); st.markdown("### 🗂️ Inspection History")
 for item in list_inspections(selected_id):
     with st.expander(f"{item['timestamp_utc']} · {item['overall_severity']} · {item['operator_status']}"):
         st.write(item.get("ai_summary", "")); st.caption(f"Provider: {item.get('provider','Google Gemini')} · Model: {item.get('model','')}")
