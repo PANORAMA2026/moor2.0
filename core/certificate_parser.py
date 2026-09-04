@@ -42,16 +42,54 @@ def parse_certificate_text(text: str, certificate_type: str="AUTO"):
     if certificate_type=="AUTO": certificate_type="MOORING_LINE"
     r=CertificateExtraction(certificate_type=certificate_type,raw_text=text,pages_with_text=1 if text.strip() else 0,total_pages=1 if text.strip() else 0,extraction_method="text")
     aliases={
-      "certificate_id":[r"certificate\s*(?:no\.?|number)\s*[:#=]?\s*([A-Z0-9][A-Z0-9./_-]*)",r"our\s+ref(?:erence)?\s*[:=]\s*([A-Z0-9][A-Z0-9./_-]*(?:\s*/\s*\d+)?)",r"report\s+(?:no\.?|number)\s*[:#=]\s*([A-Z0-9][A-Z0-9./_-]*)"],
-      "component_id":[r"unique\s+id[- ]?number\s*[:=\-]\s*([A-Z0-9][A-Z0-9._/-]*)",r"product\s+identification\s+code\s*\(\s*PIC\s*\)\s*[:=\-]?\s*([A-Z0-9][A-Z0-9._/-]*)",r"(?:rope|product|item)\s+identification(?:\s+code)?\s*[:=\-]\s*([A-Z0-9][A-Z0-9._/-]*)",r"(?:serial|unique|rope)\s*(?:no\.?|number|id)\s*[:#=\-]\s*([A-Z0-9][A-Z0-9._/-]*)"],
+      "certificate_id":[
+          r"certificate\s*(?:no\.?|number)\s*[:#=]?\s*([A-Z0-9][A-Z0-9./_-]*)",
+          r"our\s+ref(?:erence)?\s*[:=]\s*([A-Z0-9][A-Z0-9./_-]*(?:\s*/\s*\d+)?)",
+          r"report\s+(?:no\.?|number)\s*[:#=]\s*([A-Z0-9][A-Z0-9./_-]*)"
+      ],
+      "component_id":[
+          # PIC is commonly printed as a standalone value in certificate tables.
+          r"product\s+identification\s+code\s*\(\s*PIC\s*\)\s*[:=\-]?\s*([A-Z0-9][A-Z0-9._/-]*)",
+          r"\bPIC\s*[:=\-]?\s*([A-Z0-9][A-Z0-9._/-]*)",
+          r"unique\s+id[- ]?number\s*[:=\-]\s*([A-Z0-9][A-Z0-9._/-]*)",
+          r"(?:rope|product|item)\s+identification(?:\s+code)?\s*[:=\-]\s*([A-Z0-9][A-Z0-9._/-]*)",
+          r"(?:serial|unique|rope)\s*(?:no\.?|number|id)\s*[:#=\-]\s*([A-Z0-9][A-Z0-9._/-]*)"
+      ],
       "manufacturer":[r"(?:manufacturer|producer)\s*[:=\-]\s*([^\n]+)",r"examination\s+performed\s+by\s*[:=\-]\s*([^\n]+)"],
-      "product":[r"product\s*[:=\-]\s*([^\n]+)",r"description\s*[:=\-]\s*([^\n]+)"],
-      "diameter_mm":[r"(?:nominal\s+)?diam(?:eter)?\s*(?:\(\s*mm\s*\))?\s*[:=\-]?\s*(\d+(?:[.,]\d+)?)\s*mm\b",r"(?:nominal\s+)?diam(?:eter)?[^\n]{0,60}?\b(\d+(?:[.,]\d+)?)\s*mm\b",r"\b(?:DIA|Ø)\s*[:=\-]?\s*(\d+(?:[.,]\d+)?)\s*mm\b"],
-      "length_m":[r"length\s*(?:\([^)]*m[^)]*\))?\s*[:=\-]?\s*(?:\d+\s*[x×]\s*)?(\d+(?:[.,]\d+)?)\s*m\b",r"quantity\s*[:=\-]?\s*\d+\s*[x×]\s*(\d+(?:[.,]\d+)?)\s*m\b",r"\bCL\s*(\d+(?:[.,]\d+)?)\s*MTR\b",r"\b(\d+(?:[.,]\d+)?)\s*m\s*(?:long|length)\b"],
-      "minimum_breaking_load_kn":[r"(?:minimum|min)\s+breaking\s+load[^\n]{0,90}?([\d.,]+)\s*kN\b"],
+      "product":[
+          r"product\s*[:=\-]\s*([^\n]+)",
+          r"description\s*[:=\-]\s*([^\n]+)",
+          r"product\s+(?:name|type)\s*[:=\-]\s*([^\n]+)"
+      ],
+      "diameter_mm":[
+          r"(?:nominal\s+)?diam(?:eter)?\s*(?:\(\s*mm\s*\))?\s*[:=\-]?\s*(\d+(?:[.,]\d+)?)\s*mm\b",
+          r"(?:nominal\s+)?diam(?:eter)?[^\n]{0,80}?\b(\d+(?:[.,]\d+)?)\s*mm\b",
+          r"\b(?:DIA|Ø)\s*[:=\-]?\s*(\d+(?:[.,]\d+)?)\s*mm\b"
+      ],
+      "length_m":[
+          r"length\s*(?:\([^)]*m[^)]*\))?\s*[:=\-]?\s*(?:\d+\s*[x×]\s*)?(\d+(?:[.,]\d+)?)\s*m\b",
+          r"delivered\s+quantity[^\n]{0,80}?\n\s*\d+\s*[x×]\s*(\d+(?:[.,]\d+)?)\s*m\b",
+          r"quantity\s*[:=\-]?\s*\d+\s*[x×]\s*(\d+(?:[.,]\d+)?)\s*m\b",
+          r"\bCL\s*[:=\-]?\s*(\d+(?:[.,]\d+)?)\s*M(?:TR|ETER|ETERS)?\b",
+          r"\b(\d+(?:[.,]\d+)?)\s*m\s*(?:long|length)\b"
+      ],
+      "minimum_breaking_load_kn":[
+          r"(?:minimum|min)\s+breaking\s+load[^\n]{0,120}?([\d.,]+)\s*kN\b",
+          r"\bMBL\b(?:\s*\([^)]*\))?[^\n]{0,100}?([\d.,]+)\s*kN\b",
+          r"\b(?:minimum\s+)?breaking\s+load\s*\(?\s*MBL\s*\)?[^\n]{0,100}?([\d.,]+)\s*kN\b"
+      ],
       "calculated_breaking_load_kn":[r"calculated\s+breaking\s+load[^\n]{0,90}?([\d.,]+)\s*kN\b"],
-      "ldbf_kn":[r"(?:line\s*/\s*tail|line|tail)\s+design\s+break\s+force\s*\(?(?:ldbf|tdbf)\)?[^\n]{0,60}?([\d.,]+)\s*kN\b",r"\bLDBF\b[^\n]{0,35}?([\d.,]+)\s*kN\b"],
-      "tdbf_kn":[r"\bTDBF\b[^\n]{0,35}?([\d.,]+)\s*kN\b"],
+      "ldbf_kn":[
+          r"(?:line\s*/\s*tail|line|tail)\s+design\s+break\s+force\s*\(?(?:ldbf|tdbf)\)?[^\n]{0,80}?([\d.,]+)\s*kN\b",
+          r"\bLDBF(?:\s*/\s*TDBF)?\b[^\n]{0,80}?([\d.,]+)\s*kN\b",
+          r"\bTDBF(?:\s*/\s*LDBF)?\b[^\n]{0,80}?([\d.,]+)\s*kN\b"
+      ],
+      "tdbf_kn":[
+          r"\bTDBF\b[^\n]{0,80}?([\d.,]+)\s*kN\b",
+          # Some certificates print one force value followed by its metric-ton equivalent
+          # under a combined LDBF/TDBF heading. In that layout both refer to the same force.
+          r"\bLDBF\s*/\s*TDBF\b[^\n]{0,80}?([\d.,]+)\s*kN\b"
+      ],
     }
     for name,patterns in aliases.items():
         value,source=_first(text,patterns)
@@ -60,8 +98,20 @@ def parse_certificate_text(text: str, certificate_type: str="AUTO"):
             try:_add(r,name,_num(value),source,"kN" if name.endswith("_kn") else ("mm" if name=="diameter_mm" else "m"))
             except ValueError:r.warnings.append(f"Unable to parse numeric field {name}: {source!r}")
         else:_add(r,name,_clean(value),source)
+
+    # LDBF/TDBF is sometimes printed as a paired heading with one kN value and
+    # a metric-ton equivalent. Treat the declared kN value as the force for both
+    # labels rather than accidentally interpreting the ton value as kN.
+    pair=re.search(r"\bLDBF\s*/\s*TDBF\b[^\n]{0,100}?([\d.,]+)\s*kN\b",text,re.I)
+    if pair:
+        try:
+            paired=_num(pair.group(1))
+            if r.get("ldbf_kn") is None:_add(r,"ldbf_kn",paired,pair.group(0),"kN")
+            if r.get("tdbf_kn") is None:_add(r,"tdbf_kn",paired,pair.group(0),"kN")
+        except ValueError:pass
+
     ldbf_matches=[]
-    for m in re.finditer(r"\bLDBF\b[^\n]{0,35}?([\d.,]+)\s*kN\b",text,re.I):
+    for m in re.finditer(r"\bLDBF\b[^\n]{0,80}?([\d.,]+)\s*kN\b",text,re.I):
         try:ldbf_matches.append(_num(m.group(1)))
         except ValueError:pass
     if len(set(ldbf_matches))>1:
