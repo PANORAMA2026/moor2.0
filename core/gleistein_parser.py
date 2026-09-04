@@ -36,7 +36,9 @@ class GleisteinComponent:
         )
 
 def _num(s):
-    s = str(s).replace(" ", "")
+    # OCR may leave spaces/newlines inside or around a numeric value. Remove
+    # all Unicode whitespace before normalising decimal/thousands separators.
+    s = re.sub(r"\s+", "", str(s)).replace("\u00a0", "")
     if "," in s and "." in s:
         s = s.replace(".", "").replace(",", ".") if s.rfind(",") > s.rfind(".") else s.replace(",", "")
     elif "," in s:
@@ -66,7 +68,8 @@ def _classify(item, desc):
     return "OTHER"
 
 def _value(text, label):
-    m = re.search(rf"{re.escape(label)}\s*\[kN\]\s*([\d.,]+)", text, re.I)
+    # Accept OCR spacing/newlines between the label, unit and number.
+    m = re.search(rf"{re.escape(label)}\s*\[\s*kN\s*\]\s*([\d.,\s]+)", text, re.I)
     return _num(m.group(1)) if m else None
 
 def _diameter(text):
