@@ -48,7 +48,6 @@ def parse_certificate_text(text: str, certificate_type: str="AUTO"):
           r"report\s+(?:no\.?|number)\s*[:#=]\s*([A-Z0-9][A-Z0-9./_-]*)"
       ],
       "component_id":[
-          # PIC is commonly printed as a standalone value in certificate tables.
           r"product\s+identification\s+code\s*\(\s*PIC\s*\)\s*[:=\-]?\s*([A-Z0-9][A-Z0-9._/-]*)",
           r"\bPIC\s*[:=\-]?\s*([A-Z0-9][A-Z0-9._/-]*)",
           r"unique\s+id[- ]?number\s*[:=\-]\s*([A-Z0-9][A-Z0-9._/-]*)",
@@ -75,20 +74,19 @@ def parse_certificate_text(text: str, certificate_type: str="AUTO"):
       ],
       "minimum_breaking_load_kn":[
           r"(?:minimum|min)\s+breaking\s+load[^\n]{0,120}?([\d.,]+)\s*kN\b",
-          r"\bMBL\b(?:\s*\([^)]*\))?[^\n]{0,100}?([\d.,]+)\s*kN\b",
-          r"\b(?:minimum\s+)?breaking\s+load\s*\(?\s*MBL\s*\)?[^\n]{0,100}?([\d.,]+)\s*kN\b"
+          # Certificate tables frequently put the value on the next line.
+          r"\bMBL\b(?:\s*\([^)]*\))?[\s\S]{0,120}?([\d.,]+)\s*kN\b",
+          r"\b(?:minimum\s+)?breaking\s+load\s*\(?\s*MBL\s*\)?[\s\S]{0,120}?([\d.,]+)\s*kN\b"
       ],
       "calculated_breaking_load_kn":[r"calculated\s+breaking\s+load[^\n]{0,90}?([\d.,]+)\s*kN\b"],
       "ldbf_kn":[
-          r"(?:line\s*/\s*tail|line|tail)\s+design\s+break\s+force\s*\(?(?:ldbf|tdbf)\)?[^\n]{0,80}?([\d.,]+)\s*kN\b",
-          r"\bLDBF(?:\s*/\s*TDBF)?\b[^\n]{0,80}?([\d.,]+)\s*kN\b",
-          r"\bTDBF(?:\s*/\s*LDBF)?\b[^\n]{0,80}?([\d.,]+)\s*kN\b"
+          r"(?:line\s*/\s*tail|line|tail)\s+design\s+break\s+force\s*\(?(?:ldbf|tdbf)\)?[\s\S]{0,120}?([\d.,]+)\s*kN\b",
+          r"\bLDBF(?:\s*/\s*TDBF)?\b[\s\S]{0,120}?([\d.,]+)\s*kN\b",
+          r"\bTDBF(?:\s*/\s*LDBF)?\b[\s\S]{0,120}?([\d.,]+)\s*kN\b"
       ],
       "tdbf_kn":[
-          r"\bTDBF\b[^\n]{0,80}?([\d.,]+)\s*kN\b",
-          # Some certificates print one force value followed by its metric-ton equivalent
-          # under a combined LDBF/TDBF heading. In that layout both refer to the same force.
-          r"\bLDBF\s*/\s*TDBF\b[^\n]{0,80}?([\d.,]+)\s*kN\b"
+          r"\bTDBF\b[\s\S]{0,120}?([\d.,]+)\s*kN\b",
+          r"\bLDBF\s*/\s*TDBF\b[\s\S]{0,120}?([\d.,]+)\s*kN\b"
       ],
     }
     for name,patterns in aliases.items():
@@ -99,10 +97,7 @@ def parse_certificate_text(text: str, certificate_type: str="AUTO"):
             except ValueError:r.warnings.append(f"Unable to parse numeric field {name}: {source!r}")
         else:_add(r,name,_clean(value),source)
 
-    # LDBF/TDBF is sometimes printed as a paired heading with one kN value and
-    # a metric-ton equivalent. Treat the declared kN value as the force for both
-    # labels rather than accidentally interpreting the ton value as kN.
-    pair=re.search(r"\bLDBF\s*/\s*TDBF\b[^\n]{0,100}?([\d.,]+)\s*kN\b",text,re.I)
+    pair=re.search(r"\bLDBF\s*/\s*TDBF\b[\s\S]{0,120}?([\d.,]+)\s*kN\b",text,re.I)
     if pair:
         try:
             paired=_num(pair.group(1))
@@ -111,7 +106,7 @@ def parse_certificate_text(text: str, certificate_type: str="AUTO"):
         except ValueError:pass
 
     ldbf_matches=[]
-    for m in re.finditer(r"\bLDBF\b[^\n]{0,80}?([\d.,]+)\s*kN\b",text,re.I):
+    for m in re.finditer(r"\bLDBF\b[\s\S]{0,120}?([\d.,]+)\s*kN\b",text,re.I):
         try:ldbf_matches.append(_num(m.group(1)))
         except ValueError:pass
     if len(set(ldbf_matches))>1:
