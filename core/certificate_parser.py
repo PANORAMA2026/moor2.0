@@ -1,3 +1,4 @@
+"""Generic, manufacturer-independent extraction of rope certificate facts."""
 from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -24,91 +25,122 @@ class CertificateExtraction:
     extraction_method: str = "none"
     def get(self, name: str):
         return next((f.value for f in self.fields if f.name == name), None)
+    def field(self, name: str):
+        return next((f for f in self.fields if f.name == name), None)
 
-# Keep the legacy parser compatible with common MEG4 certificate wording,
-# including labels such as "Line Design Break Force (LDBF): ..." and
-# "Tail Design Break Force (TDBF): ...". The LDBF/TDBF patterns are anchored
-# to the start of a line so references such as "10% LDBF" in strain tables are
-# not mistaken for the declared break-force field.
-FIELD_PATTERNS = {
-    "ship_design_mbl": [r"ship\s+design\s+mbl\s*[:=]?\s*([\d.,]+)\s*(kn|t|tonnes?|tons?)?"],
-    "ldbf": [r"(?:^|\n)\s*(?:line\s+design\s+break\s+force\s*(?:\(\s*ldbf\s*\))?|ldbf)\s*[:=]\s*([\d.,]+)\s*(kn|t|tonnes?|tons?)?"],
-    "diameter_mm": [r"(?:rope\s+)?diam(?:eter)?\s*[:=]?\s*([\d.,]+)\s*mm\b"],
-    "length_m": [r"length\s*[:=]?\s*([\d.,]+)\s*(m|meter|metre|ft)\b", r"quantity\s*[:=]?\s*\d+\s*x\s*([\d.,]+)\s*m\b"],
-    "line_linear_density": [r"line\s+linear\s+density\s*[:=]?\s*([\d.,]+)\s*(kg/m|kg/m2)?"],
-    "tail_design_break_force": [r"(?:^|\n)\s*(?:tail\s+design\s+break\s+force\s*(?:\(\s*tdbf\s*\))?|tdbf)\s*[:=]\s*([\d.,]+)\s*(kn|t|tonnes?|tons?)?"],
-    "tail_linear_density": [r"tail\s+linear\s+density\s*[:=]?\s*([\d.,]+)"],
-    "minimum_breaking_load": [r"(?:minimum|min\.?)\s+breaking\s+load(?:\s+(?:of|for))?(?:\s+rope)?\s*[:=]?\s*([\d.,]+)\s*(kn|t|tonnes?|tons?)\b", r"\bmbl\s*[:=]?\s*([\d.,]+)\s*(kn|t|tonnes?|tons?)\b"],
-    "calculated_breaking_load": [r"calculated\s+breaking\s+load(?:\s+rope)?\s*[:=]?\s*([\d.,]+)\s*(kn|t|tonnes?|tons?)\b"],
-}
+def _num(s: str) -> float:
+    s = re.sub(r"[^0-9,.-]", "", str(s))
+    if "," in s and "." in s:
+        s = s.replace(",", "") if s.rfind(".") > s.rfind(",") else s.replace(".", "").replace(",", ".")
+    elif "," in s:
+        tail = s.rsplit(",", 1)[1]
+        s = s.replace(",", "") if len(tail) == 3 else s.replace(",", ".")
+    return float(s)
 
-def _number(s: str) -> float:
-    v=s.strip().replace(' ','')
-    if ',' in v and '.' in v: v=v.replace('.','').replace(',','.') if v.rfind(',')>v.rfind('.') else v.replace(',','')
-    elif ',' in v: v=v.replace(',','.')
-    return float(v)
+def _clean(s: str) -> str:
+    return re.sub(r"\s+", " ", str(s or "")).strip(" :\t")
 
-def _extract_from_text(text: str, page: int|None=None, certificate_type: str='MOORING_LINE') -> CertificateExtraction:
-    r=CertificateExtraction(certificate_type=certificate_type, raw_text=text)
-    normalized=re.sub(r'[\t ]+',' ',text)
-    for name,patterns in FIELD_PATTERNS.items():
-        matches=[]
-        for p in patterns: matches += list(re.finditer(p,normalized,re.I|re.M))
-        if not matches: continue
-        vals={_number(m.group(1)) for m in matches}
-        if len(vals)!=1:
-            r.warnings.append(f'Ambiguous extraction for {name}: {len(matches)} conflicting matches'); continue
-        m=matches[0]; unit=m.group(2) if m.lastindex and m.lastindex>=2 else None
-        r.fields.append(ExtractedField(name,_number(m.group(1)),m.group(0),0.95,page,unit))
-    if r.get('calculated_breaking_load') is not None and r.get('ldbf') is None:
-        r.warnings.append('Calculated Breaking Load found, but it is not labelled LDBF; LDBF left blank.')
-    return r
+def _add(r, name, value, source, unit=None, confidence=.95):
+    if value is not None:
+        r.fields.append(ExtractedField(name, value, _clean(source), confidence, None, unit))
 
-def parse_certificate_text(text: str, certificate_type: str='MOORING_LINE') -> CertificateExtraction:
-    return _extract_from_text(text,None,certificate_type)
+def _first(text, patterns):
+    for p in patterns:
+        m = re.search(p, text, re.I | re.M | re.S)
+        if m:
+            return m.group(1), m.group(0)
+    return None, None
 
-def extract_pdf_text(pdf_path: str|Path) -> tuple[str,int,int,str,list[str]]:
-    path=Path(pdf_path)
-    if not path.exists(): raise FileNotFoundError(path)
-    warnings=[]
-    try:
-        import fitz
-        with fitz.open(path) as doc: pages=[p.get_text('text') or '' for p in doc]
-        text='\n\n'.join(pages); n=sum(bool(p.strip()) for p in pages)
-        if n: return text,n,len(pages),'pymupdf',warnings
-    except Exception as exc: warnings.append(f'PyMuPDF extraction failed: {exc}')
-    try:
-        from pypdf import PdfReader
-        pages=[p.extract_text() or '' for p in PdfReader(str(path)).pages]
-        text='\n\n'.join(pages); n=sum(bool(p.strip()) for p in pages)
-        if n: return text,n,len(pages),'pypdf',warnings
-        warnings.append('PDF appears image-only; OCR is required.')
-        return text,0,len(pages),'none',warnings
-    except Exception as exc: raise RuntimeError('Unable to extract PDF text.') from exc
+def _extract(text: str, certificate_type: str) -> CertificateExtraction:
+    r = CertificateExtraction(certificate_type=certificate_type, raw_text=text)
+    # Identification. Product Identification Code is a physical rope identifier,
+    # whereas certificate number is the document identifier; retain both.
+    aliases = {
+        "certificate_id": [r"certificate\s*(?:no\.?|number)\s*[:#]?\s*([A-Z0-9][A-Z0-9./_-]*)"],
+        "component_id": [
+            r"unique\s+id[- ]?number\s*[:=]\s*([A-Z0-9][A-Z0-9._/-]*)",
+            r"product\s+identification\s+code\s*\(\s*PIC\s*\)\s*[:=]\s*([A-Z0-9][A-Z0-9._/-]*)",
+            r"(?:rope|product|item)\s+identification(?:\s+code)?\s*[:=]\s*([A-Z0-9][A-Z0-9._/-]*)",
+            r"(?:serial|unique|rope)\s*(?:no\.?|number|id)\s*[:#=]\s*([A-Z0-9][A-Z0-9._/-]*)",
+        ],
+        "manufacturer": [r"(?:manufacturer|producer)\s*[:=]\s*([^\n]+)", r"examination\s+performed\s+by\s*[:=]\s*([^\n]+)"],
+        "product": [r"product\s*[:=]\s*([^\n]+)", r"description\s*[:=]\s*([^\n]+)"],
+        "diameter_mm": [
+            r"(?:nominal\s+)?diam(?:eter)?\s*(?:\(\s*mm\s*\))?\s*[:=]\s*(\d+(?:[.,]\d+)?)\s*mm\b",
+            r"(?:nominal\s+)?diam(?:eter)?[^\n]{0,30}?\b(\d+(?:[.,]\d+)?)\s*mm\b",
+        ],
+        "length_m": [
+            r"length\s*\(?(?:m|mtr|metres?)\)?\s*[:=]\s*\d+\s*[x×]\s*(\d+(?:[.,]\d+)?)\s*m",
+            r"length\s*\(?(?:m|mtr|metres?)\)?\s*[:=]\s*(\d+(?:[.,]\d+)?)\s*m",
+            r"quantity\s*[:=]\s*\d+\s*[x×]\s*(\d+(?:[.,]\d+)?)\s*m",
+            r"\bCL\s*(\d+(?:[.,]\d+)?)\s*MTR\b",
+        ],
+        "minimum_breaking_load_kn": [r"minimum\s+breaking\s+load[^\n]{0,90}?([\d.,]+)\s*kN\b", r"min(?:imum)?\s+breaking\s+load[^\n]{0,40}?([\d.,]+)\s*kN\b"],
+        "calculated_breaking_load_kn": [r"calculated\s+breaking\s+load[^\n]{0,90}?([\d.,]+)\s*kN\b"],
+        "ldbf_kn": [r"(?:line|tail)\s*/?\s*design\s+break\s+force\s*\(?(?:ldbf|tdbf)[^\n]{0,60}?([\d.,]+)\s*kN\b", r"\bLDBF\b[^\n]{0,35}?([\d.,]+)\s*kN\b"],
+        "tdbf_kn": [r"\bTDBF\b[^\n]{0,35}?([\d.,]+)\s*kN\b"],
+    }
+    for name, patterns in aliases.items():
+        value, source = _first(text, patterns)
+        if value is None: continue
+        if name.endswith("_kn") or name in {"diameter_mm", "length_m"}:
+            _add(r, name, _num(value), source, "kN" if name.endswith("_kn") else ("mm" if name=="diameter_mm" else "m"))
+        else:
+            _add(r, name, _clean(value), source)
 
-def parse_certificate_pdf(pdf_path: str|Path, certificate_type: str='AUTO') -> CertificateExtraction:
-    text,n,total,method,warnings=extract_pdf_text(pdf_path)
-    if certificate_type=='AUTO': certificate_type='MOORING_TAIL' if re.search(r'\b(?:tail design break force|tdbf)\b',text,re.I) else 'MOORING_LINE'
-    r=CertificateExtraction(certificate_type=certificate_type,raw_text=text,pages_with_text=n,total_pages=total,extraction_method=method,warnings=warnings)
-    if not text.strip(): r.warnings.append('No machine-readable PDF text; OCR/manual review required.'); return r
-    try:
-        import fitz
-        with fitz.open(pdf_path) as doc: page_texts=[p.get_text('text') or '' for p in doc]
-    except Exception: page_texts=text.split('\n\n')
-    for i,p in enumerate(page_texts,1):
-        if p.strip():
-            x=_extract_from_text(p,i,certificate_type); r.fields.extend(x.fields); r.warnings.extend(x.warnings)
+    # Lankhorst commonly puts LDBF/TDBF in one cell as "900 kN / 91.7 Mt".
+    m = re.search(r"spliced\s*-\s*line/tail\s+design\s+break\s+force[^\n]*?([\d.,]+)\s*kN\s*/\s*([\d.,]+)\s*(?:Mt|t)\b", text, re.I)
+    if m:
+        if r.get("ldbf_kn") is None: _add(r, "ldbf_kn", _num(m.group(1)), m.group(0), "kN", .98)
+        if r.get("tdbf_kn") is None: _add(r, "tdbf_kn", _num(m.group(1)), m.group(0), "kN", .98)
+
+    # Useful declared characteristics.
+    for name, patterns in {
+        "number_of_strands": [r"number\s+of\s+strands\s*[:=]\s*(\d+)"],
+        "tcll_pct": [r"TCLL\s+value\s*[:=]\s*([\d.,]+)\s*%"],
+        "elongation_at_break_pct": [r"elongation\s+at\s+break[^\n]*?([\d.,]+)\s*%"],
+    }.items():
+        value, source = _first(text, patterns)
+        if value is not None: _add(r, name, _num(value), source, "%")
+
+    # Explicit presentation/application cues. Do not infer a weak link here.
+    if re.search(r"endless|grommet|loop", text, re.I): _add(r, "presentation_hint", "ENDLESS/LOOP", "presentation terminology", None, .80)
+    if re.search(r"spliced\s+(?:both\s+ends|one\s+end)|spliced\s*-\s*line", text, re.I): _add(r, "presentation_hint", "SPLICED", "presentation terminology", None, .80)
+
+    # Preserve the first source for each normalized field and warn on conflicts.
     unique={}
     for f in r.fields:
         if f.name not in unique: unique[f.name]=f
-        elif unique[f.name].value != f.value: r.warnings.append(f'Ambiguous extraction for {f.name}: conflicting page values')
-    r.fields=list(unique.values()); return r
+        elif unique[f.name].value != f.value: r.warnings.append(f"Ambiguous extraction for {f.name}: conflicting values {unique[f.name].value!r} and {f.value!r}")
+    r.fields=list(unique.values())
+    return r
+
+def parse_certificate_text(text: str, certificate_type: str="AUTO") -> CertificateExtraction:
+    text=text or ""
+    if certificate_type=="AUTO":
+        certificate_type="MOORING_TAIL" if re.search(r"\b(?:tail|tdbf)\b", text, re.I) else "MOORING_LINE"
+    return _extract(text, certificate_type)
 
 def validate_extraction(extraction: CertificateExtraction) -> list[str]:
-    errors=[]; present={f.name for f in extraction.fields}
-    required={'tail_design_break_force'} if extraction.certificate_type=='MOORING_TAIL' else {'minimum_breaking_load','diameter_mm','length_m'}
-    for name in required-present: errors.append(f'Required field not extracted: {name}')
-    for name in ('ship_design_mbl','ldbf','minimum_breaking_load','calculated_breaking_load','tail_design_break_force','diameter_mm','length_m'):
-        v=extraction.get(name)
-        if v is not None and v<=0: errors.append(f'{name} must be greater than zero')
+    errors=[]
+    # Generic parser does not impose manufacturer-specific required fields.
+    # It reports missing core engineering data without pretending every form has the same fields.
+    for name, label in (("component_id","physical rope/component ID"),("diameter_mm","diameter"),("length_m","length")):
+        if extraction.get(name) is None: errors.append(f"{label} not extracted")
+    if extraction.get("minimum_breaking_load_kn") is None and extraction.get("ldbf_kn") is None:
+        errors.append("No declared breaking-load value extracted")
     return errors
+
+def extract_pdf_text(pdf_path: str|Path):
+    path=Path(pdf_path)
+    if not path.exists(): raise FileNotFoundError(path)
+    import fitz
+    with fitz.open(path) as doc:
+        pages=[p.get_text("text") or "" for p in doc]
+    return "\n\n".join(pages), sum(bool(p.strip()) for p in pages), len(pages), "pymupdf", []
+
+def parse_certificate_pdf(pdf_path: str|Path, certificate_type: str="AUTO") -> CertificateExtraction:
+    text,n,total,method,warnings=extract_pdf_text(pdf_path)
+    r=parse_certificate_text(text, certificate_type)
+    r.pages_with_text=n; r.total_pages=total; r.extraction_method=method; r.warnings=warnings+r.warnings
+    return r
