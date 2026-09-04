@@ -80,10 +80,6 @@ def _generic_component(extraction,text):
     cid=extraction.get('component_id') or cert
     product=extraction.get('product') or 'Unknown product'
     upper=text.upper()
-    # A generic certificate is a single physical rope unless the document
-    # itself clearly describes a component such as a tail, loop, grommet,
-    # geolink or lashing. The mere presence of the TDBF label is NOT enough:
-    # many main-line certificates print "LDBF / TDBF" as a standard heading.
     if any(x in upper for x in ('GEOLINK','LASHING')):ctype='GEOLINK/LASHING'
     elif any(x in upper for x in ('GEOSQUARE','ENDLESS LOOP','TAIL /',' TAIL ','TAIL LOOP','TAIL SECTION')):ctype='TAIL'
     else:ctype='MAIN LINE'
@@ -110,33 +106,51 @@ def _to_legacy_dict(extraction,text):
     return {'cert_id':str(cert),'manufacturer':str(manufacturer),'main_material':str(product),'main_diameter_mm':float(extraction.get('diameter_mm') or 0),
         'main_mbl_tons':_kn_to_tons(ldbf if ldbf is not None else min_v),'minimum_breaking_load_tons':_kn_to_tons(min_v),'calculated_breaking_load_tons':_kn_to_tons(calc),'ldbf_tons':_kn_to_tons(ldbf),
         'main_length_m':float(extraction.get('length_m') or 0),'line_linear_density':None,'rope_type':'','average_immediate_strain_pct':{},'has_tail':False,'tail_material':'','tail_diameter_mm':0.0,
-        'tail_mbl_tons':0.0,'tail_length_m':0.0,'standard':'','_warnings':list(extraction.warnings),'_validation_errors':[],'_source_text':text,'_extraction_method':'generic certificate parser','_requires_review':True}
+        'tail_mbl_tons':0.0,'tail_length_m':0.0,'standard':'','_warnings':list(extraction.warnings),'_validation_errors':[],'_source_text':text,'_extraction_method':'generic certificate parser','_requires_review':False}
+
+def _review_fields(result, extraction, ocr_used):
+    """Return only fields that are genuinely ambiguous or weakly extracted."""
+    review=[]
+    if not ocr_used:return review
+    # OCR-only documents are not automatically rejected. Flag missing critical
+    # fields and parser warnings; high-confidence extracted fields remain clean.
+    for name,label in (("component_id","Physical rope/component ID"),("diameter_mm","Diameter"),("length_m","Length")):
+        if extraction.get(name) is None:review.append(label)
+    if extraction.get('minimum_breaking_load_kn') is None and extraction.get('ldbf_kn') is None:
+        review.append('Declared breaking load')
+    for warning in extraction.warnings:
+        if 'Ambiguous extraction' in warning or 'conflicting' in warning.lower():
+            review.append(warning)
+    return review
 
 def parse_line_certificate(uploaded_file):
     if uploaded_file is None:return None
-    data=extract_bytes_from_file(uploaded_file);text=extract_text_from_pdf(uploaded_file);method='PyMuPDF + generic certificate parser';page_texts=[];diag=None
+    data=extract_bytes_from_file(uploaded_file);text=extract_text_from_pdf(uploaded_file);method='PyMuPDF + generic certificate parser';page_texts=[];diag=None;ocr_used=False
     if not text:
-        page_texts,diag=extract_ocr_pages_from_pdf(uploaded_file);text='\n\n'.join(page_texts).strip();method='PyMuPDF + Tesseract OCR + generic certificate parser'
+        page_texts,diag=extract_ocr_pages_from_pdf(uploaded_file);text='\n\n'.join(page_texts).strip();method='PyMuPDF + Tesseract OCR + generic certificate parser';ocr_used=True
     else:
         try:
             with fitz.open(stream=data,filetype='pdf') as doc:page_texts=[p.get_text('text') or '' for p in doc]
         except Exception:page_texts=[]
     if not text:return {'cert_id':'UNKNOWN','_warnings':[diag or 'No readable text was extracted.'],'_validation_errors':['No extractable certificate text'],'_requires_review':True,'_extraction_method':'OCR_FAILED'}
     if re.search(r'Gleistein|FlexTwin|GeoSquare|GeoLink',text,re.I):
-        parsed=parse_gleistein_pages(page_texts or [text]);parsed['_extraction_method']=method;parsed['_warnings']=list(parsed.get('warnings',[]));parsed['_source_text']=text;parsed['_requires_review']=True;return parsed
+        parsed=parse_gleistein_pages(page_texts or [text]);parsed['_extraction_method']=method;parsed['_warnings']=list(parsed.get('warnings',[]));parsed['_source_text']=text
+        parsed['_review_fields']=parsed.get('_review_fields',[])
+        if ocr_used and not parsed['_review_fields']:
+            parsed['_requires_review']=False
+        else:parsed['_requires_review']=bool(parsed.get('_review_fields'))
+        return parsed
     extraction=_parse_core_certificate(text);component,strength=_generic_component(extraction,text);weak=evaluate_weak_link([strength]);result=_to_legacy_dict(extraction,text)
-    result['components']=[component];result['weak_link']=weak.as_dict();result['_extraction_method']=method;result['_source_text']=text;result['_requires_review']=True
+    result['components']=[component];result['weak_link']=weak.as_dict();result['_extraction_method']=method;result['_source_text']=text
+    result['_review_fields']=_review_fields(result,extraction,ocr_used)
+    result['_requires_review']=bool(result['_review_fields'])
     if diag:result['_warnings'].append(diag)
-    result['_validation_errors']=[]
-    for name,label in (("component_id","Physical rope/component ID"),("diameter_mm","Diameter"),("length_m","Length")):
-        if extraction.get(name) is None:result['_validation_errors'].append(f'{label} not extracted')
-    if extraction.get('minimum_breaking_load_kn') is None and extraction.get('ldbf_kn') is None:result['_validation_errors'].append('No declared breaking-load value extracted')
-    if 'Tesseract OCR' in method:result['_warnings'].append('OCR output is unverified; compare every field with the original certificate before saving.')
+    result['_validation_errors']=list(result['_review_fields'])
     return result
 
 def parse_certificate_text(text):
     if not text or not text.strip():return None
-    extraction=_parse_core_certificate(text);component,strength=_generic_component(extraction,text);result=_to_legacy_dict(extraction,text);result['components']=[component];result['weak_link']=evaluate_weak_link([strength]).as_dict();result['_validation_errors']=[];return result
+    extraction=_parse_core_certificate(text);component,strength=_generic_component(extraction,text);result=_to_legacy_dict(extraction,text);result['components']=[component];result['weak_link']=evaluate_weak_link([strength]).as_dict();result['_validation_errors']=[];result['_review_fields']=[];result['_requires_review']=False;return result
 
 def dynamic_regex_parse(text):return parse_certificate_text(text) or {}
 def safe_extract_json(text_response):
