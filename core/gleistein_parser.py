@@ -174,6 +174,17 @@ def parse_gleistein_pages(page_texts):
         spliced_kn = _value(text, "Break load spliced")
         grommet_kn = _value(text, "Break load grommet")
         calculated_kn = _value(text, "Calculated breaking load")
+
+        # Do not depend on a manufacturer-specific product name to recognise a tail.
+        # A tail/grommet component has a characteristic certificate structure:
+        # spliced capacity + grommet capacity, with no linear capacity. If the
+        # description was lost by OCR, this structural evidence is still sufficient.
+        if component_type == "OTHER" and grommet_kn is not None and spliced_kn is not None and linear_kn is None:
+            component_type = "TAIL"
+            onboard_application = ONBOARD_TAIL_APPLICATION
+            if not desc:
+                desc = "Tail component (grommet/spliced load profile)"
+
         probe = component_from_certificate(
             component_id=comp_id, component_type=component_type, certificate_id=cert_id,
             break_load_linear_kn=linear_kn, break_load_spliced_kn=spliced_kn,
