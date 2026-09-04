@@ -47,7 +47,10 @@ def render_tab_certificate():
         if cdata:
             for w in cdata.get("_warnings",cdata.get("warnings",[])):st.warning(w)
             for e in cdata.get("_validation_errors",[]):st.error(e)
-            st.info("🔎 REVIEW REQUIRED — verifica i dati contro il PDF originale prima del salvataggio.")
+            if cdata.get("_requires_review"):
+                fields=cdata.get("_review_fields",cdata.get("_validation_errors",[]))
+                detail="; ".join(str(x) for x in fields) if fields else "uno o più campi estratti richiedono verifica"
+                st.info(f"🔎 REVIEW REQUIRED — verifica nel PDF originale: {detail}.")
             components=_component_rows(cdata)
             if not components.empty:
                 st.subheader("🧩 Componenti riconosciuti")
@@ -65,7 +68,9 @@ def render_tab_certificate():
         material=st.text_input("Componente principale / materiale",value=str(first.get("item_description",cdata.get("main_material",""))))
         diameter=st.number_input("Diametro principale (mm)",min_value=0.0,value=float(first.get("diameter_mm") or cdata.get("main_diameter_mm",0.0)),step=1.0)
         main_strength=next((c for c in comps if c.get("component_type")=="MAIN LINE"),None)
-        main_governing_t=_applicable_tons(main_strength) if main_strength else float(cdata.get("main_mbl_tons",0.0) or 0.0)
+        main_governing_t=_applicable_tons(main_strength) if main_strength else None
+        if main_governing_t is None:
+            main_governing_t=float(cdata.get("main_mbl_tons",0.0) or 0.0)
         st.metric("MAIN LINE applicable break load",f"{main_governing_t:.2f} t" if main_governing_t>0 else "N/A")
         if main_strength:st.caption(f"Basis: {main_strength.get('applicable_break_load_label') or 'not determined'}")
         weak=cdata.get("weak_link",{});weak_t=float(weak.get("weak_link_breaking_load_t") or 0.0)
