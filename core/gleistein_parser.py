@@ -36,6 +36,7 @@ class GleisteinComponent:
 
 
 def _num(value):
+    """Parse one OCR number without allowing neighbouring values to leak in."""
     s = str(value).replace("\u00a0", " ")
     s = re.sub(r"\s+", "", s)
     match = re.search(r"[-+]?\d[\d.,]*", s)
@@ -48,7 +49,8 @@ def _num(value):
         else:
             s = s.replace(".", "").replace(",", ".")
     elif "," in s:
-        if len(s.rsplit(",", 1)[1]) == 3 and s.count(",") == 1:
+        tail = s.rsplit(",", 1)[1]
+        if len(tail) == 3 and s.count(",") == 1:
             s = s.replace(",", "")
         else:
             s = s.replace(",", ".")
@@ -61,8 +63,7 @@ def _clean(s):
 
 def _normalize_cert_id(s):
     s = _clean(s).upper()
-    s = re.sub(r"^W(?:2Z25|WZ25|Z25|225)-", "W225-", s)
-    return s
+    return re.sub(r"^W(?:2Z25|WZ25|Z25|225)-", "W225-", s)
 
 
 def _field(text, label):
@@ -82,11 +83,19 @@ def _classify(item, desc):
 
 
 def _value(text, label):
-    # OCR may put the value on the next line or insert spaces inside a number.
-    # Capture only the first numeric token following the labelled field.
-    pattern = rf"{re.escape(label)}\s*\[\s*kN\s*\]\s*[^\d+\-]*([-+]?\d[\d.,\s]*)"
-    m = re.search(pattern, text, re.I | re.S)
-    return _num(m.group(1)) if m else None
+    """Extract only the numeric token belonging to a labelled kN field."""
+    label_match = re.search(rf"{re.escape(label)}\s*\[\s*kN\s*\]", text, re.I)
+    if not label_match:
+        label_match = re.search(rf"{re.escape(label)}", text, re.I)
+    if not label_match:
+        return None
+
+    tail = text[label_match.end():]
+    # The value is on the same line or immediately below it in the certificate.
+    # Limiting the probe prevents a greedy OCR match from swallowing later fields.
+    probe = " ".join(line.strip() for line in tail.splitlines()[:4] if line.strip())
+    number = re.search(r"[-+]?\d[\d\s]*(?:[.,]\d[\d\s.,]*)?", probe)
+    return _num(number.group(0)) if number else None
 
 
 def _diameter(text):
@@ -113,12 +122,6 @@ def _item_from_text(text):
 
 
 def _groups(pages):
-    """Group all pages belonging to each physical certified component.
-
-    Gleistein certificates commonly use one certificate number over two pages.
-    Some OCR passes lose the Item No. line on the second page. Therefore a new
-    group starts when the certificate number changes; the Item No. is optional.
-    """
     groups = []
     current = None
     for n, text in enumerate(pages, 1):
@@ -127,7 +130,6 @@ def _groups(pages):
         if current is None:
             current = {"pages": [], "item": "", "cert_id": ""}
             groups.append(current)
-        # A different certificate number starts a new physical component.
         if cert_id and current["cert_id"] and cert_id != current["cert_id"]:
             current = {"pages": [], "item": "", "cert_id": cert_id}
             groups.append(current)
@@ -140,8 +142,6 @@ def _groups(pages):
 
 
 def _infer_item_if_missing(text, cert_id):
-    # Product wording is enough to classify the physical component even when
-    # OCR misses the Item No. client / Gleistein line.
     if re.search(r"GeoSquare\s+Plus\s+Loop|\bTAIL\b", text, re.I):
         m = re.search(r"(?:TAIL\s*/\s*|TAIL\s+)([A-Za-z0-9_-]+)", text, re.I)
         return f"TAIL / {_clean(m.group(1))}" if m else "TAIL"
