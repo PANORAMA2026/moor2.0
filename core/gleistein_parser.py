@@ -35,27 +35,50 @@ class GleisteinComponent:
             applicable_load_label=self.applicable_break_load_label,
         )
 
-def _num(s):
-    # OCR may leave spaces/newlines inside or around a numeric value. Remove
-    # all Unicode whitespace before normalising decimal/thousands separators.
-    s = re.sub(r"\s+", "", str(s)).replace("\u00a0", "")
+
+def _num(value):
+    """Parse the first OCR numeric token safely.
+
+    Certificate scans can contain NBSPs, line breaks and other OCR whitespace.
+    We deliberately extract a numeric token rather than passing an entire OCR
+    fragment to float(), so a following unit/label cannot break conversion.
+    """
+    s = str(value).replace("\u00a0", " ")
+    s = re.sub(r"\s+", "", s)
+    match = re.search(r"[-+]?\d[\d.,]*", s)
+    if not match:
+        raise ValueError(f"No numeric value found in OCR text: {value!r}")
+    s = match.group(0)
     if "," in s and "." in s:
-        s = s.replace(".", "").replace(",", ".") if s.rfind(",") > s.rfind(".") else s.replace(",", "")
+        # 1,220.78 -> 1220.78 ; 1.220,78 -> 1220.78
+        if s.rfind(",") < s.rfind("."):
+            s = s.replace(",", "")
+        else:
+            s = s.replace(".", "").replace(",", ".")
     elif "," in s:
-        s = s.replace(",", ".")
+        # A single comma is normally the decimal separator. If three digits
+        # follow it, treat it as a thousands separator instead.
+        if len(s.rsplit(",", 1)[1]) == 3 and s.count(",") == 1:
+            s = s.replace(",", "")
+        else:
+            s = s.replace(",", ".")
     return float(s)
+
 
 def _clean(s):
     return re.sub(r"\s+", " ", s or "").strip()
+
 
 def _normalize_cert_id(s):
     s = _clean(s).upper()
     s = re.sub(r"^W(?:2Z25|WZ25|Z25|225)-", "W225-", s)
     return s
 
+
 def _label(text, label):
     m = re.search(rf"{re.escape(label)}\s*:\s*(.+)", text, re.I)
     return _clean(m.group(1)) if m else ""
+
 
 def _classify(item, desc):
     b = f"{item} {desc}".upper()
@@ -67,14 +90,21 @@ def _classify(item, desc):
         return "GEOLINK/LASHING"
     return "OTHER"
 
+
 def _value(text, label):
-    # Accept OCR spacing/newlines between the label, unit and number.
-    m = re.search(rf"{re.escape(label)}\s*\[\s*kN\s*\]\s*([\d.,\s]+)", text, re.I)
+    """Extract the numeric value immediately following a labelled kN field."""
+    # Permit OCR line breaks between label, unit and value, but stop at the
+    # first numeric token. This prevents the regex from swallowing subsequent
+    # certificate fields.
+    pattern = rf"{re.escape(label)}\s*\[\s*kN\s*\]\s*[^\d+-]*([-+]?\d[\d.,]*)"
+    m = re.search(pattern, text, re.I | re.S)
     return _num(m.group(1)) if m else None
+
 
 def _diameter(text):
     m = re.search(r"(\d+(?:[.,]\d+)?)\s*mm", text, re.I)
     return _num(m.group(1)) if m else None
+
 
 def _length(text):
     m = re.search(r"Delivered\s+quantity.*?\n\s*\d+\s+([\d.,]+)", text, re.I | re.S)
@@ -82,6 +112,7 @@ def _length(text):
         return _num(m.group(1))
     m = re.search(r"\b\d+\s*[x×]\s*([\d.,]+)\s*m\b", text, re.I)
     return _num(m.group(1)) if m else None
+
 
 def _groups(pages):
     groups = []
@@ -100,6 +131,7 @@ def _groups(pages):
             current["pages"].append((n, text))
     return groups
 
+
 def parse_gleistein_pages(page_texts):
     pages = list(page_texts or [])
     components = []
@@ -115,13 +147,19 @@ def parse_gleistein_pages(page_texts):
         component_type = _classify(item, desc)
         final_presentation = _label(text, "Final presentation")
         onboard_application = ONBOARD_TAIL_APPLICATION if component_type == "TAIL" else None
+
+        linear_kn = _value(text, "Break load linear")
+        spliced_kn = _value(text, "Break load spliced")
+        grommet_kn = _value(text, "Break load grommet")
+        calculated_kn = _value(text, "Calculated breaking load")
+
         probe = component_from_certificate(
             component_id=comp_id,
             component_type=component_type,
             certificate_id=cert_id,
-            break_load_linear_kn=_value(text, "Break load linear"),
-            break_load_spliced_kn=_value(text, "Break load spliced"),
-            break_load_grommet_kn=_value(text, "Break load grommet"),
+            break_load_linear_kn=linear_kn,
+            break_load_spliced_kn=spliced_kn,
+            break_load_grommet_kn=grommet_kn,
             final_presentation=final_presentation,
             onboard_application=onboard_application,
         )
@@ -136,10 +174,10 @@ def parse_gleistein_pages(page_texts):
             applicable_break_load_label=probe.applicable_load_label,
             diameter_mm=_diameter(desc),
             length_m=_length(text),
-            break_load_linear_kn=_value(text, "Break load linear"),
-            break_load_spliced_kn=_value(text, "Break load spliced"),
-            break_load_grommet_kn=_value(text, "Break load grommet"),
-            calculated_breaking_load_kn=_value(text, "Calculated breaking load"),
+            break_load_linear_kn=linear_kn,
+            break_load_spliced_kn=spliced_kn,
+            break_load_grommet_kn=grommet_kn,
+            calculated_breaking_load_kn=calculated_kn,
             source_pages=tuple(n for n, _ in group["pages"]),
         )
         if not cert_id:
