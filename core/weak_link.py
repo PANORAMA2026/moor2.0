@@ -58,7 +58,7 @@ class WeakLinkResult:
 
     @property
     def is_valid(self) -> bool:
-        return self.status == "VALID" and self.weak_link_breaking_load_kn is not None
+        return self.status in {"VALID", "NO_WEAK_LINK"} and self.weak_link_breaking_load_kn is not None
 
     @property
     def has_weak_link(self) -> bool:
@@ -123,13 +123,6 @@ def infer_applicable_load_label(*, component_type: str, final_presentation: str 
     return None
 
 def evaluate_weak_link(components: Iterable[ComponentStrength | dict]) -> WeakLinkResult:
-    """Evaluate the complete assembly only after all components are known.
-
-    A single physical main line is not called a weak link: its applicable
-    declared breaking load is simply the line breaking capacity. A weak link
-    is assigned only for an assembly containing multiple physical components,
-    and only from their applicable declared breaking loads.
-    """
     normalized = tuple(c if isinstance(c, ComponentStrength) else _component_from_dict(c) for c in components)
     if not normalized:
         return WeakLinkResult("INCOMPLETE", None, None, None, None, None, None, (), "No mooring-line components were supplied.")
@@ -158,14 +151,29 @@ def component_from_certificate(*, component_id: str, component_type: str, certif
                                 break_load_linear_kn: float | None = None,
                                 break_load_spliced_kn: float | None = None,
                                 break_load_grommet_kn: float | None = None,
+                                minimum_breaking_load_kn: float | None = None,
+                                ldbf_kn: float | None = None,
                                 final_presentation: str = "",
                                 onboard_application: str | None = None,
                                 applicable_load_label: str | None = None) -> ComponentStrength:
     values = []
-    for value, label in ((break_load_linear_kn, "Break load linear"), (break_load_spliced_kn, "Break load spliced"), (break_load_grommet_kn, "Break load grommet")):
+    for value, label in ((break_load_linear_kn, "Break load linear"), (break_load_spliced_kn, "Break load spliced"), (break_load_grommet_kn, "Break load grommet"), (minimum_breaking_load_kn, "Minimum breaking load"), (ldbf_kn, "LDBF")):
         if value is not None and float(value) > 0:
             values.append(BreakingLoadValue(float(value), label))
-    selected = applicable_load_label or infer_applicable_load_label(component_type=component_type, final_presentation=final_presentation, onboard_application=onboard_application)
+    selected = applicable_load_label
+    if not selected:
+        selected = infer_applicable_load_label(component_type=component_type, final_presentation=final_presentation, onboard_application=onboard_application)
+    if not selected:
+        if ldbf_kn is not None:
+            selected = "LDBF"
+        elif minimum_breaking_load_kn is not None:
+            selected = "Minimum breaking load"
+        elif break_load_linear_kn is not None:
+            selected = "Break load linear"
+        elif break_load_spliced_kn is not None:
+            selected = "Break load spliced"
+        elif break_load_grommet_kn is not None:
+            selected = "Break load grommet"
     return ComponentStrength(
         component_id=component_id, component_type=component_type, certificate_id=certificate_id,
         breaking_loads=tuple(values), applicable_load_label=selected.strip() if selected else None,
