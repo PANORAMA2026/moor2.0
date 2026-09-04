@@ -1,16 +1,11 @@
-"""Weak-link evaluation for composite mooring lines.
+"""Configuration-aware component strength evaluation.
 
-The certificate may contain several breaking-load values for the same
-component (linear, spliced, grommet). We select the value applicable to the
-physical configuration, rather than blindly taking the smallest number.
-
-For the Panorama mooring arrangement the onboard tail application is treated
-as a default ``LOOP_AROUND_BOLLARD``. For an endless-spliced GeoSquare Plus
-loop, this corresponds to the manufacturer's grommet configuration when the
-certificate provides a grommet breaking-load value.
+A certificate parser first identifies every physical component and every
+manufacturer-declared breaking-load value. Only after the complete assembly
+has been identified do we determine whether a separate weak-link component
+exists.
 """
 from __future__ import annotations
-
 from dataclasses import dataclass, asdict
 from typing import Iterable
 import re
@@ -65,9 +60,14 @@ class WeakLinkResult:
     def is_valid(self) -> bool:
         return self.status == "VALID" and self.weak_link_breaking_load_kn is not None
 
+    @property
+    def has_weak_link(self) -> bool:
+        return self.status == "VALID" and len(self.components) > 1
+
     def as_dict(self) -> dict:
         return {
             "status": self.status,
+            "has_weak_link": self.has_weak_link,
             "weak_link_component_id": self.weak_link_component_id,
             "weak_link_component_type": self.weak_link_component_type,
             "weak_link_certificate_id": self.weak_link_certificate_id,
@@ -109,13 +109,6 @@ def _normalize_text(value: str | None) -> str:
     return re.sub(r"\s+", " ", str(value or "").strip().lower())
 
 def infer_applicable_load_label(*, component_type: str, final_presentation: str = "", onboard_application: str | None = None) -> str | None:
-    """Infer the applicable certificate value from physical configuration.
-
-    Panorama default: every TAIL is used as a loop around the bollard. For a
-    Gleistein endless-spliced loop, the manufacturer's grommet value is the
-    applicable configuration value. Main/auxiliary components explicitly
-    presented as spliced use their spliced value.
-    """
     ctype = _normalize_text(component_type)
     presentation = _normalize_text(final_presentation)
     application = _normalize_text(onboard_application)
@@ -130,20 +123,35 @@ def infer_applicable_load_label(*, component_type: str, final_presentation: str 
     return None
 
 def evaluate_weak_link(components: Iterable[ComponentStrength | dict]) -> WeakLinkResult:
-    """Return the lowest *applicable* declared breaking load in the assembly."""
+    """Evaluate the complete assembly only after all components are known.
+
+    A single physical main line is not called a weak link: its applicable
+    declared breaking load is simply the line breaking capacity. A weak link
+    is assigned only for an assembly containing multiple physical components,
+    and only from their applicable declared breaking loads.
+    """
     normalized = tuple(c if isinstance(c, ComponentStrength) else _component_from_dict(c) for c in components)
     if not normalized:
         return WeakLinkResult("INCOMPLETE", None, None, None, None, None, None, (), "No mooring-line components were supplied.")
     missing = [c.component_id for c in normalized if c.governing_breaking_load_kn is None]
     if missing:
-        return WeakLinkResult("INCOMPLETE", None, None, None, None, None, None, normalized, "Applicable breaking-load data are missing for component(s): " + ", ".join(missing) + ". The assembly cannot be assigned a governing weak link.")
+        return WeakLinkResult("INCOMPLETE", None, None, None, None, None, None, normalized, "Applicable breaking-load data are missing for component(s): " + ", ".join(missing) + ". Complete the component records before assigning an assembly weak link.")
+    if len(normalized) == 1:
+        c = normalized[0]
+        value = c.governing_breaking_load_kn
+        return WeakLinkResult(
+            "NO_WEAK_LINK", None, None, c.certificate_id,
+            value, value / 9.80665 if value is not None else None,
+            c.governing_breaking_load_label, normalized,
+            f"Single-component line {c.component_id}: use its applicable declared breaking load; no separate weak-link component is assigned.",
+        )
     weak = min(normalized, key=lambda c: c.governing_breaking_load_kn or float("inf"))
     value_kn = weak.governing_breaking_load_kn
     return WeakLinkResult(
         "VALID", weak.component_id, weak.component_type, weak.certificate_id,
         value_kn, value_kn / 9.80665 if value_kn is not None else None,
         weak.governing_breaking_load_label, normalized,
-        f"Governing weak link is {weak.component_id} ({weak.component_type}) at {value_kn:.2f} kN, using the applicable certificate value for the recorded physical configuration.",
+        f"Assembly weak link is {weak.component_id} ({weak.component_type}) at {value_kn:.2f} kN, selected after all component capacities were identified.",
     )
 
 def component_from_certificate(*, component_id: str, component_type: str, certificate_id: str | None,
@@ -153,7 +161,6 @@ def component_from_certificate(*, component_id: str, component_type: str, certif
                                 final_presentation: str = "",
                                 onboard_application: str | None = None,
                                 applicable_load_label: str | None = None) -> ComponentStrength:
-    """Build a component record and select the applicable certificate value."""
     values = []
     for value, label in ((break_load_linear_kn, "Break load linear"), (break_load_spliced_kn, "Break load spliced"), (break_load_grommet_kn, "Break load grommet")):
         if value is not None and float(value) > 0:
