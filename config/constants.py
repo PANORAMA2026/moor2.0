@@ -8,13 +8,17 @@ Definizione delle costanti globali dell'applicazione.
 DB_FILE_PATH = "./openmooring.db"
 DB_PATH = "./openmooring.db"
 
+# Operational mooring utilization threshold. This is a project/company
+# operating criterion and must not be presented as a universal MEG4 limit.
+OPERATIONAL_MBL_LIMIT_PCT = 55.0
+
 # Offset delle piattaforme di osservazione rispetto a prua e poppa (in metri)
 OFFSET_PLATFORM_FWD_M = 27.0
 OFFSET_PLATFORM_AFT_M = 14.0
 
 # Fattori di conversione Unità di Misura (Kilonewton e Tonnellate metriche)
-KN_TO_TONS = 0.1019716    # 1 kN = ~0.102 tonnellate (t o MT)
-TONS_TO_KN = 9.80665      # 1 tonnellata = 9.80665 kN
+KN_TO_TONS = 0.1019716
+TONS_TO_KN = 9.80665
 
 # Coordinati Porti di Riferimento
 PORT_COORDINATES = {
@@ -29,46 +33,11 @@ PORT_COORDINATES = {
 
 # Layout Bitte di Default Banchina
 DEFAULT_BOLLARDS = [
-    {
-        "bollard_id": "B1",
-        "Posizione": "Prua",
-        "Dist_Inclinata_m": 18.0,
-        "Pendenza_deg": 12.0,
-        "SWL_Bitta_t": 100.0,
-        "Stato": "Operativa",
-    },
-    {
-        "bollard_id": "B2",
-        "Posizione": "Prua",
-        "Dist_Inclinata_m": 15.0,
-        "Pendenza_deg": 8.0,
-        "SWL_Bitta_t": 100.0,
-        "Stato": "Operativa",
-    },
-    {
-        "bollard_id": "B3",
-        "Posizione": "Prua",
-        "Dist_Inclinata_m": 22.0,
-        "Pendenza_deg": 5.0,
-        "SWL_Bitta_t": 80.0,
-        "Stato": "Operativa",
-    },
-    {
-        "bollard_id": "B4",
-        "Posizione": "Poppa",
-        "Dist_Inclinata_m": 20.0,
-        "Pendenza_deg": 6.0,
-        "SWL_Bitta_t": 80.0,
-        "Stato": "Operativa",
-    },
-    {
-        "bollard_id": "B5",
-        "Posizione": "Poppa",
-        "Dist_Inclinata_m": 16.0,
-        "Pendenza_deg": 10.0,
-        "SWL_Bitta_t": 100.0,
-        "Stato": "Operativa",
-    },
+    {"bollard_id": "B1", "Posizione": "Prua", "Dist_Inclinata_m": 18.0, "Pendenza_deg": 12.0, "SWL_Bitta_t": 100.0, "Stato": "Operativa"},
+    {"bollard_id": "B2", "Posizione": "Prua", "Dist_Inclinata_m": 15.0, "Pendenza_deg": 8.0, "SWL_Bitta_t": 100.0, "Stato": "Operativa"},
+    {"bollard_id": "B3", "Posizione": "Prua", "Dist_Inclinata_m": 22.0, "Pendenza_deg": 5.0, "SWL_Bitta_t": 80.0, "Stato": "Operativa"},
+    {"bollard_id": "B4", "Posizione": "Poppa", "Dist_Inclinata_m": 20.0, "Pendenza_deg": 6.0, "SWL_Bitta_t": 80.0, "Stato": "Operativa"},
+    {"bollard_id": "B5", "Posizione": "Poppa", "Dist_Inclinata_m": 16.0, "Pendenza_deg": 10.0, "SWL_Bitta_t": 100.0, "Stato": "Operativa"},
 ]
 
 # Dati di default nave
@@ -90,11 +59,5 @@ DEFAULT_SHIP = {
     "AFW": 2100.0,
     "ALW": 9500.0,
     "ALC": 1800.0,
-    "Wind_Load_Table": {
-        10: 12.5,
-        20: 50.0,
-        30: 112.5,
-        40: 200.0,
-        50: 312.5,
-    },
+    "Wind_Load_Table": {10: 12.5, 20: 50.0, 30: 112.5, 40: 200.0, 50: 312.5},
 }
