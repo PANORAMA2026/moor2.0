@@ -14,6 +14,32 @@ OpenMooring è uno strumento open-source scritto in Python per l'analisi statica
 ## Principio di affidabilità dei dati
 I risultati operativi devono essere basati su dati identificabili e tracciabili. L'applicazione non deve presentare valori simulati o di esempio come dati live, misure reali o risultati di calcolo.
 
+## Interactive Mooring Station Plan
+Il ramo `feature/interactive-mooring-plan` introduce una nuova architettura nella quale il database è la fonte unica per la configurazione geometrica:
+
+`DATABASE → COMPONENTS / CONNECTIONS → 2D PLAN ↔ 3D VIEW → CALCULATION`
+
+Il drawing tecnico resta una **reference layer**. Le coordinate e le connessioni di progetto non vengono dedotte automaticamente dal semplice aspetto grafico quando il dato non è disponibile.
+
+La prima stazione in fase di mappatura è la **AFT / Poppa**. Il drawing `006242A2C010105_01_101832731607(1)` fornisce identificazione e descrizione di numerosi equipment (winch, bollard, Panama chock, universal fairlead, vertical guide roller ed external roller). Questi dati sono presenti nel catalogo sorgente `core/mooring_station_catalog.py`; le posizioni rimangono da calibrare sul drawing reale.
+
+### Geometria delle linee
+Il modello iniziale rappresenta il percorso operativo come:
+
+`WINCH → FAIRLEAD / CHOCK → SHORE BOLLARD`
+
+Il programma calcola automaticamente la **centerline direction change** quando tutte le coordinate XYZ sono disponibili. Il **fairlead contact/wrap angle** rimane volutamente non valorizzato fino a quando diametro e geometria di contatto della fairlead sono disponibili. Non vengono inventati coefficienti di attrito.
+
+### Uso della nuova pagina
+La pagina Streamlit `2_Interactive_Mooring_Plan.py` permette di:
+1. caricare il pianetto reale;
+2. importare il catalogo equipment AFT derivato dal drawing;
+3. mappare componenti sul piano;
+4. associare Winch/Fairlead/Bollard alle linee presenti nell'inventario;
+5. visualizzare la configurazione nella vista 3D.
+
+La vista 3D contiene attualmente un **ship envelope visuale** basato sulle dimensioni principali della nave. Non viene utilizzato dal solver come geometria idrodinamica o strutturale.
+
 ## Installazione e Avvio
 1. Clona il repository.
 2. Installa le dipendenze da `requirements.txt`.
