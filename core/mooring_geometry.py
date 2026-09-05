@@ -29,7 +29,7 @@ def save_affine_calibration(station_name, points_px, points_xy_m):
     A=np.array([[float(p[0]),float(p[1]),1.0] for p in points_px]); Y=np.array([[float(p[0]),float(p[1])] for p in points_xy_m])
     if np.linalg.matrix_rank(A)<3: raise ValueError("Control points are collinear; calibration is undefined")
     C,*_=np.linalg.lstsq(A,Y,rcond=None); pred=A@C; rms=float(np.sqrt(np.mean(np.sum((pred-Y)**2,axis=1))))
-    conn=_conn(); conn.execute("""INSERT INTO mooring_plan_calibration(station_name,rms_error_m,method,a11,a12,a13,a21,a22,a23) VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(station_name) DO UPDATE SET rms_error_m=excluded.rms_error_m,method=excluded.method,a11=excluded.a11,a12=excluded.a12,a13=excluded.a13,a21=excluded.a21,a22=excluded.a22,a23=excluded.a23""",(station_name,rms,"AFFINE_3_POINT",float(C[0,0]),float(C[1,0]),float(C[2,0]),float(C[0,1]),float(C[1,1]),float(C[2,1]))); conn.commit(); conn.close(); return rms
+    conn=_conn(); conn.execute("""INSERT INTO mooring_plan_calibration(station_name,rms_error_m,method,a11,a12,a13,a21,a22,a23) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(station_name) DO UPDATE SET rms_error_m=excluded.rms_error_m,method=excluded.method,a11=excluded.a11,a12=excluded.a12,a13=excluded.a13,a21=excluded.a21,a22=excluded.a22,a23=excluded.a23""",(station_name,rms,"AFFINE_3_POINT",float(C[0,0]),float(C[1,0]),float(C[2,0]),float(C[0,1]),float(C[1,1]),float(C[2,1]))); conn.commit(); conn.close(); return rms
 
 def get_calibration(station_name):
     conn=_conn(); row=conn.execute("SELECT * FROM mooring_plan_calibration WHERE station_name=?",(station_name,)).fetchone(); conn.close()
