@@ -1,87 +1,53 @@
 """
 views/tab_history.py
 Storico ormeggi, degrado cavi e manutenzione predittiva.
+Uses the canonical line_life_history table instead of the legacy line_history table.
 """
 
 import pandas as pd
 import plotly.express as px
 import streamlit as st
-
-
-def ensure_table_exists(conn):
-    """Crea la tabella 'line_history' se non esiste usando executescript per evitare errori SQL."""
-    try:
-        cursor = conn.cursor()
-        schema_sql = """
-        CREATE TABLE IF NOT EXISTS line_history (
-            line_id TEXT PRIMARY KEY,
-            line_name TEXT,
-            cert_id TEXT,
-            accumulated_hours REAL DEFAULT 0.0,
-            high_load_hours REAL DEFAULT 0.0,
-            max_design_hours REAL DEFAULT 2000.0,
-            fatigue_index REAL DEFAULT 0.0
-        );
-        """
-        cursor.executescript(schema_sql)
-        conn.commit()
-    except Exception as e:
-        st.sidebar.warning(f"Note DB: {e}")
+from database.db_manager import get_line_history
 
 
 def get_lines_health_status():
-    if "db_conn" not in st.session_state or st.session_state.db_conn is None:
-        return pd.DataFrame()
-
-    conn = st.session_state.db_conn
-
-    # Garanzia della presenza della tabella nel database
-    ensure_table_exists(conn)
-
-    # Esecuzione query in sicurezza
-    try:
-        df = pd.read_sql_query("SELECT * FROM line_history", conn)
-    except Exception:
-        # Se la tabella è vuota o inaccessibile restituisce dataframe vuoto senza crash
-        return pd.DataFrame()
-
+    """Return line health calculated from the canonical persistent history."""
+    df = get_line_history().copy()
     if df.empty:
         return df
 
-    # Inizializzazione colonne mancanti con valori di default
-    default_cols = {
-        "max_design_hours": 2000.0,
-        "accumulated_hours": 0.0,
-        "fatigue_index": 0.0,
-        "line_name": "Line",
-        "line_id": "-",
-        "cert_id": "-",
-        "high_load_hours": 0.0
+    numeric_defaults = {
+        "total_hours": 0.0,
+        "accumulated_stress_index": 0.0,
+        "wear_percentage": 0,
     }
-    for col, default_val in default_cols.items():
+    for col, default in numeric_defaults.items():
         if col not in df.columns:
-            df[col] = default_val
-        elif col in ["max_design_hours", "accumulated_hours", "fatigue_index"]:
-            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(default_val)
+            df[col] = default
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(default)
 
+    # Preserve the existing operational health concept while using the canonical
+    # accumulated-history fields. The limits are intentionally explicit so the
+    # result is not confused with a manufacturer-certified remaining-life value.
+    max_design_hours = 2000.0
+    stress_reference = 300.0
     health_percent = []
     recommendations = []
 
     for _, row in df.iterrows():
-        max_h = row["max_design_hours"] if row["max_design_hours"] > 0 else 2000.0
-        hours_used_pct = (row["accumulated_hours"] / max_h) * 100.0
-        fatigue_pct = (row["fatigue_index"] / 300.0) * 100.0
-        wear_pct = max(hours_used_pct, fatigue_pct)
+        hours_used_pct = max(0.0, float(row["total_hours"])) / max_design_hours * 100.0
+        stress_pct = max(0.0, float(row["accumulated_stress_index"])) / stress_reference * 100.0
+        recorded_wear = max(0.0, float(row.get("wear_percentage", 0.0)))
+        wear_pct = max(hours_used_pct, stress_pct, recorded_wear)
         remaining_health = max(0.0, 100.0 - wear_pct)
-
-        health_percent.append(remaining_health)
+        health_percent.append(round(remaining_health, 2))
 
         if remaining_health <= 20.0:
-            recommendations.append("🚨 SOSTITUZIONE IMMINENTE: Cavo a fine vita utile!")
+            recommendations.append("🚨 SOSTITUZIONE IMMINENTE: richiedere valutazione tecnica.")
         elif remaining_health <= 40.0:
-            recommendations.append("⚠️ ISPEZIONE: Valutare rotazione testa-coda (End-for-End).")
+            recommendations.append("⚠️ ISPEZIONE: programmare verifica e valutare end-for-end se applicabile.")
         else:
-            recommendations.append("✅ IDONEO: Condizioni operative regolari.")
+            recommendations.append("✅ Nessuna azione automatica indicata dal solo storico.")
 
     df["Health_Percent"] = health_percent
     df["Recommendation"] = recommendations
@@ -90,37 +56,44 @@ def get_lines_health_status():
 
 def render_tab_history():
     st.header("📈 Registro Storico Usura & Suggerimento Sostituzione Cavi")
+    st.caption(
+        "Lo storico operativo proviene da line_life_history. L'indice Health è un indicatore interno "
+        "e non rappresenta una certificazione di vita residua del cavo."
+    )
 
     health_df = get_lines_health_status()
-
-    if not health_df.empty:
-        fig_health = px.bar(
-            health_df,
-            x="line_name",
-            y="Health_Percent",
-            color="Health_Percent",
-            color_continuous_scale=["red", "yellow", "green"],
-            range_color=[0, 100],
-        )
-        fig_health.add_hline(
-            y=20,
-            line_dash="dash",
-            line_color="red",
-            annotation_text="Soglia Sostituzione (20%)",
-        )
-        st.plotly_chart(fig_health, use_container_width=True)
-
-        cols_to_display = [
-            "line_id",
-            "line_name",
-            "cert_id",
-            "accumulated_hours",
-            "high_load_hours",
-            "Health_Percent",
-            "Recommendation",
-        ]
-        available_cols = [c for c in cols_to_display if c in health_df.columns]
-
-        st.dataframe(health_df[available_cols], use_container_width=True)
-    else:
+    if health_df.empty:
         st.info("Nessun dato di storico ancora registrato nel database.")
+        return
+
+    fig_health = px.bar(
+        health_df,
+        x="line_id",
+        y="Health_Percent",
+        color="Health_Percent",
+        color_continuous_scale=["red", "yellow", "green"],
+        range_color=[0, 100],
+    )
+    fig_health.add_hline(
+        y=20,
+        line_dash="dash",
+        line_color="red",
+        annotation_text="Soglia di attenzione (20%)",
+    )
+    st.plotly_chart(fig_health, use_container_width=True)
+
+    cols_to_display = [
+        "line_id",
+        "last_port",
+        "current_setup",
+        "applied_tension_mbl_pct",
+        "total_hours",
+        "accumulated_stress_index",
+        "wear_percentage",
+        "Health_Percent",
+        "status",
+        "last_inspection",
+        "Recommendation",
+    ]
+    available_cols = [c for c in cols_to_display if c in health_df.columns]
+    st.dataframe(health_df[available_cols], use_container_width=True)
